@@ -182,12 +182,9 @@ class BaseCollateFn(object):
                     target_sr=16000,
                     channel_selector="average" # average two channels
                 ).samples
-                # Ensure it's a standard numpy array (fix numpy version compatibility)
+                # Force convert to a fresh numpy array (fix torch.from_numpy compatibility)
                 import numpy as np
-                if not isinstance(feature, np.ndarray):
-                    feature = np.array(feature)
-                else:
-                    feature = np.ascontiguousarray(feature)
+                feature = np.array(feature, dtype=np.float32, copy=True)
                 batch_features.append(feature)
 
             for transcription in item["transcription_list"]:
