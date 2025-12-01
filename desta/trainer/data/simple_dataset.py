@@ -431,10 +431,12 @@ class BaseAudioTextDataset(object):
         examples["target"] = targets
         examples["length"] = lengths
 
-        # Log batch statistics (only if there are skipped samples)
+        # Log batch statistics occasionally (use hash of first id to sample ~1% of batches)
         skipped_total = skipped_empty_messages + skipped_no_audio_markers
-        if skipped_total > 0:
-            logging.info(f"Batch stats: total={total_samples}, processed={processed_samples}, skipped={skipped_total} (empty_messages={skipped_empty_messages}, no_audio_markers={skipped_no_audio_markers})")
+        if skipped_total > 0 and len(examples["id"]) > 0:
+            # Only log approximately every 100 batches by sampling based on hash
+            if hash(examples["id"][0]) % 100 == 0:
+                logging.info(f"Batch stats: total={total_samples}, processed={processed_samples}, skipped={skipped_total} (empty_messages={skipped_empty_messages}, no_audio_markers={skipped_no_audio_markers})")
 
         return examples
 
