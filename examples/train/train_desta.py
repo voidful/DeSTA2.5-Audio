@@ -117,7 +117,7 @@ def main(cfg: DictConfig):
         warmup_steps=cfg.optim.sched.warmup_steps,
         logging_steps=cfg.trainer.log_every_n_steps,
         save_strategy="epoch" if cfg.trainer.enable_checkpointing else "no",
-        evaluation_strategy="steps" if isinstance(cfg.trainer.val_check_interval, int) else "epoch", # Simplified
+        eval_strategy="steps" if isinstance(cfg.trainer.val_check_interval, int) else "epoch", # Simplified
         eval_steps=cfg.trainer.val_check_interval if isinstance(cfg.trainer.val_check_interval, int) else None,
         bf16="bf16" in cfg.trainer.precision,
         fp16="fp16" in cfg.trainer.precision,
