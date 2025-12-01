@@ -1,0 +1,28 @@
+train_ds:
+  data_root: "/work/voidful2nlp/desta"
+  manifest_filepaths:
+    - "/work/voidful2nlp/desta/qwen3_desta_v4.jsonl"
+
+  batch_sampler: null
+  max_seq_length: 300
+  batch_size: 12
+  shuffle: True
+  pin_memory: True
+  num_workers: 4
+  drop_last: True
+  return_seed: False
+  answer_shift: 0
+
+validation_ds:
+  batch_sampler: null
+  data_root: "/work/voidful2nlp/desta"
+  manifest_filepaths:
+    - "/work/voidful2nlp/desta/val_v4.jsonl"
+  max_seq_length: 512
+  batch_size: 4
+  shuffle: False
+  pin_memory: True
+  num_workers: 0
+  drop_last: True
+  return_seed: False
+
