@@ -1,10 +1,19 @@
+import os
+
+# Disable wandb on non-main processes BEFORE any other imports
+# Check multiple rank environment variables for different launchers
+_local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
+_global_rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
+if _local_rank != 0 or _global_rank != 0:
+    os.environ["WANDB_DISABLED"] = "true"
+    os.environ["WANDB_MODE"] = "disabled"
+
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from desta.trainer.desta_trainer import DeSTA25Trainer
 from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config
 import logging
 from lulutils import get_unique_filepath
-import os
 import torch
 from desta.utils.utils import run
 from transformers import TrainingArguments
@@ -12,11 +21,6 @@ from desta.trainer.data.simple_dataset import BaseAudioTextDataset
 
 @hydra.main(config_path="config", config_name="desta25")
 def main(cfg: DictConfig):
-    # Disable wandb on non-main processes BEFORE any wandb import
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if local_rank != 0:
-        os.environ["WANDB_DISABLED"] = "true"
-    
     os.makedirs(cfg.exp_dir, exist_ok=True)
 
     # resume training from checkpoint or init from pretrained weights
