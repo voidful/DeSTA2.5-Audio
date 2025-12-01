@@ -34,15 +34,23 @@ def setup_logging(is_main_process: bool = True):
     """Configure logging format. Only main process logs at INFO level."""
     root_logger = logging.getLogger()
     
+    # Remove existing handlers to avoid duplicates
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
     if not is_main_process:
         root_logger.setLevel(logging.WARNING)
+        # Add a null handler or a warning-only handler if needed, 
+        # but usually we just want silence on non-main
         return
     
+    root_logger.setLevel(logging.INFO)
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
     )
-    for handler in root_logger.handlers:
-        handler.setFormatter(formatter)
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    root_logger.addHandler(handler)
 
 
 def load_pretrained_weights(model: DeSTA25AudioModel, checkpoint_path: str):
