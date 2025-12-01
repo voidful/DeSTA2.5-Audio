@@ -13,11 +13,10 @@ _global_rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
 _is_main_process = (_local_rank == 0 and _global_rank == 0)
 
 if not _is_main_process:
-    os.environ["WANDB_DISABLED"] = "true"
-    os.environ["WANDB_MODE"] = "disabled"
     # Suppress verbose output on non-main processes (but keep stderr for errors)
     os.environ["TRANSFORMERS_VERBOSITY"] = "error"
     os.environ["DATASETS_VERBOSITY"] = "error"
+    os.environ["WANDB_SILENT"] = "true"
     import logging
     logging.basicConfig(level=logging.ERROR)
     # Only redirect stdout (keep stderr for error messages)
@@ -119,7 +118,7 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         bf16="bf16" in cfg.trainer.precision,
         fp16="fp16" in cfg.trainer.precision,
         optim="adafactor",
-        report_to="wandb",
+        report_to="wandb" if _is_main_process else "none",
         run_name=cfg.name,
         remove_unused_columns=False,
         label_names=["labels"],
