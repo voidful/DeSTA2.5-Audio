@@ -381,6 +381,7 @@ class BaseAudioTextDataset(object):
             
             if has_start_end_tags:
                 # Use <start_audio>...<end_audio> format
+                # Returns processed string directly
                 audio_context, start_positions = _prepare_audio_context_with_start_end_tags(
                     text=audio_context,
                     audio_size_list=audio_size_list,
@@ -390,13 +391,15 @@ class BaseAudioTextDataset(object):
                 )
             elif num_audio_locators > 0:
                 # Use <|AUDIO|> format
-                audio_context, start_positions = _prepare_audio_context_and_start_positions(
+                # Returns token list, need to convert to string
+                audio_context_tokens, start_positions = _prepare_audio_context_and_start_positions(
                     token_list=self.tokenizer.tokenize(audio_context), 
                     audio_locator=self.audio_locator,
                     audio_size_list=audio_size_list,
                     transcription_size_list=transcription_size_list,
                     placeholder_token=self.placeholder_token
                 )
+                audio_context = self.tokenizer.convert_tokens_to_string(audio_context_tokens)
             else:
                 # No audio markers found - skip this sample
                 audio_context_list.append("")
@@ -404,8 +407,6 @@ class BaseAudioTextDataset(object):
                 audio_list.append([])
                 skipped_no_audio_markers += 1
                 continue
-
-            audio_context = self.tokenizer.convert_tokens_to_string(audio_context)
             audio_context_list.append(audio_context)
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
