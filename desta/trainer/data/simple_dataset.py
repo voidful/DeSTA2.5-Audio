@@ -221,7 +221,12 @@ class BaseAudioTextDataset(object):
             num_proc=8
         )
 
-        logging.info(f"Dataset length: {len(self.dataset)}")
+        # Filter out invalid samples (empty messages or no audio context)
+        original_len = len(self.dataset)
+        self.dataset = self.dataset.filter(lambda x: x["length"] > 0 and len(x["audio_context"]) > 0)
+        filtered_len = len(self.dataset)
+        
+        logging.info(f"Dataset length: {filtered_len} (filtered {original_len - filtered_len} invalid samples)")
 
         self.collate_fn = BaseCollateFn(data_cfg=data_cfg, tokenizer=self.tokenizer, processor=self.processor)
 
@@ -245,17 +250,37 @@ class BaseAudioTextDataset(object):
 
         # gather all audios from all messages
         batch_audios = []
-        for messages in examples["messages"]:
+        for idx, (messages, sample_id) in enumerate(zip(examples["messages"], examples["id"])):
             _a = []
             if messages:  # Check if messages is not None or empty
                 for message in messages:
                     if message and message.get("audios"):
-                        _a.extend(message["audios"])
+                        for audio_item in message["audios"]:
+                            # If audio path is null, use the sample id as the audio path
+                            if audio_item.get("audio") is None:
+                                audio_item["audio"] = sample_id
+                            _a.append(audio_item)
             batch_audios.append(_a)
             
         examples["audios"] = batch_audios
 
+        # Filter out samples with empty messages
+        valid_indices = []
+        for idx, messages in enumerate(examples["messages"]):
+            if messages and len(messages) > 0:
+                valid_indices.append(idx)
+            else:
+                logging.warning(f"Skipping sample at index {idx} with empty messages")
+
         for idx, (messages, audios) in enumerate(zip(examples["messages"], examples["audios"])):
+            # Skip empty messages
+            if not messages or len(messages) == 0:
+                audio_context_list.append("")
+                start_positions_list.append([])
+                audio_list.append([])
+                transcription_list.append([])
+                continue
+                
             try:
                 audio_context = self.tokenizer.apply_chat_template(
                     messages,
@@ -266,12 +291,11 @@ class BaseAudioTextDataset(object):
                 logging.error(f"Error processing messages at index {idx}: {messages}")
                 raise e
             
-            if len(audios) != audio_context.count(self.audio_locator):
-                logging.warning(f"Number of audios {len(audios)} does not match number of audio locators {audio_context.count(self.audio_locator)} at index {idx}")
-                # Skip this sample or handle mismatch
-                if len(audios) == 0 and audio_context.count(self.audio_locator) > 0:
-                    logging.error(f"No audios found but audio locators present at index {idx}")
-                    raise ValueError(f"No audios found but audio locators present at index {idx}, messages: {messages}")
+            # Check for audio locator - support both <|AUDIO|> and legacy format
+            num_audio_locators = audio_context.count(self.audio_locator)
+            
+            if num_audio_locators != len(audios):
+                logging.warning(f"Number of audios {len(audios)} does not match number of audio locators {num_audio_locators} at index {idx}")
 
 
             # modify audio_filepath to be absolute path
@@ -319,8 +343,19 @@ class BaseAudioTextDataset(object):
         examples["transcription_list"] = transcription_list # list of list of transcription ids
         examples["audios"] = audio_list # list of list of audio dicts
 
-        examples["target"] = [target + self.tokenizer.eos_token for target in examples["response"]]
-        examples["length"] = [len(self.tokenizer.tokenize(audio_context + target)) for audio_context, target in zip(examples["audio_context"], examples["response"])]
+        # Handle target and length calculation, skip invalid samples
+        targets = []
+        lengths = []
+        for audio_context, response in zip(examples["audio_context"], examples["response"]):
+            if audio_context and response:
+                targets.append(response + self.tokenizer.eos_token)
+                lengths.append(len(self.tokenizer.tokenize(audio_context + response)))
+            else:
+                targets.append("")
+                lengths.append(0)
+        
+        examples["target"] = targets
+        examples["length"] = lengths
 
         return examples
 
