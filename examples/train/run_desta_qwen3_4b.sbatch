@@ -5,7 +5,7 @@
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=8
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=96
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
@@ -63,7 +63,7 @@ echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
 echo "========================================" >> ${exp_dir}/run_info.txt
 
 # ===== 啟動訓練 (使用 torchrun 進行 DDP 分布式訓練) =====
-NUM_GPUS=8
+NUM_GPUS=4
 
 torchrun --nproc_per_node=${NUM_GPUS} \
     ${ROOT_DIR}/examples/train/train_desta.py \

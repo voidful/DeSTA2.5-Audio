@@ -179,6 +179,7 @@ def main(cfg: DictConfig):
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=train_dataset.collate_fn,
+        processing_class=model.tokenizer,  # Pass tokenizer for new transformers API
         cfg=cfg
     )
     
