@@ -1,85 +1,80 @@
-import torch
-from transformers import Trainer
-from desta.utils.utils import run
-from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config, GenerationOutput
-import logging
-from desta.trainer.data.simple_dataset import BaseAudioTextDataset
-from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoFeatureExtractor
-import os
+"""
+DeSTA2.5-Audio Custom Trainer
+
+This module provides a custom HuggingFace Trainer for the DeSTA2.5-Audio model
+with evaluation and prediction capabilities.
+"""
 import json
-from omegaconf import OmegaConf, DictConfig
-from collections import OrderedDict, defaultdict
-from pathlib import Path
-from lulutils import get_unique_filepath
-from desta.utils.metrics import ConsecutiveWordsAccuracyMetric
+import logging
+import os
 import time
-import math
-from typing import Dict, List, Optional, Union, Any
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+import torch
+from omegaconf import DictConfig, OmegaConf
+from transformers import Trainer
+
+from desta.models.modeling_desta25 import DeSTA25AudioModel
+from desta.utils.metrics import ConsecutiveWordsAccuracyMetric
+from desta.utils.utils import run
+from lulutils import get_unique_filepath
+
 
 class DeSTA25Trainer(Trainer):
     """
     Custom Trainer for DeSTA2.5-Audio model.
-    Inherits from HuggingFace Transformers Trainer.
+    
+    Extends HuggingFace Transformers Trainer with:
+    - Custom loss computation with perplexity logging
+    - Evaluation with generation and accuracy metrics
+    - Prediction reports in JSONL format
     """
+    
     def __init__(self, model: DeSTA25AudioModel, cfg: DictConfig, **kwargs):
         """
         Initialize the trainer.
 
         Args:
-            model (DeSTA25AudioModel): The model to train.
-            cfg (DictConfig): The configuration object.
-            **kwargs: Additional arguments passed to the parent Trainer class.
+            model: The DeSTA25AudioModel to train
+            cfg: Configuration object with model and training settings
+            **kwargs: Additional arguments for parent Trainer
         """
         super().__init__(model=model, **kwargs)
         self.cfg = cfg
         self.metrics = ConsecutiveWordsAccuracyMetric()
-        self.prediction_step_outputs = []
+        self.prediction_step_outputs: List[Dict[str, Any]] = []
 
-    def compute_loss(self, model: DeSTA25AudioModel, inputs: Dict[str, torch.Tensor], return_outputs: bool = False, num_items_in_batch: int = None):
-        """
-        Compute the loss for a batch of inputs.
-
-        Args:
-            model (DeSTA25AudioModel): The model.
-            inputs (Dict[str, torch.Tensor]): The inputs to the model.
-            return_outputs (bool, optional): Whether to return the outputs. Defaults to False.
-            num_items_in_batch (int, optional): Number of items in the batch. Defaults to None.
-
-        Returns:
-            Union[torch.Tensor, Tuple[torch.Tensor, Any]]: The loss or a tuple of (loss, outputs).
-        """
-        # HF Trainer passes labels in inputs if the collator includes them
+    def compute_loss(
+        self, 
+        model: DeSTA25AudioModel, 
+        inputs: Dict[str, torch.Tensor], 
+        return_outputs: bool = False,
+        num_items_in_batch: Optional[int] = None
+    ):
+        """Compute loss with perplexity logging."""
         outputs = model(**inputs)
         loss = outputs.loss
         
-        # Log perplexity
         perplexity = torch.exp(loss)
         self.log({"train/loss": loss.item(), "train/ppl": perplexity.item()})
         
         return (loss, outputs) if return_outputs else loss
 
-    def evaluate(self, eval_dataset: Optional[Any] = None, ignore_keys: Optional[List[str]] = None, metric_key_prefix: str = "eval") -> Dict[str, float]:
-        """
-        Run evaluation and return metrics.
-
-        Args:
-            eval_dataset (Optional[Any], optional): The evaluation dataset. Defaults to None.
-            ignore_keys (Optional[List[str]], optional): Keys to ignore. Defaults to None.
-            metric_key_prefix (str, optional): Prefix for metric keys. Defaults to "eval".
-
-        Returns:
-            Dict[str, float]: The evaluation metrics.
-        """
-        # Custom evaluation loop to match the original PL logic
+    def evaluate(
+        self, 
+        eval_dataset: Optional[Any] = None,
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval"
+    ) -> Dict[str, float]:
+        """Run evaluation with generation and accuracy metrics."""
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         self.model.eval()
         
         all_losses = []
         all_ppls = []
         self.prediction_step_outputs = []
-        
-        start_time = time.time()
         
         for batch in eval_dataloader:
             batch = self._prepare_inputs(batch)
@@ -92,7 +87,6 @@ class DeSTA25Trainer(Trainer):
                 all_losses.append(loss.item())
                 all_ppls.append(perplexity.item())
                 
-                # Prediction step
                 self._predict_step(batch)
 
         # Compute average metrics
@@ -106,7 +100,7 @@ class DeSTA25Trainer(Trainer):
         
         # Generate report
         report = self._write_report()
-        metrics[f"{metric_key_prefix}_accuracy"] = report["accuracy_by_sample"]
+        metrics[f"{metric_key_prefix}_accuracy"] = report.get("accuracy_by_sample", 0)
         
         self.log(metrics)
         self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, metrics)
@@ -114,25 +108,24 @@ class DeSTA25Trainer(Trainer):
         return metrics
 
     def _predict_step(self, batch: Dict[str, Any]):
-        """
-        Perform a prediction step.
+        """Perform a single prediction step with generation."""
+        gen_kwargs = self.cfg.model.generation_kwargs
+        
+        generated_ids = self.model._generate_step(
+            batch,
+            pad_token_id=self.tokenizer.eos_token_id,
+            temperature=gen_kwargs.temperature,
+            top_p=gen_kwargs.top_p,
+            max_new_tokens=gen_kwargs.max_new_tokens,
+            do_sample=gen_kwargs.do_sample,
+        )
 
-        Args:
-            batch (Dict[str, Any]): The batch of data.
-        """
-        # Logic from original predict_step
-        generated_ids = self.model._generate_step(batch, 
-                                                  pad_token_id=self.tokenizer.eos_token_id,
-                                                  temperature=self.cfg.model.generation_kwargs.temperature,
-                                                  top_p=self.cfg.model.generation_kwargs.top_p,
-                                                  max_new_tokens=self.cfg.model.generation_kwargs.max_new_tokens,
-                                                  do_sample=self.cfg.model.generation_kwargs.do_sample,
-                                                  ) # batched
-
+        # Replace -100 with eos_token_id for decoding
         batch["context_input_ids"][batch["context_input_ids"] == -100] = self.tokenizer.eos_token_id
         batch["labels"][batch["labels"] == -100] = self.tokenizer.eos_token_id
         generated_ids[generated_ids == -100] = self.tokenizer.eos_token_id
 
+        # Decode
         contexts = self.tokenizer.batch_decode(batch["context_input_ids"], skip_special_tokens=False)
         labels = self.tokenizer.batch_decode(batch["labels"], skip_special_tokens=True)
         preds = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
@@ -147,42 +140,40 @@ class DeSTA25Trainer(Trainer):
             self.prediction_step_outputs.append(metadata)
 
     def _write_report(self) -> Dict[str, Any]:
-        """
-        Write the evaluation report to a file.
-
-        Returns:
-            Dict[str, Any]: The report data.
-        """
+        """Write evaluation report to file."""
         dataset_name = "val"
-        os.makedirs(f"{self.cfg.exp_dir}/results/{dataset_name}", exist_ok=True)
-        output_path = f"{self.cfg.exp_dir}/results/{dataset_name}/val@ep={self.state.epoch}-{self.state.global_step}.jsonl"
+        results_dir = f"{self.cfg.exp_dir}/results/{dataset_name}"
+        os.makedirs(results_dir, exist_ok=True)
+        
+        output_path = f"{results_dir}/val@ep={self.state.epoch}-{self.state.global_step}.jsonl"
 
-        return self.write_to_file(
+        return self._save_results(
             results=self.prediction_step_outputs,
-            filepath=output_path, 
-            cfg=self.cfg,
-            ckpt=f"ep={self.state.epoch}-{self.state.global_step}",
-            write_report=True
+            filepath=output_path,
+            ckpt=f"ep={self.state.epoch}-{self.state.global_step}"
         )
 
-    def write_to_file(self, results: List[Dict[str, Any]], filepath: Union[str, Path], cfg: Optional[DictConfig] = None, ckpt: Optional[str] = None, write_report: bool = True) -> Dict[str, Any]:
+    def _save_results(
+        self, 
+        results: List[Dict[str, Any]], 
+        filepath: Union[str, Path],
+        ckpt: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Write results to a JSONL file and optionally generate a report.
-
+        Save prediction results to JSONL and generate accuracy report.
+        
         Args:
-            results (List[Dict[str, Any]]): The results to write.
-            filepath (Union[str, Path]): The path to the output file.
-            cfg (Optional[DictConfig], optional): The configuration. Defaults to None.
-            ckpt (Optional[str], optional): The checkpoint name. Defaults to None.
-            write_report (bool, optional): Whether to write a report file. Defaults to True.
-
+            results: List of prediction results
+            filepath: Output file path
+            ckpt: Checkpoint identifier
+            
         Returns:
-            Dict[str, Any]: The report data if write_report is True, else None.
+            Report dictionary with accuracy metrics
         """
         filepath = Path(filepath)
-        
         categories_accuracy = defaultdict(list)
         
+        # Create predictions file
         jsonl_path = Path(get_unique_filepath(filepath.parent / "preds" / filepath.name))
         os.makedirs(jsonl_path.parent, exist_ok=True)
 
@@ -190,37 +181,40 @@ class DeSTA25Trainer(Trainer):
             for i, result in enumerate(results):
                 result["correct"] = self.metrics(result["prediction"], result["label"])
                 result["index"] = i
-                f.write(json.dumps(result) + "\n")
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
                 categories_accuracy[result.get("category", "all")].append(result["correct"])
 
-        if write_report:
-            # Report
-            report_path = jsonl_path.parent.parent / jsonl_path.name.replace(".jsonl", "-report.json")
+        # Create report
+        report_path = jsonl_path.parent.parent / jsonl_path.name.replace(".jsonl", "-report.json")
+        
+        # Clean up results for report (remove verbose fields)
+        cleaned_results = []
+        for result in results:
+            clean = {k: v for k, v in result.items() if k not in ["context", "audio_context"]}
+            cleaned_results.append(clean)
 
-            reported_results = []
-            for i, result in enumerate(results):
-                # remove context and audio_context for better readability (too long!)
-                if "context" in result: del result["context"]
-                if "audio_context" in result: del result["audio_context"]
-                reported_results.append(result)
+        total_correct = sum(r["correct"] for r in cleaned_results) if cleaned_results else 0
+        total_samples = len(cleaned_results) if cleaned_results else 1
+        
+        report = {
+            "metric": self.metrics.metric_name,
+            "preds_path": str(jsonl_path),
+            "accuracy_by_sample": total_correct / total_samples,
+            "avg_accuracy_by_category": (
+                sum(sum(v) / len(v) for v in categories_accuracy.values()) / len(categories_accuracy)
+                if categories_accuracy else 0
+            ),
+            "categories_accuracy": {k: sum(v) / len(v) for k, v in categories_accuracy.items()},
+            "ckpt": str(ckpt),
+            "results": cleaned_results,
+            "exp_dir": self.cfg.exp_dir,
+            "config": OmegaConf.to_container(self.cfg, resolve=True),
+            "commit": run("git rev-parse HEAD"),
+            "name": "DeSTA2.5-Audio",
+        }
+        
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
 
-            report = {
-                "metric": self.metrics.metric_name,
-                "preds_path": str(jsonl_path),
-                "accuracy_by_sample": sum([reported_results[i]["correct"] for i in range(len(reported_results))]) / len(reported_results) if reported_results else 0,
-                "avg_accuracy_by_category": sum([sum(v) / len(v) for v in categories_accuracy.values()]) if categories_accuracy else 0,
-                "categories_accuracy": dict([ (k, sum(v) / len(v)) for k, v in categories_accuracy.items()]),
-                "ckpt": str(ckpt),
-                "results": reported_results,
-                "exp_dir": self.cfg.exp_dir,
-                "config": OmegaConf.to_container(cfg, resolve=True) if cfg else {},
-                "commit": run("git rev-parse HEAD"),
-                "name": "DeSTA2.5-Audio",
-            }
-            with open(report_path, "w") as f:
-                json.dump(report, f, indent=2, ensure_ascii=False)
-
-            logging.info(f"Report saved to\n{report_path}\n")
-            print(f"Report saved to\n{report_path}\n")
-
-            return report
+        logging.info(f"Report saved to {report_path}")
+        return report
