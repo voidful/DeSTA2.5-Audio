@@ -384,8 +384,8 @@ class BaseAudioTextDataset:
                 logging.info(f"[DEBUG] First sample audio_context preview (first 500 chars):")
                 logging.info(f"  {audio_context[:500] if len(audio_context) > 500 else audio_context}")
                 logging.info(f"[DEBUG] Looking for audio_locator: '{self.audio_locator}'")
-                logging.info(f"[DEBUG] Count of audio_locator in audio_context: {audio_context.count(self.audio_locator)}")
-                logging.info(f"[DEBUG] Has <start_audio>: {'<start_audio>' in audio_context}")
+                logging.info(f"[DEBUG] Count of <|AUDIO|> markers: {audio_context.count(self.audio_locator)}")
+                logging.info(f"[DEBUG] Has <start_audio>...<end_audio> blocks: {bool(re.search(r'<start_audio>.*?<end_audio>', audio_context, re.DOTALL))}")
 
             # Check if there are any audios
             if not audios:
@@ -433,10 +433,14 @@ class BaseAudioTextDataset:
             transcription_list.append(transcriptions)
 
             # Process audio markers
-            has_start_end = "<start_audio>" in audio_context and "<end_audio>" in audio_context
+            # Check for actual <start_audio>...<end_audio> blocks (not just mentions in text)
+            # A real audio block looks like: <start_audio>some content<end_audio>
+            import re
+            start_end_pattern = r'<start_audio>.*?<end_audio>'
+            has_start_end_blocks = bool(re.search(start_end_pattern, audio_context, re.DOTALL))
             num_locators = audio_context.count(self.audio_locator)
 
-            if has_start_end:
+            if has_start_end_blocks:
                 audio_context, start_positions = _prepare_audio_context_with_start_end_tags(
                     text=audio_context,
                     audio_size_list=audio_size_list,
