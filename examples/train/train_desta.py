@@ -12,6 +12,11 @@ from desta.trainer.data.simple_dataset import BaseAudioTextDataset
 
 @hydra.main(config_path="config", config_name="desta25")
 def main(cfg: DictConfig):
+    # Disable wandb on non-main processes BEFORE any wandb import
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank != 0:
+        os.environ["WANDB_DISABLED"] = "true"
+    
     os.makedirs(cfg.exp_dir, exist_ok=True)
 
     # resume training from checkpoint or init from pretrained weights
@@ -105,10 +110,6 @@ def main(cfg: DictConfig):
         processor=model.processor
     )
 
-    # Determine if this is the main process (for wandb)
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    is_main_process = local_rank == 0
-    
     # Training Arguments
     training_args = TrainingArguments(
         output_dir=cfg.exp_dir,
@@ -126,7 +127,7 @@ def main(cfg: DictConfig):
         bf16="bf16" in cfg.trainer.precision,
         fp16="fp16" in cfg.trainer.precision,
         optim="adafactor", # Requested by user
-        report_to=["wandb"] if (hasattr(cfg, "wandb") and is_main_process) else [],
+        report_to="wandb" if hasattr(cfg, "wandb") else "none",
         run_name=cfg.name,
         remove_unused_columns=False, # Important for custom datasets
         label_names=["labels"],
