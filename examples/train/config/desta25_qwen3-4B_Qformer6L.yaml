@@ -37,7 +37,7 @@ model:
     freeze: True
 
   encoder:
-    model_id: openai/whisper-large-v3
+    model_id: openai/whisper-large-v3-turbo
     freeze: True
 
   connector:
