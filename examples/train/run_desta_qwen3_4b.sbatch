@@ -23,6 +23,9 @@ conda activate desta25-qwen3
 # 切換到工作目錄
 cd /work/voidful2nlp/DeSTA2.5-Audio
 
+# 確保 numpy < 2.0 (避免 torch.from_numpy 相容性問題)
+pip install "numpy<2.0" -q 2>/dev/null || true
+
 # 設定環境變數
 export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 export HF_HOME=/work/voidful2nlp/.cache/huggingface
