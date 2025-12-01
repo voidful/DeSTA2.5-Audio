@@ -72,13 +72,13 @@ python examples/train/train_desta.py \
     --config-name=${config} \
     trainer.devices=${DEVICES} \
     +dataset=${dataset_config} \
-    +exp_dir=${exp_dir} \
+    ++exp_dir=${exp_dir} \
     project=${project} \
     name=${name} \
-    +dataset.train_ds.data_root=${DATA_ROOT} \
-    +dataset.validation_ds.data_root=${DATA_ROOT} \
-    +resume_from_checkpoint=null \
-    +init_from_pretrained_weights=null \
+    ++dataset.train_ds.data_root=${DATA_ROOT} \
+    ++dataset.validation_ds.data_root=${DATA_ROOT} \
+    ++resume_from_checkpoint=null \
+    ++init_from_pretrained_weights=null \
     "$@"  # 傳遞額外參數
 
 echo "Training finished at $(date)"

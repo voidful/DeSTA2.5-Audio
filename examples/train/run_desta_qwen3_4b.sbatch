@@ -65,13 +65,13 @@ srun python ${ROOT_DIR}/examples/train/train_desta.py \
     --config-name=${config} \
     trainer.devices=[0,1,2,3,4,5,6,7] \
     +dataset=${dataset_config} \
-    +exp_dir=${exp_dir} \
+    ++exp_dir=${exp_dir} \
     project=${project} \
     name=${name} \
-    +dataset.train_ds.data_root=/work/voidful2nlp/desta \
-    +dataset.validation_ds.data_root=/work/voidful2nlp/desta \
-    +resume_from_checkpoint=null \
-    +init_from_pretrained_weights=null
+    ++dataset.train_ds.data_root=/work/voidful2nlp/desta \
+    ++dataset.validation_ds.data_root=/work/voidful2nlp/desta \
+    ++resume_from_checkpoint=null \
+    ++init_from_pretrained_weights=null
 
 echo "Training finished at $(date)" >> ${exp_dir}/run_info.txt
 
