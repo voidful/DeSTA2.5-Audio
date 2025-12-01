@@ -113,7 +113,7 @@ class DeSTA25Trainer(Trainer):
         
         generated_ids = self.model._generate_step(
             batch,
-            pad_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.processing_class.eos_token_id,
             temperature=gen_kwargs.temperature,
             top_p=gen_kwargs.top_p,
             max_new_tokens=gen_kwargs.max_new_tokens,
@@ -121,14 +121,14 @@ class DeSTA25Trainer(Trainer):
         )
 
         # Replace -100 with eos_token_id for decoding
-        batch["context_input_ids"][batch["context_input_ids"] == -100] = self.tokenizer.eos_token_id
-        batch["labels"][batch["labels"] == -100] = self.tokenizer.eos_token_id
-        generated_ids[generated_ids == -100] = self.tokenizer.eos_token_id
+        batch["context_input_ids"][batch["context_input_ids"] == -100] = self.processing_class.eos_token_id
+        batch["labels"][batch["labels"] == -100] = self.processing_class.eos_token_id
+        generated_ids[generated_ids == -100] = self.processing_class.eos_token_id
 
         # Decode
-        contexts = self.tokenizer.batch_decode(batch["context_input_ids"], skip_special_tokens=False)
-        labels = self.tokenizer.batch_decode(batch["labels"], skip_special_tokens=True)
-        preds = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        contexts = self.processing_class.batch_decode(batch["context_input_ids"], skip_special_tokens=False)
+        labels = self.processing_class.batch_decode(batch["labels"], skip_special_tokens=True)
+        preds = self.processing_class.batch_decode(generated_ids, skip_special_tokens=True)
         
         # Record predictions
         for context, label, pred, metadata in zip(contexts, labels, preds, batch["metadata"]):
