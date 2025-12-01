@@ -1,6 +1,7 @@
 import datasets
 import logging
 import os
+import re
 import torch
 from typing import List, Dict, Any
 from omegaconf import DictConfig
@@ -9,6 +10,73 @@ from transformers import AutoTokenizer, AutoFeatureExtractor
 from desta.utils.audio import AudioSegment
 from desta.models.modeling_desta25 import _prepare_audio_context_and_start_positions
 from lulutils import resolve_filepath
+
+
+def _prepare_audio_context_with_start_end_tags(
+    text: str,
+    audio_size_list: List[int],
+    transcription_size_list: List[int],
+    placeholder_token: str,
+    tokenizer,
+    start_tag: str = "<start_audio>",
+    end_tag: str = "<end_audio>"
+):
+    """
+    Process text with <start_audio>...<end_audio> format.
+    Replace each <start_audio>...<end_audio> block with placeholder tokens.
+    
+    Args:
+        text: Input text containing <start_audio>...<end_audio> blocks
+        audio_size_list: List of audio feature sizes (prompt_size) for each audio
+        transcription_size_list: List of transcription token sizes for each audio
+        placeholder_token: Token to use as placeholder
+        tokenizer: Tokenizer for tokenizing the text
+        start_tag: Start tag for audio block
+        end_tag: End tag for audio block
+    
+    Returns:
+        Tuple of (processed_text, start_positions)
+    """
+    # Find all <start_audio>...<end_audio> blocks
+    pattern = re.escape(start_tag) + r'.*?' + re.escape(end_tag)
+    matches = list(re.finditer(pattern, text, re.DOTALL))
+    
+    if len(matches) != len(audio_size_list):
+        logging.warning(f"Number of audio blocks ({len(matches)}) does not match audio_size_list ({len(audio_size_list)})")
+    
+    # Process text: replace each block with placeholders
+    result_tokens = []
+    start_positions = []
+    last_end = 0
+    audio_idx = 0
+    
+    for match in matches:
+        # Add tokens before this match
+        prefix_text = text[last_end:match.start()]
+        if prefix_text:
+            result_tokens.extend(tokenizer.tokenize(prefix_text, add_special_tokens=False))
+        
+        # Record start position
+        start_positions.append(len(result_tokens))
+        
+        # Add placeholder tokens for audio features + transcription
+        if audio_idx < len(audio_size_list) and audio_idx < len(transcription_size_list):
+            audio_size = audio_size_list[audio_idx]
+            transcription_size = transcription_size_list[audio_idx]
+            result_tokens.extend([placeholder_token] * (audio_size + transcription_size))
+        
+        audio_idx += 1
+        last_end = match.end()
+    
+    # Add remaining text after last match
+    suffix_text = text[last_end:]
+    if suffix_text:
+        result_tokens.extend(tokenizer.tokenize(suffix_text, add_special_tokens=False))
+    
+    # Convert tokens back to string
+    processed_text = tokenizer.convert_tokens_to_string(result_tokens)
+    
+    return processed_text, start_positions
 
 def _resolve_audio_filepath(audio_filepath):
     """
@@ -291,13 +359,6 @@ class BaseAudioTextDataset(object):
                 logging.error(f"Error processing messages at index {idx}: {messages}")
                 raise e
             
-            # Check for audio locator - support both <|AUDIO|> and legacy format
-            num_audio_locators = audio_context.count(self.audio_locator)
-            
-            if num_audio_locators != len(audios):
-                logging.warning(f"Number of audios {len(audios)} does not match number of audio locators {num_audio_locators} at index {idx}")
-
-
             # modify audio_filepath to be absolute path
             new_audios = []
             for audio_dict in audios:
@@ -325,13 +386,35 @@ class BaseAudioTextDataset(object):
             ]
             transcription_list.append(transcriptions)
 
-            audio_context, start_positions = _prepare_audio_context_and_start_positions(
-                token_list=self.tokenizer.tokenize(audio_context), 
-                audio_locator=self.audio_locator,
-                audio_size_list=audio_size_list,
-                transcription_size_list=transcription_size_list,
-                placeholder_token=self.placeholder_token
-            )
+            # Check for audio format - support both <|AUDIO|> and <start_audio>...<end_audio>
+            has_start_end_tags = "<start_audio>" in audio_context and "<end_audio>" in audio_context
+            num_audio_locators = audio_context.count(self.audio_locator)
+            
+            if has_start_end_tags:
+                # Use <start_audio>...<end_audio> format
+                audio_context, start_positions = _prepare_audio_context_with_start_end_tags(
+                    text=audio_context,
+                    audio_size_list=audio_size_list,
+                    transcription_size_list=transcription_size_list,
+                    placeholder_token=self.placeholder_token,
+                    tokenizer=self.tokenizer
+                )
+            elif num_audio_locators > 0:
+                # Use <|AUDIO|> format
+                audio_context, start_positions = _prepare_audio_context_and_start_positions(
+                    token_list=self.tokenizer.tokenize(audio_context), 
+                    audio_locator=self.audio_locator,
+                    audio_size_list=audio_size_list,
+                    transcription_size_list=transcription_size_list,
+                    placeholder_token=self.placeholder_token
+                )
+            else:
+                # No audio markers found - skip this sample
+                logging.warning(f"No audio markers found at index {idx}, skipping")
+                audio_context_list.append("")
+                start_positions_list.append([])
+                audio_list.append([])
+                continue
 
             audio_context = self.tokenizer.convert_tokens_to_string(audio_context)
             audio_context_list.append(audio_context)
