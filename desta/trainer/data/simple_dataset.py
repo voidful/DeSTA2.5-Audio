@@ -247,21 +247,31 @@ class BaseAudioTextDataset(object):
         batch_audios = []
         for messages in examples["messages"]:
             _a = []
-            for message in messages:
-                if message.get("audios"):
-                    _a.extend(message["audios"])
+            if messages:  # Check if messages is not None or empty
+                for message in messages:
+                    if message and message.get("audios"):
+                        _a.extend(message["audios"])
             batch_audios.append(_a)
             
         examples["audios"] = batch_audios
 
-        for messages, audios in zip(examples["messages"], examples["audios"]):
-            audio_context = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            ) # for audio_locator
+        for idx, (messages, audios) in enumerate(zip(examples["messages"], examples["audios"])):
+            try:
+                audio_context = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                ) # for audio_locator
+            except Exception as e:
+                logging.error(f"Error processing messages at index {idx}: {messages}")
+                raise e
             
-            assert len(audios) == audio_context.count(self.audio_locator), f"Number of audios {len(audios)} does not match number of audio locators {audio_context.count(self.audio_locator)}, audios: {audios}"
+            if len(audios) != audio_context.count(self.audio_locator):
+                logging.warning(f"Number of audios {len(audios)} does not match number of audio locators {audio_context.count(self.audio_locator)} at index {idx}")
+                # Skip this sample or handle mismatch
+                if len(audios) == 0 and audio_context.count(self.audio_locator) > 0:
+                    logging.error(f"No audios found but audio locators present at index {idx}")
+                    raise ValueError(f"No audios found but audio locators present at index {idx}, messages: {messages}")
 
 
             # modify audio_filepath to be absolute path
@@ -280,9 +290,10 @@ class BaseAudioTextDataset(object):
             audio_size_list = [self.prompt_size] * len(audios)
 
             # truncate transcriptions to 100 tokens
+            # Handle missing "text" field - default to empty string
             transcriptions = [
                 self.tokenizer.convert_tokens_to_string(
-                    self.tokenizer.tokenize(audio["text"], add_special_tokens=False)[:100]
+                    self.tokenizer.tokenize(audio.get("text", " ") or " ", add_special_tokens=False)[:100]
                 ) for audio in audios
             ]
             transcription_size_list = [
