@@ -286,7 +286,8 @@ class BaseAudioTextDataset(object):
             self._preprocess_function,
             batched=True,
             batch_size=256,
-            num_proc=8
+            num_proc=1,  # Use single process to avoid cache conflicts
+            load_from_cache_file=False  # Disable cache to avoid type conflicts
         )
 
         # Filter out invalid samples (empty messages or no audio context)
@@ -323,7 +324,7 @@ class BaseAudioTextDataset(object):
         skipped_no_audio_markers = 0
         processed_samples = 0
 
-        # gather all audios from all messages
+        # gather all audios from all messages (don't modify original audios column)
         batch_audios = []
         for idx, (messages, sample_id) in enumerate(zip(examples["messages"], examples["id"])):
             _a = []
@@ -331,15 +332,16 @@ class BaseAudioTextDataset(object):
                 for message in messages:
                     if message and message.get("audios"):
                         for audio_item in message["audios"]:
-                            # If audio path is null, use the sample id as the audio path
-                            if audio_item.get("audio") is None:
-                                audio_item["audio"] = sample_id
-                            _a.append(audio_item)
+                            # Make a copy and fix null audio path
+                            new_item = dict(audio_item)
+                            if new_item.get("audio") is None:
+                                new_item["audio"] = sample_id
+                            _a.append(new_item)
             batch_audios.append(_a)
-            
-        examples["audios"] = batch_audios
+        
+        # Use a temporary variable, don't overwrite original audios column
 
-        for idx, (messages, audios) in enumerate(zip(examples["messages"], examples["audios"])):
+        for idx, (messages, audios) in enumerate(zip(examples["messages"], batch_audios)):
             # Skip empty messages
             if not messages or len(messages) == 0:
                 audio_context_list.append("")
