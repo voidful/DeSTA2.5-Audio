@@ -6,13 +6,17 @@ Supports multi-GPU training with SLURM and torchrun.
 """
 import os
 
-# Disable wandb on non-main processes BEFORE any other imports
-# Check multiple rank environment variables for different launchers
+# Disable wandb and verbose logging on non-main processes BEFORE any other imports
 _local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
 _global_rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
-if _local_rank != 0 or _global_rank != 0:
+_is_main_process = (_local_rank == 0 and _global_rank == 0)
+
+if not _is_main_process:
     os.environ["WANDB_DISABLED"] = "true"
     os.environ["WANDB_MODE"] = "disabled"
+    # Suppress logging on non-main processes
+    import logging
+    logging.basicConfig(level=logging.WARNING)
 
 import logging
 import hydra
@@ -26,9 +30,14 @@ from desta.trainer.data.simple_dataset import BaseAudioTextDataset
 from desta.utils.utils import run
 
 
-def setup_logging():
-    """Configure logging format."""
+def setup_logging(is_main_process: bool = True):
+    """Configure logging format. Only main process logs at INFO level."""
     root_logger = logging.getLogger()
+    
+    if not is_main_process:
+        root_logger.setLevel(logging.WARNING)
+        return
+    
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
     )
@@ -113,8 +122,10 @@ def main(cfg: DictConfig):
     """Main training function."""
     # Setup
     os.makedirs(cfg.exp_dir, exist_ok=True)
-    setup_logging()
-    log_git_info()
+    setup_logging(_is_main_process)
+    
+    if _is_main_process:
+        log_git_info()
     
     # Parse checkpoint configs
     cfg.resume_from_checkpoint = cfg.resume_from_checkpoint if cfg.resume_from_checkpoint != "null" else None

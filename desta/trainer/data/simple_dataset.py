@@ -435,7 +435,6 @@ class BaseAudioTextDataset:
             # Process audio markers
             # Check for actual <start_audio>...<end_audio> blocks (not just mentions in text)
             # A real audio block looks like: <start_audio>some content<end_audio>
-            import re
             start_end_pattern = r'<start_audio>.*?<end_audio>'
             has_start_end_blocks = bool(re.search(start_end_pattern, audio_context, re.DOTALL))
             num_locators = audio_context.count(self.audio_locator)
