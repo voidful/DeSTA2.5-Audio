@@ -282,12 +282,16 @@ class BaseAudioTextDataset(object):
             "json", data_files=[resolve_filepath(manifest_filepath) for manifest_filepath in self.manifest_filepaths]
         )["train"]
 
+        # Disable caching completely to avoid multi-process conflicts
+        datasets.disable_caching()
+        
         self.dataset = self.dataset.map(
             self._preprocess_function,
             batched=True,
             batch_size=256,
-            num_proc=1,  # Use single process to avoid cache conflicts
-            load_from_cache_file=False  # Disable cache to avoid type conflicts
+            num_proc=1,
+            load_from_cache_file=False,
+            keep_in_memory=True  # Keep in memory to avoid file conflicts
         )
 
         # Filter out invalid samples (empty messages or no audio context)
