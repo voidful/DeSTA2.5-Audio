@@ -4,9 +4,9 @@
 #SBATCH --partition=normal
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=96
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
 #SBATCH --output=./slurm-report/desta_qwen3_4b_%j.out
@@ -62,11 +62,13 @@ echo "Dataset Config: ${dataset_config}" >> ${exp_dir}/run_info.txt
 echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
 echo "========================================" >> ${exp_dir}/run_info.txt
 
-# ===== 啟動訓練 =====
-srun python ${ROOT_DIR}/examples/train/train_desta.py \
+# ===== 啟動訓練 (使用 torchrun 進行 DDP 分布式訓練) =====
+NUM_GPUS=8
+
+torchrun --nproc_per_node=${NUM_GPUS} \
+    ${ROOT_DIR}/examples/train/train_desta.py \
     --config-path=config \
     --config-name=${config} \
-    trainer.devices=[0,1,2,3,4,5,6,7] \
     +dataset=${dataset_config} \
     ++exp_dir=${exp_dir} \
     project=${project} \
