@@ -176,7 +176,7 @@ class BaseCollateFn(object):
       
 
             # Prepare audio inputs
-            for audio_dict in item["audios"]:
+            for audio_dict in item["processed_audios"]:
                 feature = AudioSegment.from_file(
                     audio_dict["audio"],
                     target_sr=16000,
@@ -291,7 +291,7 @@ class BaseAudioTextDataset(object):
 
         # Filter out invalid samples (empty messages or no audio context)
         original_len = len(self.dataset)
-        self.dataset = self.dataset.filter(lambda x: x["length"] > 0 and len(x["audio_context"]) > 0)
+        self.dataset = self.dataset.filter(lambda x: x["length"] > 0 and len(x["audio_context"]) > 0 and len(x["processed_audios"]) > 0)
         filtered_len = len(self.dataset)
         skipped_count = original_len - filtered_len
         skip_ratio = (skipped_count / original_len * 100) if original_len > 0 else 0
@@ -426,7 +426,7 @@ class BaseAudioTextDataset(object):
         examples["audio_context"] = audio_context_list
         examples["start_positions"] = start_positions_list # list of list of start positions
         examples["transcription_list"] = transcription_list # list of list of transcription ids
-        examples["audios"] = audio_list # list of list of audio dicts
+        examples["processed_audios"] = audio_list # list of list of audio dicts (use different name to avoid type conflicts)
 
         # Handle target and length calculation, skip invalid samples
         targets = []
