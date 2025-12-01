@@ -305,16 +305,12 @@ class BaseAudioTextDataset(object):
         start_positions_list = []
         audio_list = []
         transcription_list = []
-
-        # merge colums: response -> target
-        # if "response" in examples:
-        #     if examples.get("target") is None: 
-        #         # only reponse
-        #         examples["target"] = examples["response"]
-        #     else:
-        #         for i in range(len(examples["response"])):
-        #             if examples["response"][i] is not None:
-        #                 examples["target"][i] = examples["response"][i]
+        
+        # Counters for logging
+        total_samples = len(examples["messages"])
+        skipped_empty_messages = 0
+        skipped_no_audio_markers = 0
+        processed_samples = 0
 
         # gather all audios from all messages
         batch_audios = []
@@ -332,14 +328,6 @@ class BaseAudioTextDataset(object):
             
         examples["audios"] = batch_audios
 
-        # Filter out samples with empty messages
-        valid_indices = []
-        for idx, messages in enumerate(examples["messages"]):
-            if messages and len(messages) > 0:
-                valid_indices.append(idx)
-            else:
-                logging.warning(f"Skipping sample at index {idx} with empty messages")
-
         for idx, (messages, audios) in enumerate(zip(examples["messages"], examples["audios"])):
             # Skip empty messages
             if not messages or len(messages) == 0:
@@ -347,6 +335,7 @@ class BaseAudioTextDataset(object):
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
+                skipped_empty_messages += 1
                 continue
                 
             try:
@@ -410,16 +399,17 @@ class BaseAudioTextDataset(object):
                 )
             else:
                 # No audio markers found - skip this sample
-                logging.warning(f"No audio markers found at index {idx}, skipping")
                 audio_context_list.append("")
                 start_positions_list.append([])
                 audio_list.append([])
+                skipped_no_audio_markers += 1
                 continue
 
             audio_context = self.tokenizer.convert_tokens_to_string(audio_context)
             audio_context_list.append(audio_context)
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
+            processed_samples += 1
         
         examples["audio_context"] = audio_context_list
         examples["start_positions"] = start_positions_list # list of list of start positions
@@ -439,6 +429,11 @@ class BaseAudioTextDataset(object):
         
         examples["target"] = targets
         examples["length"] = lengths
+
+        # Log batch statistics (only if there are skipped samples)
+        skipped_total = skipped_empty_messages + skipped_no_audio_markers
+        if skipped_total > 0:
+            logging.info(f"Batch stats: total={total_samples}, processed={processed_samples}, skipped={skipped_total} (empty_messages={skipped_empty_messages}, no_audio_markers={skipped_no_audio_markers})")
 
         return examples
 
