@@ -10,7 +10,7 @@
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
 #SBATCH --output=./slurm-report/desta_qwen3_4b_%j.out
-#SBATCH --error=./slurm-report/desta_qwen3_4b_%j.err
+#SBATCH --error=./slurm-report/desta_qwen3_4b_%j.out
 
 # ===== 環境設定 =====
 # 載入 Anaconda/Miniconda module (依 cluster 調整)
