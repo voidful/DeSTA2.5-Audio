@@ -33,7 +33,7 @@ trainer:
 
 model:
   llm:
-    model_id: Qwen/Qwen3-0.6B
+    model_id: Qwen/Qwen3-4B-Instruct-2507
     freeze: True
 
   encoder:
