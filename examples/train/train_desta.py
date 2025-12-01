@@ -97,7 +97,7 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         bf16="bf16" in cfg.trainer.precision,
         fp16="fp16" in cfg.trainer.precision,
         optim="adafactor",
-        report_to="wandb" if hasattr(cfg, "wandb") else "none",
+        report_to="wandb",
         run_name=cfg.name,
         remove_unused_columns=False,
         label_names=["labels"],
