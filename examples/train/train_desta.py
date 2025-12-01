@@ -15,14 +15,13 @@ _is_main_process = (_local_rank == 0 and _global_rank == 0)
 if not _is_main_process:
     os.environ["WANDB_DISABLED"] = "true"
     os.environ["WANDB_MODE"] = "disabled"
-    # Suppress ALL output on non-main processes
+    # Suppress verbose output on non-main processes (but keep stderr for errors)
     os.environ["TRANSFORMERS_VERBOSITY"] = "error"
     os.environ["DATASETS_VERBOSITY"] = "error"
     import logging
     logging.basicConfig(level=logging.ERROR)
-    # Redirect stdout/stderr to devnull for non-main processes
+    # Only redirect stdout (keep stderr for error messages)
     sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
 
 import logging
 import hydra
