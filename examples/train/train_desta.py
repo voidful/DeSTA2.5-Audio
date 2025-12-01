@@ -1,30 +1,17 @@
-import pytorch_lightning as pl
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from desta.trainer.pl_trainer import DeSTA25AudioPLModule
-from pytorch_lightning.loggers import WandbLogger
+from desta.trainer.desta_trainer import DeSTA25Trainer
+from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config
 import logging
 from lulutils import get_unique_filepath
-from pytorch_lightning.callbacks import RichModelSummary, ModelCheckpoint
 import os
-from pytorch_lightning.callbacks import LearningRateMonitor
 import torch
-from pytorch_lightning.strategies import DDPStrategy
-from pytorch_lightning.utilities.model_summary import ModelSummary
 from desta.utils.utils import run
-from desta.trainer.callbacks import HuggingfaceCallback
+from transformers import TrainingArguments
+from desta.trainer.data.simple_dataset import BaseAudioTextDataset
 
-class CustomStrategy(DDPStrategy):
-    def load_model_state_dict(self, checkpoint, strict=False):
-        if checkpoint is None:
-            return
-        self.lightning_module.load_state_dict(checkpoint["state_dict"], strict=False)
-
-
-
-@hydra.main(config_path="conf", config_name="desta25")
+@hydra.main(config_path="config", config_name="desta25")
 def main(cfg: DictConfig):
-    pl.seed_everything(42)
     os.makedirs(cfg.exp_dir, exist_ok=True)
 
     # resume training from checkpoint or init from pretrained weights
@@ -41,23 +28,60 @@ def main(cfg: DictConfig):
 
     working_dir = os.getcwd()
 
-    # wandb logger
-    if hasattr(cfg, "wandb") and cfg.project != "debug":
-        wandb_logger = WandbLogger(
-            project=cfg.project,
-            save_dir=working_dir,
-            log_model=False,
-            name=cfg.name,
-        )
-    else:
-        wandb_logger = None
+    # Model Config
+    model_config = DeSTA25Config(
+        llm_model_id=cfg.model.llm.model_id,
+        encoder_model_id=cfg.model.encoder.model_id,
+        connector_mode=cfg.model.connector.mode,
+        qformer_num_hidden_layers=cfg.model.connector.num_hidden_layers,
+        prompt_size=cfg.model.connector.prompt_size,
+        use_lora=cfg.model.llm.use_lora if hasattr(cfg.model.llm, "use_lora") else False,
+        audio_locator=cfg.model.audio_locator,
+        placeholder_token=cfg.model.placeholder_token,
+    )
+
+    print("="*100)
+    model = DeSTA25AudioModel(model_config)
+    model.config.train_id = 30678 # Keep legacy ID
     
-    ptl_module = DeSTA25AudioPLModule(cfg)
+    # remove whisper decoder (we only use Whisper decoder during inference/validation if needed, but for training we might not need it if we only use encoder)
+    # However, the original code removed it. 
+    # Note: If validation uses generate(), it might need decoder if it uses WhisperForConditionalGeneration.
+    # The original code: del self.model.perception.whisper.model.decoder
+    # But validation uses self.perception.whisper.generate() which needs decoder?
+    # Let's check modeling_desta25.py again.
+    # In generate(): self.perception.whisper.generate(...)
+    # If decoder is deleted, this will fail.
+    # But original code deleted it: 
+    # del self.model.perception.whisper.model.decoder
+    # del self.model.perception.whisper.proj_out
+    # Maybe original validation didn't use whisper generation?
+    # In modeling_desta25.py:
+    # if asr_features: ... transcriptions = self.perception.whisper.generate(...)
+    # So it DOES use it.
+    # This implies the original code might have been broken for ASR generation during validation if it deleted the decoder, 
+    # OR the original code re-initialized it or something?
+    # Or maybe the original code only ran ASR if not deleted?
+    # Actually, let's keep it safe and NOT delete it for now, or check if we can offload it.
+    # The user request is to refactor.
+    # I will comment out the deletion to be safe, or delete it if I'm sure.
+    # Given the user wants to "support whisper large v3 turbo", maybe they want ASR.
+    # I'll keep it.
     
+    # Tokenizer & Processor
+    model._setup_generation() # This sets up tokenizer and processor
+
     if cfg.init_from_pretrained_weights is not None:
-        logging.info(
-            ptl_module.load_state_dict(torch.load(cfg.init_from_pretrained_weights)["state_dict"], strict=False)
-        )
+        logging.info(f"Loading pretrained weights from {cfg.init_from_pretrained_weights}")
+        state_dict = torch.load(cfg.init_from_pretrained_weights)["state_dict"]
+        # Remove "model." prefix if present (from PL)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("model."):
+                new_state_dict[k[6:]] = v
+            else:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict, strict=False)
 
     try:
         logging.info(f"{run('git rev-parse HEAD')}")
@@ -66,40 +90,57 @@ def main(cfg: DictConfig):
     except:
         pass
     
-    logging.info(f"PTL Module:\n{ptl_module}")
-
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='checkpoints/',
-        filename='{epoch}-{step}',
-        save_top_k=-1,
-        every_n_epochs=1,
-        verbose=True,
-    )
-
-    trainer = pl.Trainer(
-        logger=wandb_logger,
-        default_root_dir=working_dir,
-        strategy=CustomStrategy(),
-        callbacks=[
-            checkpoint_callback,
-            RichModelSummary(max_depth=4),
-            LearningRateMonitor(logging_interval="step"),
-            HuggingfaceCallback(cfg),
-        ],
-        # fast_dev_run=(cfg.project == "debug"),
-        **cfg.trainer
+    # Datasets
+    train_dataset = BaseAudioTextDataset(
+        cfg=cfg,
+        data_cfg=cfg.dataset.train_ds,
+        tokenizer=model.tokenizer,
+        processor=model.processor
     )
     
-    summary = ModelSummary(ptl_module, max_depth=5)
-    logging.info(summary)
-
-    OmegaConf.save(ptl_module.cfg, (f"{cfg.exp_dir}/config.yaml"))
-
-    trainer.fit(
-        ptl_module, 
-        ckpt_path=cfg.resume_from_checkpoint
+    val_dataset = BaseAudioTextDataset(
+        cfg=cfg,
+        data_cfg=cfg.dataset.validation_ds,
+        tokenizer=model.tokenizer,
+        processor=model.processor
     )
 
+    # Training Arguments
+    training_args = TrainingArguments(
+        output_dir=cfg.exp_dir,
+        num_train_epochs=cfg.trainer.max_epochs,
+        per_device_train_batch_size=cfg.dataset.train_ds.batch_size,
+        per_device_eval_batch_size=cfg.dataset.validation_ds.batch_size,
+        gradient_accumulation_steps=cfg.trainer.accumulate_grad_batches,
+        learning_rate=cfg.optim.lr,
+        weight_decay=cfg.optim.weight_decay,
+        warmup_steps=cfg.optim.sched.warmup_steps,
+        logging_steps=cfg.trainer.log_every_n_steps,
+        save_strategy="epoch" if cfg.trainer.enable_checkpointing else "no",
+        evaluation_strategy="steps" if isinstance(cfg.trainer.val_check_interval, int) else "epoch", # Simplified
+        eval_steps=cfg.trainer.val_check_interval if isinstance(cfg.trainer.val_check_interval, int) else None,
+        bf16="bf16" in cfg.trainer.precision,
+        fp16="fp16" in cfg.trainer.precision,
+        optim="adafactor", # Requested by user
+        report_to="wandb" if hasattr(cfg, "wandb") else "none",
+        run_name=cfg.name,
+        remove_unused_columns=False, # Important for custom datasets
+        label_names=["labels"],
+        ddp_find_unused_parameters=False,
+    )
+
+    trainer = DeSTA25Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=train_dataset.collate_fn,
+        cfg=cfg # Pass cfg for custom trainer logic
+    )
+    
+    OmegaConf.save(cfg, f"{cfg.exp_dir}/config.yaml")
+
+    trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
 
 if __name__ == "__main__":
     main()

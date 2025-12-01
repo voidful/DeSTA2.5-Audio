@@ -15,6 +15,7 @@
 
 
 ## ✨ News / Change logs
+- 🔥 2025/12/01: **Training refactor**: Migrated to HuggingFace Transformers Trainer with Adafactor optimizer. Added comprehensive documentation and unit tests.
 - 🚧 *Coming soon*: vLLM-based data construction script, detailed finetuning tutorials
 - 2025/07/23: Released **training scripts**. Now you can train your own DeSTA-Audio. [📘 Training README](docs/train.md)
 - 2025/07/21: Released **DeSTA-AQA-5M** dataset! [📘 Dataset README](docs/dataset.md) [🤗 DeSTA-AQA5M](https://huggingface.co/datasets/DeSTA-ntu/DeSTA-AQA5M-FROM-Llama3.1-8B-Instruct)
@@ -88,10 +89,43 @@ See [docs/dataset.md](docs/dataset.md) for more details.
 
 ## 🚆 Training & Finetuning
 
-See [docs/train.md](docs/train.md) for more details.
+**Latest Update**: The training pipeline has been refactored to use **HuggingFace Transformers Trainer** with **Adafactor optimizer**, replacing the previous PyTorch Lightning and Apex dependencies.
+
+### Key Features
+- ✅ **HuggingFace Trainer**: Industry-standard training framework
+- ✅ **Adafactor Optimizer**: Memory-efficient adaptive learning rate optimizer
+- ✅ **Whisper Large V3 Turbo**: Support for the latest Whisper model variant
+- ✅ **Comprehensive Documentation**: Type hints and docstrings throughout the codebase
+- ✅ **Unit Tests**: Verified components with pytest
+
+### Quick Start
 
 ```bash
-bash example/train/train_example.sh
+# Train with default configuration (debug mode)
+cd examples/train
+python train_desta.py --config-name desta25_debug +dataset=debug exp_dir=/tmp/desta_debug
+
+# Train with full configuration
+python train_desta.py --config-name desta25_llama31-8B_Qformer6L +dataset=DestaAQA-5M exp_dir=/path/to/output
+```
+
+### Configuration
+
+Training configurations are in `examples/train/config/`:
+- `desta25_debug.yaml`: For quick testing with small models
+- `desta25_llama31-8B_Qformer6L.yaml`: Full training configuration
+
+Key parameters:
+- `model.encoder.model_id`: `openai/whisper-large-v3` or `openai/whisper-large-v3-turbo`
+- `optim`: Adafactor optimizer (configured automatically via HF Trainer)
+- `trainer`: Training settings (devices, epochs, precision, etc.)
+
+See [docs/train.md](docs/train.md) for detailed training instructions.
+
+### Example Training Script
+
+```bash
+bash examples/train/train_example.sh
 ```
 
 ## 📚 Citation

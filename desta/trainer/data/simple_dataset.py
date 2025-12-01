@@ -2,6 +2,9 @@ import datasets
 import logging
 import os
 import torch
+from typing import List, Dict, Any
+from omegaconf import DictConfig
+from transformers import AutoTokenizer, AutoFeatureExtractor
 
 from desta.utils.audio import AudioSegment
 from desta.models.modeling_desta25 import _prepare_audio_context_and_start_positions
@@ -27,15 +30,31 @@ def _resolve_audio_filepath(audio_filepath):
 
 
 class BaseCollateFn(object):
-    def __init__(self, data_cfg, tokenizer, processor):
+    """
+    Collate function for BaseAudioTextDataset.
+    """
+    def __init__(self, data_cfg: DictConfig, tokenizer: AutoTokenizer, processor: AutoFeatureExtractor):
+        """
+        Initialize the collate function.
+
+        Args:
+            data_cfg (DictConfig): Data configuration.
+            tokenizer (AutoTokenizer): Tokenizer.
+            processor (AutoFeatureExtractor): Feature extractor.
+        """
         self.tokenizer = tokenizer
         self.processor = processor
         self.max_seq_length = data_cfg.max_seq_length
 
-    def __call__(self, batch):
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Prepare training batch:
-        Input:
+        Prepare training batch.
+
+        Args:
+            batch (List[Dict[str, Any]]): List of samples.
+
+        Returns:
+            Dict[str, Any]: Batched data.
         """
         # ====================
         # Prepare text inputs

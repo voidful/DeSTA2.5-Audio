@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from collections import OrderedDict
 import logging
+from typing import List, Optional, Tuple, Union
 
 from dataclasses import dataclass
 from desta.utils.audio import AudioSegment
@@ -43,7 +44,10 @@ def _prepare_audio_context_and_start_positions(
 
 
 class QformerConnector(nn.Module):
-    def __init__(self, config):
+    """
+    Connector module using Q-Former to bridge audio encoder and LLM.
+    """
+    def __init__(self, config: 'DeSTA25Config'):
         super().__init__()
         self.config = config
 
@@ -54,6 +58,8 @@ class QformerConnector(nn.Module):
         elif self.config.encoder_model_id == "openai/whisper-tiny":
             self.config.target_layer_ids = [0, 1, 2, 3]
         elif self.config.encoder_model_id == "openai/whisper-large-v3":
+            self.config.target_layer_ids = [7, 15, 23, 31]
+        elif self.config.encoder_model_id == "openai/whisper-large-v3-turbo":
             self.config.target_layer_ids = [7, 15, 23, 31]
         else:
             raise NotImplementedError(f"model_id {self.config.encoder_model_id} not implemented")
@@ -84,10 +90,15 @@ class QformerConnector(nn.Module):
             raise NotImplementedError(f"connector_mode {self.config.connector_mode} not implemented")
         
 
-    def forward(self, encoder_hidden_states):
+    def forward(self, encoder_hidden_states: List[torch.Tensor]) -> torch.Tensor:
         """
-        input: 
-            encoder_hidden_states: layerwise hidden states from the encoder
+        Forward pass of the QformerConnector.
+
+        Args:
+            encoder_hidden_states (List[torch.Tensor]): Layerwise hidden states from the encoder.
+
+        Returns:
+            torch.Tensor: Projected output features.
         """
         layer_prompt_outputs = []
         for idx, encoder_hidden_state in enumerate(encoder_hidden_states):
@@ -115,7 +126,10 @@ class GenerationOutput():
     text: list[str]
 
 class WhisperPerception(nn.Module):
-    def __init__(self, config):
+    """
+    Perception module using Whisper encoder.
+    """
+    def __init__(self, config: 'DeSTA25Config'):
         super().__init__()
         self.config = config
         self.whisper = WhisperForConditionalGeneration.from_pretrained(
@@ -124,7 +138,18 @@ class WhisperPerception(nn.Module):
         self.connector = QformerConnector(config)
 
 
-    def forward(self, input_features, attention_mask=None, transcription_embeddings_list=None, **kwargs):
+    def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, **kwargs) -> tuple[torch.Tensor, list[int]]:
+        """
+        Forward pass of the WhisperPerception.
+
+        Args:
+            input_features (torch.Tensor): Input mel features.
+            attention_mask (Optional[torch.Tensor], optional): Attention mask. Defaults to None.
+            transcription_embeddings_list (Optional[List[torch.Tensor]], optional): List of transcription embeddings. Defaults to None.
+
+        Returns:
+            tuple[torch.Tensor, list[int]]: Tuple of (audio_features, speech_feature_lengths).
+        """
         bs = input_features.size(0)
 
         audio_features = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list)
