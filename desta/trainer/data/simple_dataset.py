@@ -293,8 +293,19 @@ class BaseAudioTextDataset(object):
         original_len = len(self.dataset)
         self.dataset = self.dataset.filter(lambda x: x["length"] > 0 and len(x["audio_context"]) > 0)
         filtered_len = len(self.dataset)
+        skipped_count = original_len - filtered_len
+        skip_ratio = (skipped_count / original_len * 100) if original_len > 0 else 0
         
-        logging.info(f"Dataset length: {filtered_len} (filtered {original_len - filtered_len} invalid samples)")
+        logging.info(f"="*60)
+        logging.info(f"Dataset Statistics:")
+        logging.info(f"  Total samples: {original_len}")
+        logging.info(f"  Valid samples: {filtered_len}")
+        logging.info(f"  Skipped samples: {skipped_count} ({skip_ratio:.2f}%)")
+        logging.info(f"="*60)
+        
+        if filtered_len == 0:
+            logging.error("No valid samples found! Please check your data format.")
+            logging.error("Expected format: messages should be a non-empty list with audio markers")
 
         self.collate_fn = BaseCollateFn(data_cfg=data_cfg, tokenizer=self.tokenizer, processor=self.processor)
 
@@ -430,13 +441,6 @@ class BaseAudioTextDataset(object):
         
         examples["target"] = targets
         examples["length"] = lengths
-
-        # Log batch statistics occasionally (use hash of first id to sample ~1% of batches)
-        skipped_total = skipped_empty_messages + skipped_no_audio_markers
-        if skipped_total > 0 and len(examples["id"]) > 0:
-            # Only log approximately every 100 batches by sampling based on hash
-            if hash(examples["id"][0]) % 100 == 0:
-                logging.info(f"Batch stats: total={total_samples}, processed={processed_samples}, skipped={skipped_total} (empty_messages={skipped_empty_messages}, no_audio_markers={skipped_no_audio_markers})")
 
         return examples
 
