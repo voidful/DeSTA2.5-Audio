@@ -276,8 +276,15 @@ class BaseAudioTextDataset:
             keep_in_memory=True
         )
 
-        # Filter invalid samples
+        # Analyze skip reasons before filtering
         original_len = len(self.dataset)
+        
+        # Count skip reasons
+        no_length = sum(1 for x in self.dataset if x["length"] == 0)
+        no_audio_context = sum(1 for x in self.dataset if not x["audio_context"])
+        no_processed_audios = sum(1 for x in self.dataset if not x["processed_audios"])
+        
+        # Filter invalid samples
         self.dataset = self.dataset.filter(
             lambda x: x["length"] > 0 and len(x["audio_context"]) > 0 and len(x["processed_audios"]) > 0
         )
@@ -289,10 +296,31 @@ class BaseAudioTextDataset:
         logging.info(f"  Total samples: {original_len}")
         logging.info(f"  Valid samples: {filtered_len}")
         logging.info(f"  Skipped samples: {skipped} ({skipped/max(original_len,1)*100:.2f}%)")
+        logging.info("Skip Reasons (may overlap):")
+        logging.info(f"  - No length (empty response): {no_length}")
+        logging.info(f"  - No audio_context: {no_audio_context}")
+        logging.info(f"  - No processed_audios: {no_processed_audios}")
         logging.info("=" * 60)
+        
+        # Print sample of first valid and invalid examples for debugging
+        if skipped > 0 and original_len > 0:
+            # Find first invalid sample
+            for i, sample in enumerate(datasets.load_dataset(
+                "json", data_files=[resolve_filepath(fp) for fp in self.manifest_filepaths]
+            )["train"]):
+                if i >= 3:
+                    break
+                logging.info(f"Sample {i} keys: {list(sample.keys())}")
+                if "messages" in sample and sample["messages"]:
+                    msg = sample["messages"][0] if sample["messages"] else {}
+                    logging.info(f"  First message keys: {list(msg.keys()) if msg else 'empty'}")
+                    if msg.get("content"):
+                        content_preview = msg["content"][:200] if len(msg.get("content", "")) > 200 else msg.get("content", "")
+                        logging.info(f"  Content preview: {content_preview}...")
         
         if filtered_len == 0:
             logging.error("No valid samples found! Check data format.")
+            logging.error(f"Expected audio markers: '{self.audio_locator}' or '<start_audio>...<end_audio>'")
 
         self.collate_fn = BaseCollateFn(
             data_cfg=data_cfg, 
@@ -306,6 +334,14 @@ class BaseAudioTextDataset:
         start_positions_list = []
         audio_list = []
         transcription_list = []
+        
+        # Skip reason counters for diagnostics
+        skip_reasons = {
+            "empty_messages": 0,
+            "no_audio_markers": 0,
+            "audio_file_not_found": 0,
+            "no_audios_in_messages": 0,
+        }
 
         # Collect audios from messages
         batch_audios = []
@@ -329,6 +365,7 @@ class BaseAudioTextDataset:
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
+                skip_reasons["empty_messages"] += 1
                 continue
 
             # Apply chat template
@@ -342,22 +379,44 @@ class BaseAudioTextDataset:
                 logging.error(f"Error at index {idx}: {messages}")
                 raise e
 
+            # Check if there are any audios
+            if not audios:
+                audio_context_list.append("")
+                start_positions_list.append([])
+                audio_list.append([])
+                transcription_list.append([])
+                skip_reasons["no_audios_in_messages"] += 1
+                continue
+
             # Resolve audio paths
             new_audios = []
+            audio_not_found = False
             for audio_dict in audios:
-                audio_dict["audio"] = _resolve_audio_filepath(
-                    os.path.join(self.data_root, audio_dict["audio"])
-                )
-                new_audios.append(audio_dict)
+                try:
+                    audio_dict["audio"] = _resolve_audio_filepath(
+                        os.path.join(self.data_root, audio_dict["audio"])
+                    )
+                    new_audios.append(audio_dict)
+                except FileNotFoundError:
+                    audio_not_found = True
+                    break
+            
+            if audio_not_found:
+                audio_context_list.append("")
+                start_positions_list.append([])
+                audio_list.append([])
+                transcription_list.append([])
+                skip_reasons["audio_file_not_found"] += 1
+                continue
 
             # Prepare placeholder sizes
-            audio_size_list = [self.prompt_size] * len(audios)
+            audio_size_list = [self.prompt_size] * len(new_audios)
             
             # Truncate transcriptions to 100 tokens
             transcriptions = [
                 self.tokenizer.convert_tokens_to_string(
                     self.tokenizer.tokenize(audio.get("text", " ") or " ", add_special_tokens=False)[:100]
-                ) for audio in audios
+                ) for audio in new_audios
             ]
             transcription_size_list = [
                 len(self.tokenizer.tokenize(text, add_special_tokens=False)) 
@@ -391,11 +450,17 @@ class BaseAudioTextDataset:
                 audio_context_list.append("")
                 start_positions_list.append([])
                 audio_list.append([])
+                skip_reasons["no_audio_markers"] += 1
                 continue
 
             audio_context_list.append(audio_context)
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
+        
+        # Log skip reasons (only once per batch to reduce log spam)
+        total_skipped = sum(skip_reasons.values())
+        if total_skipped > 0:
+            logging.debug(f"Batch skip reasons: {skip_reasons}")
 
         # Set outputs
         examples["audio_context"] = audio_context_list
