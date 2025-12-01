@@ -476,9 +476,15 @@ class DeSTA25AudioModel(PreTrainedModel):
         assert len(self.tokenizer.tokenize(self.audio_locator)) == 1, "audio_locator must be a single token"
         assert len(self.tokenizer.tokenize(self.placeholder_token)) == 1, "placeholder_token must be a single token in the tokenizer"
 
-        # VAD
-        self.vad_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad')
-        (self.get_speech_timestamps, _, _, _, _) = utils
+        # VAD will be loaded lazily when needed (in generate())
+        self.vad_model = None
+        self.get_speech_timestamps = None
+
+    def _setup_vad(self):
+        """Lazy load VAD model only when needed for inference."""
+        if self.vad_model is None:
+            self.vad_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad')
+            (self.get_speech_timestamps, _, _, _, _) = utils
 
 
     def generate(self, messages,
@@ -552,6 +558,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 batch_features.append(feature)
 
                 # Run VAD detect if there is speech in the audio
+                self._setup_vad()  # Lazy load VAD model
                 is_speech = self.get_speech_timestamps(feature, self.vad_model)
                 if is_speech and trans is None:
                     asr_features.append(feature)
