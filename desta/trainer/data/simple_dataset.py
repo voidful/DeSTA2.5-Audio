@@ -379,13 +379,6 @@ class BaseAudioTextDataset:
                 logging.error(f"Error at index {idx}: {messages}")
                 raise e
             
-            # Debug: log first sample to check if audio_locator is preserved
-            if idx == 0 and len(audio_context_list) == 0:
-                logging.info(f"[DEBUG] First sample audio_context preview (first 500 chars):")
-                logging.info(f"  {audio_context[:500] if len(audio_context) > 500 else audio_context}")
-                logging.info(f"[DEBUG] Looking for audio_locator: '{self.audio_locator}'")
-                logging.info(f"[DEBUG] Count of <|AUDIO|> markers: {audio_context.count(self.audio_locator)}")
-                logging.info(f"[DEBUG] Has <start_audio>...<end_audio> blocks: {bool(re.search(r'<start_audio>.*?<end_audio>', audio_context, re.DOTALL))}")
 
             # Check if there are any audios
             if not audios:
