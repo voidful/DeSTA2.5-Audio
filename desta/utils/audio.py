@@ -222,15 +222,24 @@ class AudioSegment(object):
         """Convert sample type to float32.
         Audio sample type is usually integer or float-point.
         Integers will be scaled to [-1, 1] in float32.
+
+        Notes
+        -----
+        `np.sctypes` was removed in NumPy 2.0, so we rely on ``np.issubdtype``
+        checks to maintain compatibility with both NumPy 1.x and 2.x.
         """
         float32_samples = samples.astype('float32')
-        if samples.dtype in np.sctypes['int']:
+
+        # Integer types: scale to [-1, 1]
+        if np.issubdtype(samples.dtype, np.integer):
             bits = np.iinfo(samples.dtype).bits
             float32_samples *= 1.0 / 2 ** (bits - 1)
-        elif samples.dtype in np.sctypes['float']:
+        # Floating types are already in the correct range / type
+        elif np.issubdtype(samples.dtype, np.floating):
             pass
         else:
-            raise TypeError("Unsupported sample type: %s." % samples.dtype)
+            raise TypeError(f"Unsupported sample type: {samples.dtype}.")
+
         return float32_samples
 
     @classmethod
