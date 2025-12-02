@@ -387,6 +387,16 @@ class BaseAudioTextDataset:
         
         # Process each sample
         for idx, (messages, audios, seed_desc) in enumerate(zip(examples["messages"], batch_audios, seed_descriptions)):
+            # Debug: log first sample details
+            if idx == 0 and len(audio_context_list) == 0:
+                logging.info(f"[DEBUG] First sample: messages={bool(messages)}, audios={len(audios)}, seed_desc={bool(seed_desc)}")
+                if messages:
+                    for i, msg in enumerate(messages):
+                        content_preview = msg.get("content", "")[:100] if msg.get("content") else "None"
+                        has_audio_marker = self.audio_locator in msg.get("content", "") if msg.get("content") else False
+                        logging.info(f"[DEBUG]   msg[{i}] role={msg.get('role')}, has_audios={bool(msg.get('audios'))}, has_audio_marker={has_audio_marker}")
+                        logging.info(f"[DEBUG]   content preview: {content_preview}...")
+            
             # Handle empty messages
             if not messages:
                 audio_context_list.append("")
@@ -504,6 +514,7 @@ class BaseAudioTextDataset:
                 audio_context_list.append("")
                 start_positions_list.append([])
                 audio_list.append([])
+                transcription_list.append([])  # Bug fix: was missing this line
                 skip_reasons["no_audio_markers"] += 1
                 continue
 
@@ -511,10 +522,17 @@ class BaseAudioTextDataset:
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
         
-        # Log skip reasons (only once per batch to reduce log spam)
+        # Log skip reasons (always log to help debugging)
         total_skipped = sum(skip_reasons.values())
         if total_skipped > 0:
-            logging.debug(f"Batch skip reasons: {skip_reasons}")
+            logging.info(f"Batch skip reasons: {skip_reasons}")
+            # Log first skipped sample for debugging
+            if skip_reasons["no_audio_markers"] > 0:
+                logging.warning(f"  no_audio_markers: Check if '{self.audio_locator}' exists in content")
+            if skip_reasons["audio_file_not_found"] > 0:
+                logging.warning(f"  audio_file_not_found: Check data_root='{self.data_root}'")
+            if skip_reasons["no_audios_in_messages"] > 0:
+                logging.warning(f"  no_audios_in_messages: Check if 'audios' field exists in messages")
 
         # Set outputs
         examples["audio_context"] = audio_context_list
