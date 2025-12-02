@@ -334,14 +334,25 @@ class DeSTA25AudioModel(PreTrainedModel):
         """
 
         N_audio = len(batch_start_positions)
+        device = next(self.llm_model.parameters()).device
+        
+        # Handle empty audio case
+        if N_audio == 0:
+            return self.llm_model.model.embed_tokens(input_ids)
+        
+        # Ensure batch_features is on the correct device
+        if batch_features.device != device:
+            batch_features = batch_features.to(device)
         
         # Get list of transcription embeddings
         transcription_embeddings_list = []
         with torch.no_grad():
             for audio_batch_idx in range(N_audio):
-                transcription_embeddings = self.llm_model.model.embed_tokens(
-                    batch_transcription_ids[audio_batch_idx].squeeze(0)
-                ) # (length, dim)
+                # Ensure transcription_ids are on the correct device
+                trans_ids = batch_transcription_ids[audio_batch_idx].squeeze(0)
+                if trans_ids.device != device:
+                    trans_ids = trans_ids.to(device)
+                transcription_embeddings = self.llm_model.model.embed_tokens(trans_ids) # (length, dim)
                 transcription_embeddings_list.append(transcription_embeddings)
 
         # Forward speech encoder and connector

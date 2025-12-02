@@ -321,12 +321,32 @@ class BaseAudioTextDataset:
         if filtered_len == 0:
             logging.error("No valid samples found! Check data format.")
             logging.error(f"Expected audio markers: '{self.audio_locator}' or '<start_audio>...<end_audio>'")
+            logging.error(f"Data root: {self.data_root}")
+            logging.error("Common issues:")
+            logging.error("  1. data_root path is incorrect")
+            logging.error("  2. Audio files don't exist at expected paths")
+            logging.error("  3. JSONL format doesn't match expected schema")
 
         self.collate_fn = BaseCollateFn(
             data_cfg=data_cfg, 
             tokenizer=self.tokenizer, 
             processor=self.processor
         )
+        
+        # Sanity check: verify first sample can be loaded
+        if filtered_len > 0:
+            try:
+                first_sample = self.dataset[0]
+                if first_sample["processed_audios"]:
+                    test_audio = first_sample["processed_audios"][0]["audio"]
+                    test_segment = AudioSegment.from_file(
+                        test_audio, target_sr=16000, channel_selector="average"
+                    )
+                    logging.info(f"✓ Audio loading sanity check passed: {test_audio}")
+                    logging.info(f"  Audio duration: {test_segment.duration:.2f}s, samples: {test_segment.num_samples}")
+            except Exception as e:
+                logging.error(f"✗ Audio loading sanity check FAILED: {e}")
+                logging.error("  This means audio files exist in manifest but cannot be loaded!")
 
     def _preprocess_function(self, examples: Dict[str, List]) -> Dict[str, List]:
         """Preprocess a batch of examples."""
