@@ -385,18 +385,11 @@ class BaseAudioTextDataset:
         # Get seed_descriptions if available (for removing from content)
         seed_descriptions = examples.get("seed_description", [None] * len(examples["messages"]))
         
+        # Debug flag - only log first batch
+        is_first_batch = not hasattr(self, '_debug_logged')
+        
         # Process each sample
         for idx, (messages, audios, seed_desc) in enumerate(zip(examples["messages"], batch_audios, seed_descriptions)):
-            # Debug: log first sample details
-            if idx == 0 and len(audio_context_list) == 0:
-                logging.info(f"[DEBUG] First sample: messages={bool(messages)}, audios={len(audios)}, seed_desc={bool(seed_desc)}")
-                if messages:
-                    for i, msg in enumerate(messages):
-                        content_preview = msg.get("content", "")[:100] if msg.get("content") else "None"
-                        has_audio_marker = self.audio_locator in msg.get("content", "") if msg.get("content") else False
-                        logging.info(f"[DEBUG]   msg[{i}] role={msg.get('role')}, has_audios={bool(msg.get('audios'))}, has_audio_marker={has_audio_marker}")
-                        logging.info(f"[DEBUG]   content preview: {content_preview}...")
-            
             # Handle empty messages
             if not messages:
                 audio_context_list.append("")
@@ -414,10 +407,20 @@ class BaseAudioTextDataset:
                 msg_copy = dict(msg)
                 if msg_copy.get("role") == "user" and seed_desc:
                     content = msg_copy.get("content", "")
+                    original_content = content  # For debug
                     # Remove seed_description from the beginning of content
                     if content.startswith(seed_desc):
                         content = content[len(seed_desc):].lstrip('\n')
                         msg_copy["content"] = content
+                    
+                    # Debug: log first sample's seed_description removal (only once)
+                    if is_first_batch and idx == 0:
+                        logging.info(f"[DEBUG] seed_desc removal:")
+                        logging.info(f"  seed_desc: {seed_desc[:80]}...")
+                        logging.info(f"  BEFORE: {original_content[:80]}...")
+                        logging.info(f"  AFTER:  {content[:80]}...")
+                        logging.info(f"  removed: {original_content != content}")
+                        
                 processed_messages.append(msg_copy)
 
             # Apply chat template
@@ -521,6 +524,10 @@ class BaseAudioTextDataset:
             audio_context_list.append(audio_context)
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
+        
+        # Mark debug as logged
+        if is_first_batch:
+            self._debug_logged = True
         
         # Log skip reasons (always log to help debugging)
         total_skipped = sum(skip_reasons.values())
