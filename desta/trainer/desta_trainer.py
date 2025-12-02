@@ -54,6 +54,15 @@ class DeSTA25Trainer(Trainer):
         num_items_in_batch: Optional[int] = None
     ):
         """Compute loss with perplexity logging."""
+        # Handle empty batch (skipped due to audio errors)
+        if inputs.get("_empty_batch"):
+            logging.warning("Skipping empty batch (audio decode errors)")
+            # Return zero loss to skip this batch
+            zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
+            if return_outputs:
+                return zero_loss, None
+            return zero_loss
+        
         outputs = model(**inputs)
         loss = outputs.loss
         
@@ -78,6 +87,11 @@ class DeSTA25Trainer(Trainer):
         
         for batch in eval_dataloader:
             batch = self._prepare_inputs(batch)
+            
+            # Skip empty batches
+            if batch.get("_empty_batch"):
+                logging.warning("Skipping empty batch during evaluation")
+                continue
             
             with torch.no_grad():
                 outputs = self.model(**batch)
