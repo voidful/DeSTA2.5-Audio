@@ -508,14 +508,15 @@ class BaseAudioTextDataset:
             # Resolve audio paths
             new_audios = []
             audio_not_found = False
+            missing_audio_path = None
             for audio_dict in audios:
                 try:
-                    audio_dict["audio"] = _resolve_audio_filepath(
-                        os.path.join(self.data_root, audio_dict["audio"])
-                    )
+                    full_path = os.path.join(self.data_root, audio_dict["audio"])
+                    audio_dict["audio"] = _resolve_audio_filepath(full_path)
                     new_audios.append(audio_dict)
                 except FileNotFoundError:
                     audio_not_found = True
+                    missing_audio_path = full_path
                     break
             
             if audio_not_found:
@@ -524,6 +525,12 @@ class BaseAudioTextDataset:
                 audio_list.append([])
                 transcription_list.append([])
                 skip_reasons["audio_file_not_found"] += 1
+                # Log first missing audio path for debugging
+                if not hasattr(self, '_first_missing_audio_logged'):
+                    logging.error(f"[DEBUG] First missing audio file: {missing_audio_path}")
+                    logging.error(f"  data_root: {self.data_root}")
+                    logging.error(f"  audio id: {audios[0].get('audio', 'N/A') if audios else 'N/A'}")
+                    self._first_missing_audio_logged = True
                 continue
 
             # Prepare placeholder sizes
@@ -590,8 +597,9 @@ class BaseAudioTextDataset:
         if skip_reasons["constructed_from_flat"] > 0 and is_first_batch:
             logging.info(f"[Flat format] Constructed {skip_reasons['constructed_from_flat']} samples from id+seed_description+prompt")
         
-        if total_skipped > 0:
-            logging.info(f"Batch skip reasons: {actual_skips}")
+        # Only log skip reasons once per batch, and only if first batch to reduce spam
+        if total_skipped > 0 and is_first_batch:
+            logging.info(f"Batch skip reasons (first batch): {actual_skips}")
             # Log first skipped sample for debugging
             if skip_reasons["no_audio_markers"] > 0:
                 logging.warning(f"  no_audio_markers: Check if '{self.audio_locator}' exists in content")
