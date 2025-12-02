@@ -300,6 +300,11 @@ class BaseAudioTextDataset:
         logging.info(f"  - No length (empty response): {no_length}")
         logging.info(f"  - No audio_context: {no_audio_context}")
         logging.info(f"  - No processed_audios: {no_processed_audios}")
+        logging.info("-" * 60)
+        logging.info("DeSTA Training Mode:")
+        logging.info("  ✓ seed_description will be REMOVED from text prompt")
+        logging.info("  ✓ seed_description will be used as transcription embedding ONLY")
+        logging.info("  → Model learns: audio_features + transcription → response")
         logging.info("=" * 60)
         
         # Print sample of first valid and invalid examples for debugging
@@ -392,7 +397,8 @@ class BaseAudioTextDataset:
                 continue
 
             # Remove seed_description from user content to prevent data leakage
-            # The model should learn from audio features, not from text descriptions
+            # The model should learn from audio features + transcription embedding only,
+            # NOT from text descriptions in the prompt
             processed_messages = []
             for msg in messages:
                 msg_copy = dict(msg)
@@ -414,6 +420,14 @@ class BaseAudioTextDataset:
             except Exception as e:
                 logging.error(f"Error at index {idx}: {processed_messages}")
                 raise e
+            
+            # Verify seed_description is NOT in the audio_context text
+            # (it should only appear as transcription embedding, not as text)
+            if seed_desc and seed_desc in audio_context:
+                logging.warning(
+                    f"Sample {idx}: seed_description still found in audio_context! "
+                    f"This may cause data leakage. seed_desc: {seed_desc[:50]}..."
+                )
             
 
             # Check if there are any audios
