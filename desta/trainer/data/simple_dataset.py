@@ -377,8 +377,11 @@ class BaseAudioTextDataset:
                             audios.append(item)
             batch_audios.append(audios)
 
+        # Get seed_descriptions if available (for removing from content)
+        seed_descriptions = examples.get("seed_description", [None] * len(examples["messages"]))
+        
         # Process each sample
-        for idx, (messages, audios) in enumerate(zip(examples["messages"], batch_audios)):
+        for idx, (messages, audios, seed_desc) in enumerate(zip(examples["messages"], batch_audios, seed_descriptions)):
             # Handle empty messages
             if not messages:
                 audio_context_list.append("")
@@ -388,15 +391,28 @@ class BaseAudioTextDataset:
                 skip_reasons["empty_messages"] += 1
                 continue
 
+            # Remove seed_description from user content to prevent data leakage
+            # The model should learn from audio features, not from text descriptions
+            processed_messages = []
+            for msg in messages:
+                msg_copy = dict(msg)
+                if msg_copy.get("role") == "user" and seed_desc:
+                    content = msg_copy.get("content", "")
+                    # Remove seed_description from the beginning of content
+                    if content.startswith(seed_desc):
+                        content = content[len(seed_desc):].lstrip('\n')
+                        msg_copy["content"] = content
+                processed_messages.append(msg_copy)
+
             # Apply chat template
             try:
                 audio_context = self.tokenizer.apply_chat_template(
-                    messages,
+                    processed_messages,
                     tokenize=False,
                     add_generation_prompt=True,
                 )
             except Exception as e:
-                logging.error(f"Error at index {idx}: {messages}")
+                logging.error(f"Error at index {idx}: {processed_messages}")
                 raise e
             
 
