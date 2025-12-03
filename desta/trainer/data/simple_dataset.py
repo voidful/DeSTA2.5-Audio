@@ -280,6 +280,11 @@ class BaseAudioTextDataset:
         self.prompt_size = cfg.model.connector.prompt_size
         self.tokenizer = tokenizer
         self.processor = processor
+        model_cfg = cfg.model
+        if isinstance(model_cfg, DictConfig):
+            self.system_prompt = model_cfg.get("system_prompt", None)
+        else:
+            self.system_prompt = getattr(model_cfg, "system_prompt", None)
 
         # Load manifest files
         self.manifest_filepaths = (
@@ -352,10 +357,10 @@ class BaseAudioTextDataset:
         
         logging.info("-" * 60)
         logging.info("DeSTA Training Mode:")
-        logging.info("  ✓ Supports both messages-based and flat format (id+seed_description+prompt)")
-        logging.info("  ✓ seed_description is REMOVED from text prompt")
-        logging.info("  ✓ seed_description is used as transcription embedding ONLY")
-        logging.info("  → Model learns: audio_features + transcription → response")
+        logging.info("  ✓ Prompt-only training (messages field ignored)")
+        logging.info("  ✓ Audio locator appended automatically to prompts")
+        logging.info("  ✓ seed_description is ignored (no transcription text used)")
+        logging.info("  → Model learns: audio_features → response")
         logging.info("=" * 60)
         
         # Print sample of first valid and invalid examples for debugging
@@ -437,204 +442,56 @@ class BaseAudioTextDataset:
         return True
 
     def _preprocess_function(self, examples: Dict[str, List]) -> Dict[str, List]:
-        """Preprocess a batch of examples.
-        
-        Supports two data formats:
-        1. messages-based: {"messages": [...], "response": "..."}
-        2. flat format: {"id": "audio.wav", "seed_description": "...", "prompt": "...", "response": "..."}
-           In flat format, messages is empty [] and we construct it from prompt + id
-        
-        DeSTA Training:
-        - seed_description is used ONLY as transcription embedding (audio's text representation)
-        - seed_description is NEVER included in the text prompt
-        - Model learns: audio_features + transcription_embedding → response
-        """
+        """Preprocess a batch of examples using prompt/id/response only."""
         audio_context_list = []
         start_positions_list = []
         audio_list = []
         transcription_list = []
-        
-        # Skip reason counters for diagnostics
+
+        ids = examples["id"]
+        prompts = examples.get("prompt", [""] * len(ids))
+        responses = examples.get("response", [""] * len(ids))
+
         skip_reasons = {
-            "empty_messages_no_fallback": 0,
-            "no_audio_markers": 0,
+            "empty_prompt": 0,
             "audio_file_not_found": 0,
-            "no_audios_in_messages": 0,
-            "constructed_from_flat": 0,
+            "no_audio_markers": 0,
         }
 
-        # Get fields for flat format fallback
-        seed_descriptions = examples.get("seed_description", [None] * len(examples["messages"]))
-        prompts = examples.get("prompt", [None] * len(examples["messages"]))
-        
-        # Collect audios from messages (or construct from flat format)
-        batch_audios = []
-        batch_messages = []
-        
-        for msg_idx, (messages, sample_id, seed_desc, prompt) in enumerate(
-            zip(examples["messages"], examples["id"], seed_descriptions, prompts)
-        ):
-            audios = []
-            processed_messages = messages
-            
-            # Handle flat format: messages is empty but we have other fields to construct from
-            if not messages:
-                constructed = False
-                
-                # Case 1: Full flat format with seed_description + prompt + id
-                if seed_desc and prompt:
-                    processed_messages = [
-                        {
-                            "role": "system",
-                            "content": "Imagine you can **hear** the audio clips. The audio clips are wrapped between <start_audio> and <end_audio>.\nFocus on the audios and respond directly to the prompts."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"{prompt} {self.audio_locator}",
-                            "audios": [{
-                                "audio": sample_id,
-                                "text": seed_desc,
-                            }]
-                        }
-                    ]
-                    constructed = True
-                    
-                    if msg_idx == 0 and not hasattr(self, '_debug_flat_logged'):
-                        logging.info("[DEBUG] Flat format (seed_desc+prompt) detected - constructing messages:")
-                        logging.info(f"  id (audio path): {sample_id}")
-                        logging.info(f"  prompt: {prompt[:80]}...")
-                        logging.info(f"  seed_description (→ transcription embedding): {seed_desc[:80]}...")
-                        self._debug_flat_logged = True
-                
-                # Case 2: Only prompt + id (no seed_description)
-                elif prompt:
-                    processed_messages = [
-                        {
-                            "role": "system",
-                            "content": "Imagine you can **hear** the audio clips. The audio clips are wrapped between <start_audio> and <end_audio>.\nFocus on the audios and respond directly to the prompts."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"{prompt} {self.audio_locator}",
-                            "audios": [{
-                                "audio": sample_id,
-                                "text": "",  # No transcription available
-                            }]
-                        }
-                    ]
-                    constructed = True
-                    
-                    if msg_idx == 0 and not hasattr(self, '_debug_prompt_only_logged'):
-                        logging.info("[DEBUG] Flat format (prompt only) detected - constructing messages:")
-                        logging.info(f"  id (audio path): {sample_id}")
-                        logging.info(f"  prompt: {prompt[:80]}...")
-                        logging.info("  No seed_description available")
-                        self._debug_prompt_only_logged = True
-                
-                # Case 3: Only seed_description + id (no prompt) - use seed_desc as context
-                elif seed_desc:
-                    processed_messages = [
-                        {
-                            "role": "system",
-                            "content": "Imagine you can **hear** the audio clips. The audio clips are wrapped between <start_audio> and <end_audio>.\nFocus on the audios and respond directly to the prompts."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Describe this audio: {self.audio_locator}",
-                            "audios": [{
-                                "audio": sample_id,
-                                "text": seed_desc,
-                            }]
-                        }
-                    ]
-                    constructed = True
-                    
-                    if msg_idx == 0 and not hasattr(self, '_debug_seed_only_logged'):
-                        logging.info("[DEBUG] Flat format (seed_desc only) detected - constructing messages:")
-                        logging.info(f"  id (audio path): {sample_id}")
-                        logging.info(f"  seed_description (→ transcription embedding): {seed_desc[:80]}...")
-                        logging.info("  Using default prompt: 'Describe this audio:'")
-                        self._debug_seed_only_logged = True
-                
-                # Case 4: Only id with audio file extension - minimal construction
-                elif sample_id and any(sample_id.lower().endswith(ext) for ext in ['.wav', '.mp3', '.flac', '.ogg', '.m4a']):
-                    processed_messages = [
-                        {
-                            "role": "system",
-                            "content": "Imagine you can **hear** the audio clips. The audio clips are wrapped between <start_audio> and <end_audio>.\nFocus on the audios and respond directly to the prompts."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Describe this audio: {self.audio_locator}",
-                            "audios": [{
-                                "audio": sample_id,
-                                "text": "",
-                            }]
-                        }
-                    ]
-                    constructed = True
-                    
-                    if msg_idx == 0 and not hasattr(self, '_debug_id_only_logged'):
-                        logging.info("[DEBUG] Flat format (id only) detected - constructing messages:")
-                        logging.info(f"  id (audio path): {sample_id}")
-                        logging.info("  No prompt or seed_description available")
-                        logging.info("  Using default prompt: 'Describe this audio:'")
-                        self._debug_id_only_logged = True
-                
-                if constructed:
-                    skip_reasons["constructed_from_flat"] += 1
-            
-            # Extract audios from messages
-            if processed_messages:
-                for message in processed_messages:
-                    if message and message.get("audios"):
-                        for audio_item in message["audios"]:
-                            item = dict(audio_item)
-                            if item.get("audio") is None:
-                                item["audio"] = sample_id
-                            audios.append(item)
-            
-            batch_audios.append(audios)
-            batch_messages.append(processed_messages)
-        
-        # Debug flag - only log first batch
-        is_first_batch = not hasattr(self, '_debug_logged')
-        
-        # Process each sample
-        for idx, (messages, audios, seed_desc) in enumerate(zip(batch_messages, batch_audios, seed_descriptions)):
-            # Handle empty messages (no fallback available)
-            if not messages:
+        is_first_batch = not hasattr(self, "_debug_prompt_logged")
+
+        for idx, (sample_id, prompt) in enumerate(zip(ids, prompts)):
+            prompt_text = (prompt or "").strip()
+            if not prompt_text:
                 audio_context_list.append("")
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
-                skip_reasons["empty_messages_no_fallback"] += 1
+                skip_reasons["empty_prompt"] += 1
                 continue
 
-            # For messages-based format: Remove seed_description from user content
-            # to prevent data leakage (model should not see seed_desc in text prompt)
-            processed_messages = []
-            for msg in messages:
-                msg_copy = dict(msg)
-                if msg_copy.get("role") == "user" and seed_desc:
-                    content = msg_copy.get("content", "")
-                    original_content = content  # For debug
-                    # Remove seed_description from the beginning of content
-                    if content.startswith(seed_desc):
-                        content = content[len(seed_desc):].lstrip('\n')
-                        msg_copy["content"] = content
-                    
-                    # Debug: log first sample's seed_description removal (only once)
-                    if is_first_batch and idx == 0:
-                        logging.info(f"[DEBUG] seed_desc handling:")
-                        logging.info(f"  seed_desc: {seed_desc[:80] if seed_desc else 'None'}...")
-                        logging.info(f"  BEFORE: {original_content[:80]}...")
-                        logging.info(f"  AFTER:  {content[:80]}...")
-                        logging.info(f"  seed_desc removed from text: {original_content != content}")
-                        
-                processed_messages.append(msg_copy)
+            if self.audio_locator not in prompt_text:
+                user_content = f"{prompt_text} {self.audio_locator}"
+            else:
+                user_content = prompt_text
 
-            # Apply chat template
+            user_message = {
+                "role": "user",
+                "content": user_content,
+                "audios": [{
+                    "audio": sample_id,
+                    "text": "",
+                }]
+            }
+
+            processed_messages = []
+            if getattr(self, "system_prompt", None):
+                processed_messages.append({
+                    "role": "system",
+                    "content": self.system_prompt
+                })
+            processed_messages.append(user_message)
+
             try:
                 audio_context = self.tokenizer.apply_chat_template(
                     processed_messages,
@@ -644,26 +501,8 @@ class BaseAudioTextDataset:
             except Exception as e:
                 logging.error(f"Error at index {idx}: {processed_messages}")
                 raise e
-            
-            # Verify seed_description is NOT in the audio_context text
-            # (it should only appear as transcription embedding, not as text)
-            if seed_desc and seed_desc in audio_context:
-                logging.warning(
-                    f"Sample {idx}: seed_description still found in audio_context! "
-                    f"This may cause data leakage. seed_desc: {seed_desc[:50]}..."
-                )
-            
 
-            # Check if there are any audios
-            if not audios:
-                audio_context_list.append("")
-                start_positions_list.append([])
-                audio_list.append([])
-                transcription_list.append([])
-                skip_reasons["no_audios_in_messages"] += 1
-                continue
-
-            # Resolve audio paths
+            audios = user_message["audios"]
             new_audios = []
             audio_not_found = False
             missing_audio_path = None
@@ -676,14 +515,13 @@ class BaseAudioTextDataset:
                     audio_not_found = True
                     missing_audio_path = full_path
                     break
-            
+
             if audio_not_found:
                 audio_context_list.append("")
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
                 skip_reasons["audio_file_not_found"] += 1
-                # Log first missing audio path for debugging
                 if not hasattr(self, '_first_missing_audio_logged'):
                     logging.error(f"[DEBUG] First missing audio file: {missing_audio_path}")
                     logging.error(f"  data_root: {self.data_root}")
@@ -691,24 +529,13 @@ class BaseAudioTextDataset:
                     self._first_missing_audio_logged = True
                 continue
 
-            # Prepare placeholder sizes
             audio_size_list = [self.prompt_size] * len(new_audios)
-            
-            # Truncate transcriptions to 100 tokens
-            transcriptions = [
-                self.tokenizer.convert_tokens_to_string(
-                    self.tokenizer.tokenize(audio.get("text", " ") or " ", add_special_tokens=False)[:100]
-                ) for audio in new_audios
-            ]
+            transcriptions = ["" for _ in new_audios]
             transcription_size_list = [
-                len(self.tokenizer.tokenize(text, add_special_tokens=False)) 
+                len(self.tokenizer.tokenize(text, add_special_tokens=False))
                 for text in transcriptions
             ]
-            transcription_list.append(transcriptions)
 
-            # Process audio markers
-            # Check for actual <start_audio>...<end_audio> blocks (not just mentions in text)
-            # A real audio block looks like: <start_audio>some content<end_audio>
             start_end_pattern = r'<start_audio>.*?<end_audio>'
             has_start_end_blocks = bool(re.search(start_end_pattern, audio_context, re.DOTALL))
             num_locators = audio_context.count(self.audio_locator)
@@ -731,42 +558,32 @@ class BaseAudioTextDataset:
                 )
                 audio_context = self.tokenizer.convert_tokens_to_string(tokens)
             else:
-                # No audio markers - invalid sample
                 audio_context_list.append("")
                 start_positions_list.append([])
                 audio_list.append([])
-                transcription_list.append([])  # Bug fix: was missing this line
+                transcription_list.append([])
                 skip_reasons["no_audio_markers"] += 1
                 continue
 
             audio_context_list.append(audio_context)
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
-        
-        # Mark debug as logged
-        if is_first_batch:
-            self._debug_logged = True
-        
-        # Log skip reasons (always log to help debugging, but not flat format construction)
-        actual_skips = {k: v for k, v in skip_reasons.items() if k != "constructed_from_flat"}
-        total_skipped = sum(actual_skips.values())
-        
-        # Always log construction stats for flat format
-        if skip_reasons["constructed_from_flat"] > 0 and is_first_batch:
-            logging.info(f"[Flat format] Constructed {skip_reasons['constructed_from_flat']} samples from id+seed_description+prompt")
-        
-        # Only log skip reasons once per batch, and only if first batch to reduce spam
+            transcription_list.append(transcriptions)
+
+            if is_first_batch and not hasattr(self, "_debug_prompt_logged"):
+                logging.info("[DEBUG] Prompt-only preprocessing active.")
+                logging.info(f"  Example prompt: {prompt_text[:80]}...")
+                self._debug_prompt_logged = True
+
+        total_skipped = sum(skip_reasons.values())
         if total_skipped > 0 and is_first_batch:
-            logging.info(f"Batch skip reasons (first batch): {actual_skips}")
-            # Log first skipped sample for debugging
-            if skip_reasons["no_audio_markers"] > 0:
-                logging.warning(f"  no_audio_markers: Check if '{self.audio_locator}' exists in content")
+            logging.info(f"Batch skip reasons (prompt-only mode): {skip_reasons}")
+            if skip_reasons["empty_prompt"] > 0:
+                logging.warning("  empty_prompt: prompt field missing for some samples")
             if skip_reasons["audio_file_not_found"] > 0:
                 logging.warning(f"  audio_file_not_found: Check data_root='{self.data_root}'")
-            if skip_reasons["no_audios_in_messages"] > 0:
-                logging.warning(f"  no_audios_in_messages: Check if 'audios' field exists in messages")
-            if skip_reasons["empty_messages_no_fallback"] > 0:
-                logging.warning(f"  empty_messages_no_fallback: messages=[] and no seed_description/prompt for fallback")
+            if skip_reasons["no_audio_markers"] > 0:
+                logging.warning(f"  no_audio_markers: '{self.audio_locator}' missing in prompt text")
 
         # Set outputs
         examples["audio_context"] = audio_context_list
