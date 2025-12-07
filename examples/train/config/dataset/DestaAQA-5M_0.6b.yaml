@@ -1,7 +1,7 @@
 train_ds:
   data_root: "/work/voidful2nlp/desta"
   manifest_filepaths:
-    - "/work/voidful2nlp/desta/qwen3_desta.jsonl.1"
+    - "/work/voidful2nlp/desta/qwen3_0.6b_desta.jsonl"
 
   batch_sampler: null
   max_seq_length: 300
@@ -17,7 +17,7 @@ validation_ds:
   batch_sampler: null
   data_root: "/work/voidful2nlp/desta"
   manifest_filepaths:
-    - "/work/voidful2nlp/desta/val.jsonl.1"
+    - "/work/voidful2nlp/desta/qwen3_0.6b_val.jsonl"
   max_seq_length: 512
   batch_size: 4
   shuffle: False
