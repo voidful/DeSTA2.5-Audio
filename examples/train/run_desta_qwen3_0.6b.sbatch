@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=desta_qwen3_4b
+#SBATCH --job-name=desta_qwen3_0.6b
 #SBATCH --partition=normal
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
-#SBATCH --output=./slurm-report/desta_qwen3_4b_%j.out
-#SBATCH --error=./slurm-report/desta_qwen3_4b_%j.out
+#SBATCH --output=./slurm-report/desta_qwen3_0.6b_%j.out
+#SBATCH --error=./slurm-report/desta_qwen3_0.6b_%j.out
 
 # ===== 環境設定 =====
 # 載入 Anaconda/Miniconda module (依 cluster 調整)
@@ -37,11 +37,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-4B_Qformer6L
-dataset_config=DestaAQA-5M_local
+config=desta25_qwen3-0.6b_Qformer6L
+dataset_config=DestaAQA-5M_0.6b
 
-project=desta25_qwen3_4b
-name="qwen3-4b-instruct"
+project=desta25_qwen3_0.6b
+name="qwen3-0.6b-instruct"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
