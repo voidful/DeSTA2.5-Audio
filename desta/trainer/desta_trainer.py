@@ -7,7 +7,6 @@ with evaluation and prediction capabilities.
 import json
 import logging
 import os
-import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -33,18 +32,15 @@ class DeSTA25Trainer(Trainer):
     """
     
     def __init__(self, model: DeSTA25AudioModel, cfg: DictConfig, **kwargs):
-        """
-        Initialize the trainer.
-
-        Args:
-            model: The DeSTA25AudioModel to train
-            cfg: Configuration object with model and training settings
-            **kwargs: Additional arguments for parent Trainer
-        """
+        """Initialize the trainer."""
         super().__init__(model=model, **kwargs)
         self.cfg = cfg
         self.metrics = ConsecutiveWordsAccuracyMetric()
         self.prediction_step_outputs: List[Dict[str, Any]] = []
+
+    def _is_empty_batch(self, inputs: Dict[str, Any]) -> bool:
+        """Check if batch is empty (skipped due to audio errors)."""
+        return inputs.get("_empty_batch", False)
 
     def compute_loss(
         self, 
@@ -54,20 +50,15 @@ class DeSTA25Trainer(Trainer):
         num_items_in_batch: Optional[int] = None
     ):
         """Compute loss with perplexity logging."""
-        # Handle empty batch (skipped due to audio errors)
-        if inputs.get("_empty_batch"):
+        if self._is_empty_batch(inputs):
             logging.warning("Skipping empty batch (audio decode errors)")
-            # Return zero loss to skip this batch
             zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
-            if return_outputs:
-                return zero_loss, None
-            return zero_loss
+            return (zero_loss, None) if return_outputs else zero_loss
         
         outputs = model(**inputs)
         loss = outputs.loss
         
-        perplexity = torch.exp(loss)
-        self.log({"train/loss": loss.item(), "train/ppl": perplexity.item()})
+        self.log({"train/loss": loss.item(), "train/ppl": torch.exp(loss).item()})
         
         return (loss, outputs) if return_outputs else loss
 
@@ -81,40 +72,40 @@ class DeSTA25Trainer(Trainer):
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         self.model.eval()
         
-        all_losses = []
-        all_ppls = []
+        all_losses, all_ppls = [], []
         self.prediction_step_outputs = []
         
         for batch in eval_dataloader:
             batch = self._prepare_inputs(batch)
             
-            # Skip empty batches
-            if batch.get("_empty_batch"):
+            if self._is_empty_batch(batch):
                 logging.warning("Skipping empty batch during evaluation")
                 continue
             
             with torch.no_grad():
                 outputs = self.model(**batch)
                 loss = outputs.loss
-                perplexity = torch.exp(loss)
-                
                 all_losses.append(loss.item())
-                all_ppls.append(perplexity.item())
-                
+                all_ppls.append(torch.exp(loss).item())
                 self._predict_step(batch)
 
-        # Compute average metrics
+        # Compute metrics
         avg_loss = sum(all_losses) / len(all_losses) if all_losses else 0
         avg_ppl = sum(all_ppls) / len(all_ppls) if all_ppls else 0
+        
+        # Save results and generate report
+        results_dir = Path(self.cfg.exp_dir) / "results" / "val"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        output_path = results_dir / f"val@ep={self.state.epoch}-{self.state.global_step}.jsonl"
+        ckpt = f"ep={self.state.epoch}-{self.state.global_step}"
+        
+        report = self._save_results(self.prediction_step_outputs, output_path, ckpt)
         
         metrics = {
             f"{metric_key_prefix}_loss": avg_loss,
             f"{metric_key_prefix}_ppl": avg_ppl,
+            f"{metric_key_prefix}_accuracy": report.get("accuracy_by_sample", 0),
         }
-        
-        # Generate report
-        report = self._write_report()
-        metrics[f"{metric_key_prefix}_accuracy"] = report.get("accuracy_by_sample", 0)
         
         self.log(metrics)
         self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, metrics)
@@ -124,10 +115,11 @@ class DeSTA25Trainer(Trainer):
     def _predict_step(self, batch: Dict[str, Any]):
         """Perform a single prediction step with generation."""
         gen_kwargs = self.cfg.model.generation_kwargs
+        eos_id = self.processing_class.eos_token_id
         
         generated_ids = self.model._generate_step(
             batch,
-            pad_token_id=self.processing_class.eos_token_id,
+            pad_token_id=eos_id,
             temperature=gen_kwargs.temperature,
             top_p=gen_kwargs.top_p,
             max_new_tokens=gen_kwargs.max_new_tokens,
@@ -135,37 +127,18 @@ class DeSTA25Trainer(Trainer):
         )
 
         # Replace -100 with eos_token_id for decoding
-        batch["context_input_ids"][batch["context_input_ids"] == -100] = self.processing_class.eos_token_id
-        batch["labels"][batch["labels"] == -100] = self.processing_class.eos_token_id
-        generated_ids[generated_ids == -100] = self.processing_class.eos_token_id
+        batch["context_input_ids"][batch["context_input_ids"] == -100] = eos_id
+        batch["labels"][batch["labels"] == -100] = eos_id
+        generated_ids[generated_ids == -100] = eos_id
 
-        # Decode
+        # Decode and record predictions
         contexts = self.processing_class.batch_decode(batch["context_input_ids"], skip_special_tokens=False)
         labels = self.processing_class.batch_decode(batch["labels"], skip_special_tokens=True)
         preds = self.processing_class.batch_decode(generated_ids, skip_special_tokens=True)
         
-        # Record predictions
         for context, label, pred, metadata in zip(contexts, labels, preds, batch["metadata"]):
-            metadata.update({
-                "context": context,
-                "prediction": pred,
-                "label": label,
-            })
+            metadata.update({"context": context, "prediction": pred, "label": label})
             self.prediction_step_outputs.append(metadata)
-
-    def _write_report(self) -> Dict[str, Any]:
-        """Write evaluation report to file."""
-        dataset_name = "val"
-        results_dir = f"{self.cfg.exp_dir}/results/{dataset_name}"
-        os.makedirs(results_dir, exist_ok=True)
-        
-        output_path = f"{results_dir}/val@ep={self.state.epoch}-{self.state.global_step}.jsonl"
-
-        return self._save_results(
-            results=self.prediction_step_outputs,
-            filepath=output_path,
-            ckpt=f"ep={self.state.epoch}-{self.state.global_step}"
-        )
 
     def _save_results(
         self, 
@@ -202,10 +175,10 @@ class DeSTA25Trainer(Trainer):
         report_path = jsonl_path.parent.parent / jsonl_path.name.replace(".jsonl", "-report.json")
         
         # Clean up results for report (remove verbose fields)
-        cleaned_results = []
-        for result in results:
-            clean = {k: v for k, v in result.items() if k not in ["context", "audio_context"]}
-            cleaned_results.append(clean)
+        cleaned_results = [
+            {k: v for k, v in result.items() if k not in ["context", "audio_context"]}
+            for result in results
+        ]
 
         total_correct = sum(r["correct"] for r in cleaned_results) if cleaned_results else 0
         total_samples = len(cleaned_results) if cleaned_results else 1
