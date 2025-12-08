@@ -386,22 +386,14 @@ class BaseAudioTextDataset:
         logging.info(f"  - No audio_context: {no_audio_context}")
         logging.info(f"  - No processed_audios: {no_processed_audios}")
         
-        # Phase 2: Validate audio files can be decoded
+        # Phase 2: Audio validation is DISABLED for performance.
+        # The collate function already handles decode errors gracefully by skipping bad samples.
+        # Full audio decoding of 4M samples would take ~20 hours.
         logging.info("-" * 60)
         logging.info("Dataset Statistics (Phase 2 - Audio Validation):")
-        before_audio_validation = len(self.dataset)
-        
-        self.dataset = self.dataset.filter(
-            self._validate_audio_sample,
-            num_proc=1,
-            load_from_cache_file=False,
-        )
-        
+        logging.info("  ⚠ SKIPPED: Audio validation disabled for performance.")
+        logging.info("  → Bad audio files will be skipped at runtime by collate_fn.")
         after_audio_validation = len(self.dataset)
-        audio_skipped = before_audio_validation - after_audio_validation
-        logging.info(f"  Before audio validation: {before_audio_validation}")
-        logging.info(f"  After audio validation: {after_audio_validation}")
-        logging.info(f"  Skipped (undecodable audio): {audio_skipped} ({audio_skipped/max(before_audio_validation,1)*100:.2f}%)")
         
         logging.info("-" * 60)
         logging.info("DeSTA Training Mode:")
