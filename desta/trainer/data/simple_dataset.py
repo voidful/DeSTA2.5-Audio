@@ -297,7 +297,8 @@ class BaseAudioTextDataset:
             logging.info(f"Loading manifest: {filepath}")
 
         # Load and preprocess dataset
-        datasets.disable_caching()
+        # Note: Enable caching to avoid redundant processing across distributed workers
+        # Each worker can reuse the cached preprocessed dataset
         
         self.dataset = datasets.load_dataset(
             "json", 
@@ -307,10 +308,10 @@ class BaseAudioTextDataset:
         self.dataset = self.dataset.map(
             self._preprocess_function,
             batched=True,
-            batch_size=256,
+            batch_size=128,  # Reduced batch size to lower memory footprint
             num_proc=1,
-            load_from_cache_file=False,
-            keep_in_memory=True
+            load_from_cache_file=True,  # Enable cache for distributed workers
+            keep_in_memory=False  # Critical: avoid OOM with large datasets
         )
 
         # Analyze skip reasons before filtering
