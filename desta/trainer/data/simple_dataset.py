@@ -315,51 +315,98 @@ class BaseAudioTextDataset:
         for filepath in self.manifest_filepaths:
             logging.info(f"Loading manifest: {filepath}")
 
-        # Load and preprocess dataset
-        # In distributed training, only rank 0 preprocesses to avoid cache race conditions.
-        # Other ranks wait at the barrier, then all ranks load from cache.
+        # === Robust Dataset Loading with Disk Cache ===
+        # Use save_to_disk/load_from_disk to avoid HuggingFace cache race conditions.
+        # A lock file coordinates distributed workers.
         
         data_files = [resolve_filepath(fp) for fp in self.manifest_filepaths]
         
-        if _is_main_process():
-            logging.info(f"[Rank {_get_rank()}] Preprocessing dataset...")
-            
-            self.dataset = datasets.load_dataset(
-                "json", 
-                data_files=data_files
-            )["train"]
-
-            self.dataset = self.dataset.map(
-                self._preprocess_function,
-                batched=True,
-                batch_size=128,  # Reduced batch size to lower memory footprint
-                num_proc=1,
-                load_from_cache_file=True,  # Enable cache for distributed workers
-                keep_in_memory=False  # Critical: avoid OOM with large datasets
-            )
-            logging.info(f"[Rank {_get_rank()}] Preprocessing complete. Dataset cached.")
+        # Create a stable cache path based on manifest files
+        import hashlib
+        cache_key = hashlib.md5("_".join(sorted(data_files)).encode()).hexdigest()[:12]
+        cache_dir = os.path.join(
+            os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
+            "desta_preprocessed",
+            cache_key
+        )
+        lock_file = cache_dir + ".lock"
+        ready_file = cache_dir + ".ready"
         
-        # Synchronize all processes - rank 0 finishes preprocessing before others proceed
-        _barrier()
-        
-        if not _is_main_process():
-            logging.info(f"[Rank {_get_rank()}] Loading preprocessed dataset from cache...")
-            
-            self.dataset = datasets.load_dataset(
-                "json", 
-                data_files=data_files
-            )["train"]
-            
-            # This will load from cache since rank 0 already created it
-            self.dataset = self.dataset.map(
+        def _load_and_preprocess():
+            """Load raw data and run preprocessing."""
+            ds = datasets.load_dataset("json", data_files=data_files)["train"]
+            ds = ds.map(
                 self._preprocess_function,
                 batched=True,
                 batch_size=128,
                 num_proc=1,
-                load_from_cache_file=True,
+                load_from_cache_file=False,  # Don't use HF cache, we manage our own
                 keep_in_memory=False
             )
-            logging.info(f"[Rank {_get_rank()}] Cache loaded.")
+            return ds
+        
+        # Check if preprocessed cache already exists and is ready
+        if os.path.exists(ready_file) and os.path.isdir(cache_dir):
+            logging.info(f"[Rank {_get_rank()}] Loading preprocessed dataset from disk cache: {cache_dir}")
+            try:
+                self.dataset = datasets.load_from_disk(cache_dir)
+                logging.info(f"[Rank {_get_rank()}] Loaded {len(self.dataset)} samples from cache.")
+            except Exception as e:
+                logging.warning(f"[Rank {_get_rank()}] Cache load failed: {e}. Will reprocess.")
+                os.remove(ready_file) if os.path.exists(ready_file) else None
+                self.dataset = None
+        else:
+            self.dataset = None
+        
+        # If cache doesn't exist or failed to load, process it
+        if self.dataset is None:
+            if _is_main_process():
+                # Rank 0 does the preprocessing
+                logging.info(f"[Rank {_get_rank()}] Preprocessing dataset (this may take ~1 hour)...")
+                
+                # Create lock file to signal we're working
+                os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+                with open(lock_file, "w") as f:
+                    f.write(f"rank0_processing_{os.getpid()}")
+                
+                try:
+                    self.dataset = _load_and_preprocess()
+                    
+                    # Save to disk
+                    logging.info(f"[Rank {_get_rank()}] Saving preprocessed dataset to: {cache_dir}")
+                    self.dataset.save_to_disk(cache_dir)
+                    
+                    # Mark as ready
+                    with open(ready_file, "w") as f:
+                        f.write("ready")
+                    
+                    logging.info(f"[Rank {_get_rank()}] Preprocessing complete. Saved {len(self.dataset)} samples.")
+                finally:
+                    # Remove lock file
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
+            
+            # Synchronize - rank 0 finishes before others proceed
+            _barrier()
+            
+            # Non-main ranks load from the cache that rank 0 created
+            if not _is_main_process():
+                # Wait for ready file (with timeout)
+                import time
+                max_wait = 7200  # 2 hours max
+                waited = 0
+                while not os.path.exists(ready_file) and waited < max_wait:
+                    time.sleep(5)
+                    waited += 5
+                    if waited % 60 == 0:
+                        logging.info(f"[Rank {_get_rank()}] Waiting for rank 0 to finish preprocessing... ({waited}s)")
+                
+                if os.path.exists(ready_file):
+                    logging.info(f"[Rank {_get_rank()}] Loading preprocessed dataset from: {cache_dir}")
+                    self.dataset = datasets.load_from_disk(cache_dir)
+                    logging.info(f"[Rank {_get_rank()}] Loaded {len(self.dataset)} samples.")
+                else:
+                    raise RuntimeError(f"[Rank {_get_rank()}] Timeout waiting for preprocessed dataset!")
 
         # Analyze skip reasons before filtering
         original_len = len(self.dataset)
