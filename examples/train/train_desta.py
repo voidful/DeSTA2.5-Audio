@@ -126,6 +126,8 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         gradient_checkpointing=getattr(cfg.trainer, "gradient_checkpointing", False),
         dataloader_num_workers=getattr(cfg.dataset.train_ds, "num_workers", 4),
         dataloader_pin_memory=getattr(cfg.dataset.train_ds, "pin_memory", True),
+        # Auto batch size: automatically reduce batch size on OOM
+        auto_find_batch_size=True,
     )
 
 
