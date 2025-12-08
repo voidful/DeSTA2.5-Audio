@@ -11,12 +11,31 @@ from typing import Any, Dict, List, Tuple
 
 import datasets
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig
 from transformers import AutoFeatureExtractor, AutoTokenizer
 
 from desta.models.modeling_desta25 import _prepare_audio_context_and_start_positions
 from desta.utils.audio import AudioSegment
 from lulutils import resolve_filepath
+
+
+def _get_rank() -> int:
+    """Get the current process rank in distributed training. Returns 0 if not distributed."""
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+
+def _is_main_process() -> bool:
+    """Check if this is the main process (rank 0)."""
+    return _get_rank() == 0
+
+
+def _barrier():
+    """Synchronize all processes in distributed training."""
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
 
 def _prepare_audio_context_with_start_end_tags(
@@ -297,22 +316,50 @@ class BaseAudioTextDataset:
             logging.info(f"Loading manifest: {filepath}")
 
         # Load and preprocess dataset
-        # Note: Enable caching to avoid redundant processing across distributed workers
-        # Each worker can reuse the cached preprocessed dataset
+        # In distributed training, only rank 0 preprocesses to avoid cache race conditions.
+        # Other ranks wait at the barrier, then all ranks load from cache.
         
-        self.dataset = datasets.load_dataset(
-            "json", 
-            data_files=[resolve_filepath(fp) for fp in self.manifest_filepaths]
-        )["train"]
+        data_files = [resolve_filepath(fp) for fp in self.manifest_filepaths]
+        
+        if _is_main_process():
+            logging.info(f"[Rank {_get_rank()}] Preprocessing dataset...")
+            
+            self.dataset = datasets.load_dataset(
+                "json", 
+                data_files=data_files
+            )["train"]
 
-        self.dataset = self.dataset.map(
-            self._preprocess_function,
-            batched=True,
-            batch_size=128,  # Reduced batch size to lower memory footprint
-            num_proc=1,
-            load_from_cache_file=True,  # Enable cache for distributed workers
-            keep_in_memory=False  # Critical: avoid OOM with large datasets
-        )
+            self.dataset = self.dataset.map(
+                self._preprocess_function,
+                batched=True,
+                batch_size=128,  # Reduced batch size to lower memory footprint
+                num_proc=1,
+                load_from_cache_file=True,  # Enable cache for distributed workers
+                keep_in_memory=False  # Critical: avoid OOM with large datasets
+            )
+            logging.info(f"[Rank {_get_rank()}] Preprocessing complete. Dataset cached.")
+        
+        # Synchronize all processes - rank 0 finishes preprocessing before others proceed
+        _barrier()
+        
+        if not _is_main_process():
+            logging.info(f"[Rank {_get_rank()}] Loading preprocessed dataset from cache...")
+            
+            self.dataset = datasets.load_dataset(
+                "json", 
+                data_files=data_files
+            )["train"]
+            
+            # This will load from cache since rank 0 already created it
+            self.dataset = self.dataset.map(
+                self._preprocess_function,
+                batched=True,
+                batch_size=128,
+                num_proc=1,
+                load_from_cache_file=True,
+                keep_in_memory=False
+            )
+            logging.info(f"[Rank {_get_rank()}] Cache loaded.")
 
         # Analyze skip reasons before filtering
         original_len = len(self.dataset)
