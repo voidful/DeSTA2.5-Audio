@@ -179,7 +179,6 @@ class WhisperPerception(nn.Module):
         embed_pos = self.whisper.model.encoder.embed_positions.weight[:self.whisper.model.encoder.config.max_source_positions, :] # @kehan
 
         hidden_states = inputs_embeds + embed_pos
-        features_length = hidden_states.size(1)
 
         if self.config.connector_mode == "qformer_1":
             layer_prompt_outputs = []
@@ -217,7 +216,7 @@ class WhisperPerception(nn.Module):
             return prompt_output
 
         else:
-            raise NotImplementedError(f"mode {self.mode} not implemented")
+            raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
     
     
 
@@ -271,7 +270,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         self.audio_locator = config.audio_locator
         self.placeholder_token = config.placeholder_token
 
-        print(f"Loading LLM model from {self.config.llm_model_id}")
+        logging.info(f"Loading LLM model from {self.config.llm_model_id}")
         self.llm_model = AutoModelForCausalLM.from_pretrained(
             self.config.llm_model_id,
             torch_dtype=torch.bfloat16,
@@ -290,7 +289,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             )
             self.llm_model = get_peft_model(self.llm_model, lora_config).base_model.model
         
-        print(f"Loading Audio model from {self.config.encoder_model_id}")
+        logging.info(f"Loading Audio model from {self.config.encoder_model_id}")
         self.perception = WhisperPerception(self.config)
 
         self.configure_trainable_parameters()
@@ -392,9 +391,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             
 
 
-            if input_ids[text_batch_idx, audio_start_position-1] == 128096:
-                # for debugging
-                logging.warning(input_ids[text_batch_idx, audio_start_position-1: audio_start_position + audio_embeddings.size(0)+1])
+
 
             # clean GPU memory
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings

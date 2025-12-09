@@ -6,7 +6,6 @@ with evaluation and prediction capabilities.
 """
 import json
 import logging
-import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -36,7 +35,6 @@ class DeSTA25Trainer(Trainer):
         super().__init__(model=model, **kwargs)
         self.cfg = cfg
         self.metrics = ConsecutiveWordsAccuracyMetric()
-        self.prediction_step_outputs: List[Dict[str, Any]] = []
 
     def _is_empty_batch(self, inputs: Dict[str, Any]) -> bool:
         """Check if batch is empty (skipped due to audio errors)."""
@@ -47,7 +45,7 @@ class DeSTA25Trainer(Trainer):
         model: DeSTA25AudioModel, 
         inputs: Dict[str, torch.Tensor], 
         return_outputs: bool = False,
-        num_items_in_batch: Optional[int] = None
+        **kwargs
     ):
         """Compute loss with perplexity logging."""
         if self._is_empty_batch(inputs):
@@ -162,7 +160,7 @@ class DeSTA25Trainer(Trainer):
         
         # Create predictions file
         jsonl_path = Path(get_unique_filepath(filepath.parent / "preds" / filepath.name))
-        os.makedirs(jsonl_path.parent, exist_ok=True)
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(jsonl_path, "w") as f:
             for i, result in enumerate(results):
@@ -173,15 +171,8 @@ class DeSTA25Trainer(Trainer):
 
         # Create report
         report_path = jsonl_path.parent.parent / jsonl_path.name.replace(".jsonl", "-report.json")
-        
-        # Clean up results for report (remove verbose fields)
-        cleaned_results = [
-            {k: v for k, v in result.items() if k not in ["context", "audio_context"]}
-            for result in results
-        ]
-
-        total_correct = sum(r["correct"] for r in cleaned_results) if cleaned_results else 0
-        total_samples = len(cleaned_results) if cleaned_results else 1
+        total_correct = sum(r["correct"] for r in results)
+        total_samples = len(results) or 1
         
         report = {
             "metric": self.metrics.metric_name,
@@ -193,7 +184,10 @@ class DeSTA25Trainer(Trainer):
             ),
             "categories_accuracy": {k: sum(v) / len(v) for k, v in categories_accuracy.items()},
             "ckpt": str(ckpt),
-            "results": cleaned_results,
+            "results": [
+                {k: v for k, v in r.items() if k not in {"context", "audio_context"}}
+                for r in results
+            ],
             "exp_dir": self.cfg.exp_dir,
             "config": OmegaConf.to_container(self.cfg, resolve=True),
             "commit": run("git rev-parse HEAD"),

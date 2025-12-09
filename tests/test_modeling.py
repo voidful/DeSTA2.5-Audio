@@ -1,6 +1,5 @@
 import pytest
 import torch
-from omegaconf import OmegaConf
 from desta.models.modeling_desta25 import DeSTA25Config, QformerConnector, WhisperPerception
 
 @pytest.fixture
