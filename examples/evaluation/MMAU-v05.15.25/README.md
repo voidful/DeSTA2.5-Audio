@@ -1,56 +1,30 @@
-## MMAU-v05.15.25 evaluation 
+# MMAU-v05.15.25 evaluation 
 
-DeSTA2.5-Audio ❤️ 
-Sound: 66.83333333333333
-speech: 71.94194885970975
-music: 57.099999999999994
-Avg: 65.21250281088375
-
-
-| Name                  | Size | Sound | Music | Speech | Avg   |
-| --------------------- | ---- | ----- | ----- | ------ | ----- |
-| Audio Flamingo 3    | 8.2B | 75.83 | 66.77 | 66.97  | 72.42 |
-| Qwen2.5-Omni       | 8.2B | 76.77 | 65.90 | 68.90  | 71.00 |
-| Gemini 2.5 Pro     | -    | 70.63 | 68.26 | 72.67  | 69.36 |
-| Gemini 2.5 Flash      | -    | 69.50 | 65.57 | 68.27  | 67.39 |
-| Gemini 2.0 Flash      | -    | 68.93 | 65.27 | 72.87  | 67.03 |
-| **DeSTA2.5-Audio** ❤️     | 8 B | 66.83 | 57.09 |  71.94 | 65.21 |
-| Kimi-Audio            | 8.2B | 70.70 | 66.77 | 56.57  | 64.40 |
-| Audio Reasoner        | 8.2B | 67.27 | 69.16 | 62.53  | 63.78 |
-| Phi-4-multimodal      | 5.5B | 62.67 | 64.37 | 63.80  | 62.81 |
-| Gemini 2.5 Flash Lite | -    | 62.50 | 63.47 | 67.47  | 61.61 |
-| Audio Flamingo 2      | 3B   | 68.13 | 70.96 | 44.87  | 61.06 |
-| GPT-4o Audio          | -    | 63.20 | 56.29 | 69.33  | 60.82 |
-| Qwen2-Audio-Instruct  | 7B   | 61.17 | 56.29 | 55.37  | 57.40 |
-| Gemma 3n              | 4B   | 50.27 | 56.89 | 62.13  | 55.20 |
-| Gemma 3n              | 2B   | 47.47 | 52.10 | 57.07  | 52.60 |
-| GPT-4o mini Audio     | -    | 49.67 | 39.22 | 67.47  | 51.03 |
+|                                                                             | Speech    | Speech | Sound     | Sound | Music     | Music | Avg       |       |
+| --------------------------------------------------------------------------- | --------- | ------ | --------- | ----- | --------- | ----- | --------- | ----- |
+| Name                                                                        | Test-mini | Test   | Test-mini | Test  | Test-mini | Test  | Test-mini | Test  |
+|                                                                             |           |        |           |       |           |       |           |       |
+| [Audio Flamingo 3](https://www.arxiv.org/abs/2507.08128)                 | 66.37     | 66.97  | 79.58     | 75.83 | 66.77     | 74.47 | 73.30     | 72.42 |
+| [Qwen2.5-Omni](https://arxiv.org/abs/2503.20215)                         | 70.60     | 68.90  | 78.10     | 76.77 | 65.90     | 67.33 | 71.50     | 71.00 |
+| [Gemini 2.5 Pro](https://ai.google.dev/gemini-api/docs/models)           | 71.47     | 72.67  | 75.08     | 70.63 | 68.26     | 64.77 | 71.60     | 69.36 |
+|[DeSTA2.5-Audio](https://arxiv.org/abs/2507.02768) ❤️❤️❤️ |**71.17**    |**71.94** |**70.57**    |**66.83**|**56.29**    |**57.09**|**66.00**       |**65.21**|
+| [Kimi-Audio](https://arxiv.org/abs/2504.18425)                              | 62.16     | 56.57  | 75.68     | 70.70 | 66.77     | 65.93 | 68.20     | 64.40 |
+| [Audio Reasoner](https://huggingface.co/zhifeixie/Audio-Reasoner/tree/main) | 66.07     | 62.53  | 67.87     | 67.27 | 69.16     | 61.53 | 67.70     | 63.78 |
+| [Phi-4-multimodal](https://huggingface.co/microsoft/phi-4)                  | 67.27     | 63.80  | 65.47     | 62.67 | 64.37     | 61.97 | 65.70     | 62.81 |
+| [Gemini 2.5 Flash Lite](https://ai.google.dev/gemini-api/docs/models)       | 72.07     | 67.47  | 63.06     | 62.50 | 63.47     | 54.87 | 66.20     | 61.61 |
+| [Audio Flamingo 2](https://huggingface.co/nvidia/audio-flamingo)            | 44.74     | 44.87  | 71.47     | 68.13 | 70.96     | 70.20 | 62.40     | 61.06 |
+| [GPT-4o Audio](https://arxiv.org/abs/2410.21276)                            | 66.67     | 69.33  | 64.56     | 63.20 | 56.29     | 49.93 | 62.50     | 60.82 |
+| [Qwen2-Audio-Instruct](https://arxiv.org/abs/2407.10759)                    | 55.26     | 55.37  | 67.27     | 61.17 | 56.29     | 55.67 | 59.60     | 57.40 |
+| [Gemma 3n](https://deepmind.google/models/gemma/gemma-3n/)                  | 61.26     | 62.13  | 55.86     | 50.27 | 56.89     | 53.20 | 58.00     | 55.20 |
+| [GPT-4o mini Audio](https://arxiv.org/abs/2410.21276)                       | 69.07     | 67.47  | 50.75     | 49.67 | 39.22     | 35.97 | 53.00     | 51.03 |
+| [SALMONN](https://arxiv.org/pdf/2310.13289)                                 | 26.43     | 28.77  | 41.14     | 42.10 | 37.13     | 37.83 | 34.90     | 36.23 |
+| [GAMA-IT](https://huggingface.co/spaces/sonalkum/GAMA-IT)                   | 10.81     | 11.57  | 30.93     | 32.73 | 26.74     | 22.37 | 22.83     | 22.22 |
+| [LTU](https://openreview.net/pdf?id=nBZBPXdJlC)                             | 15.92     | 15.33  | 20.42     | 20.67 | 15.97     | 15.68 | 17.44     | 17.23 |
+| [Audio Flamingo Chat](https://huggingface.co/nvidia/audio-flamingo)         | 6.91      | 7.67   | 25.23     | 23.33 | 17.66     | 15.77 | 16.60     | 15.59 |
 
 
 
-| Name                  | Size | Sound | Music | Speech | Avg   |
-| --------------------- | ---- | ----- | ----- | ------ | ----- |
-| Audio Flamingo 3    | 8.2B | 79.58 | 74.47 | 66.37  | 73.30 |
-| Qwen2.5-Omni       | 8.2B | 78.10 | 67.33 | 70.60  | 71.50 |
-| Gemini 2.5 Pro      | -    | 75.08 | 64.77 | 71.47  | 71.60 |
-| Gemini 2.5 Flash      | -    | 73.27 | 69.40 | 76.58  | 71.80 |
-| Gemini 2.0 Flash      | -    | 71.17 | 59.30 | 75.08  | 70.50 |
-| Kimi-Audio            | 8.2B | 75.68 | 65.93 | 62.16  | 68.20 |
-| Audio Reasoner        | 8.2B | 67.87 | 61.53 | 66.07  | 67.70 |
-| DeSTA2.5-Audio ❤️     | 8 B | 71.17 | 70.57 | 56.29 | 66.00 |
-| Phi-4-multimodal      | 5.5B | 65.47 | 61.97 | 67.27  | 65.70 |
-| Gemini 2.5 Flash Lite | -    | 63.06 | 54.87 | 72.07  | 66.20 |
-| Audio Flamingo 2      | 3B   | 71.47 | 70.20 | 44.74  | 62.40 |
-| GPT-4o Audio          | -    | 64.56 | 49.93 | 66.67  | 62.50 |
-| Qwen2-Audio-Instruct  | 7B   | 67.27 | 55.67 | 55.26  | 59.60 |
-| Gemma 3n              | 4B   | 55.86 | 53.20 | 61.26  | 58.00 |
-| Gemma 3n              | 2B   | 51.35 | 51.63 | 52.22  | 51.69 |
-| GPT-4o mini Audio     | -    | 50.75 | 35.97 | 69.07  | 53.00 |
-
-
-
-
-## Run
+## Inference model
 
 ```shell
 # MMAU test-mini
@@ -60,11 +34,12 @@ CUDA_VISIBLE_DEVICES=0 HF_HOME=/root/.cache python inference_desta25_audio.py --
 CUDA_VISIBLE_DEVICES=0 HF_HOME=/root/.cache python inference_desta25_audio.py --data_root /lab/DeSTA2.5-Audio/my_data -i ./MMAU-051525/data/mmau-test.json --model_id desta25
 ```
 
+**Evaluate test-mini with official evaluation scripts** from [evaluate.py](https://github.com/Sakshi113/MMAU/blob/main/evaluation.py)
 ```shell
 python mmau_evaluate.py --input /lab/DeSTA2.5-Audio/examples/evaluation/MMAU/results/mmau-test-mini_results.json
 ```
 
-
+test-mini results:
 ```
 ******************************
 Task-wise Accuracy:
