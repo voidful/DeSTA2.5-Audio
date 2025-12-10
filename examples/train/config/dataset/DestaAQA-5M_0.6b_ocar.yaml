@@ -1,11 +1,11 @@
 train_ds:
   data_root: "/work/voidful2nlp/desta"
   manifest_filepaths:
-    - "/work/voidful2nlp/desta/qwen3_4b_desta_fixed.jsonl"
+    - "/work/voidful2nlp/desta/qwen3_0.6b_desta.jsonl"
 
   batch_sampler: null
   max_seq_length: 300
-  batch_size: 32  # Reduced for OCAR memory overhead
+  batch_size: 64
   shuffle: True
   pin_memory: True
   num_workers: 4
@@ -25,3 +25,4 @@ validation_ds:
   num_workers: 0
   drop_last: True
   return_seed: False
+
