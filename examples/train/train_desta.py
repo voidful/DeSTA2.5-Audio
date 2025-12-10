@@ -122,7 +122,8 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         run_name=cfg.name,
         remove_unused_columns=False,
         label_names=["labels"],
-        ddp_find_unused_parameters=False,
+        # Enable find_unused_parameters for OCAR mode (prosody heads may not be used)
+        ddp_find_unused_parameters=cfg.model.connector.mode == "ocar_hybrid",
         gradient_checkpointing=getattr(cfg.trainer, "gradient_checkpointing", False),
         dataloader_num_workers=getattr(cfg.dataset.train_ds, "num_workers", 4),
         dataloader_pin_memory=getattr(cfg.dataset.train_ds, "pin_memory", True),
