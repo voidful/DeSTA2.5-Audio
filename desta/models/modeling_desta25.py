@@ -735,26 +735,40 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         hidden_size = self.config.llm_config.hidden_size
         num_heads = self.config.llm_config.num_attention_heads
+        gate_init = getattr(self.config, 'ocar_gate_init', 0.1)
+        
+        # Get number of layers from config to ensure consistency across DDP ranks
+        num_layers = getattr(self.config.llm_config, 'num_hidden_layers', None)
         
         # Get decoder layers - handle different model architectures
         if hasattr(self.llm_model, 'model') and hasattr(self.llm_model.model, 'layers'):
-            layers = self.llm_model.model.layers  # Llama-style
+            layers = self.llm_model.model.layers  # Llama/Qwen-style
         elif hasattr(self.llm_model, 'transformer') and hasattr(self.llm_model.transformer, 'h'):
             layers = self.llm_model.transformer.h  # GPT-style
         else:
             logging.warning("Could not find decoder layers for OCAR deep injection")
             return
         
+        # Verify layer count matches config (DDP consistency check)
+        if num_layers is not None and len(layers) != num_layers:
+            logging.warning(f"Layer count mismatch: config has {num_layers}, model has {len(layers)}")
+        
         # Create cross-attention modules and wrap layer forwards
+        # Use fixed number from config if available to ensure DDP consistency
+        actual_num_layers = num_layers if num_layers is not None else len(layers)
         self.ocar_cross_attns = nn.ModuleList()
         
-        for layer_idx, layer in enumerate(layers):
+        for layer_idx in range(actual_num_layers):
             cross_attn = OCARGatedCrossAttention(
                 hidden_size=hidden_size,
                 num_heads=num_heads,
-                gate_init=self.config.ocar_gate_init,
+                gate_init=gate_init,
             )
             self.ocar_cross_attns.append(cross_attn)
+        
+        # Wrap each layer's forward method
+        for layer_idx, layer in enumerate(layers):
+            cross_attn = self.ocar_cross_attns[layer_idx]
             
             # Store reference to parent model for accessing audio_local
             parent_model = self
