@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeSTA2.5-Audio: Project Page</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@11/marked.min.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .wave-bar {
+            animation: wave 1s ease-in-out infinite;
+        }
+        @keyframes wave {
+            0%, 100% { height: 20%; }
+            50% { height: 100%; }
+        }
+        /* Custom scrollbar for table if needed */
+        .custom-scrollbar::-webkit-scrollbar {
+            height: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 6px;
+        }
+        .bar-enter {
+            animation: grow 1s ease-out forwards;
+        }
+        @keyframes grow {
+            from { width: 0; }
+        }
+        /* Markdown content styling */
+        .markdown-content {
+            line-height: 1.8;
+            font-size: 1.125rem;
+        }
+        .markdown-content p {
+            margin: 0.75em 0;
+        }
+        .markdown-content ul, .markdown-content ol {
+            margin: 0.75em 0;
+            padding-left: 2em;
+        }
+        .markdown-content li {
+            margin: 0.5em 0;
+            list-style-type: disc;
+        }
+        .markdown-content strong {
+            font-weight: 600;
+        }
+        .markdown-content em {
+            font-style: italic;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Markdown renderer component
+        const MarkdownRenderer = ({ content }) => {
+            const [html, setHtml] = useState('');
+            
+            useEffect(() => {
+                if (window.marked && content) {
+                    // Configure marked options
+                    window.marked.setOptions({
+                        breaks: true,
+                        gfm: true
+                    });
+                    const parsed = window.marked.parse(content);
+                    setHtml(parsed);
+                } else {
+                    setHtml(content);
+                }
+            }, [content]);
+            
+            return (
+                <div 
+                    className="markdown-content text-2xl                    "
+                    dangerouslySetInnerHTML={{ __html: html }}
+                />
+            );
+        };
+
+        // Data: Updated to include 'audioSrc' and comparison responses
+        const demos = [
+            {
+              id: 7,
+              category: "Audio Analysis",
+              audioSrc: "assets/audios/72fb5481-73ae-409d-8e16-c94ac48d2ee4.wav",
+              instruction: `Based on the given audio, identify the source of the speech. The answer could be "A child", "A woman", "An adult man" or "A teenager".`,
+              responseOurs: `Based on the audio, I would identify the source of the speech as "A woman".`,
+            },
+            {
+              id: 8,
+              category: "Audio Analysis",
+              audioSrc: "assets/audios/AccentClassification_AccentdbExtended_0193_british_s01_176.wav",
+              instruction: `The task involves detecting variations in pronunciation and intonation. The answer could be american, australian, bangla, british, indian, malayalam, odiya, telugu, or welsh.`,
+              responseOurs: `Based on the audio clip, I would guess that the speaker is from the UK, specifically British. The accent and intonation seem to match a typical British English pronunciation.`,
+            },
+            {
+              id: 6,
+              category: "Audio Analysis",
+              audioSrc: "assets/audios/a3ca0d47-a55e-44a3-b354-7707912ccad8.wav",
+              instruction: `What is the automosphere like in the audio?`,
+              responseOurs: `The atmosphere in the audio clip is lively and energetic, with a sense of excitement and celebration. The music and the crowd's cheers and applause create a festive and joyful mood.`,
+            },
+            {
+              id: 2,
+              category: "Complex Audio Analysis & Multilingual Translation",
+              audioSrc: "assets/audios/1003_IWL_ANG_XX.wav",
+              instruction: "Tell me about this audio, including gender, emotion, spoken content. Translate the spoken content into Chinese, French, and German.",
+              responseOurs: `Analysis of the audio clip:
+
+* **Gender:** The speaker is a female.
+* **Emotion:** The speaker is expressing a sense of frustration or annoyance, which is classified as an emotion of anger.
+* **Spoken content:** The speaker says, "I would like a new alarm clock."
+
+Translations:
+
+* **Chinese:** " (Wǒ yào yī gè xīn de zhōng zhōng zhōng)"
+* **French:** "Je voudrais un nouveau réveil"
+* **German:** "Ich möchte ein neues Wecker"`,
+            },
+            {
+                id: 1,
+                category: "Complex Audio Analysis & General Knowledge",
+                audioSrc: "assets/audios/bf50d3fb-4454-4eea-9336-6acc0e8d34fa.wav",
+                instruction: "Describe this audio.",
+                responseOurs: "The audio clip is a brief snippet from the movie Fight Club (1999) directed by David Fincher. It starts with a loud, energetic sound effect, followed by a man speaking in a deep, gravelly voice, and then a crowd cheering in the background. The man's voice says, \"The first rule of Fight Club is you do not talk about Fight Club.\"",
+            },
+            
+            {
+              id: 3,
+              category: "Multi-hop Reasoning",
+              audioSrc: "assets/audios/cat14.wav",
+              instruction: `When listening to the sound of the animal in the audio and considering what is commonly known about the behaviors of animals in this audio, which of the following actions best represents its natural or most typical way of acting?
+(a) Flying between trees
+(b) Purring
+(c) Hiding in shells
+(d) Swimming in open water.
+
+Answer with the format "The answer is ___." and provide a short explanation.`,
+              responseOurs: `The answer is b.
+
+The audio clip is a cat, and cats are known for their purring sound, which is a common behavior for them.`,
+            },
+            {
+              id: 4,
+              category: "Complex Audio Analysis & Multilingual understanding",
+              audioSrc: "assets/audios/6590b5fe-68ce-42ae-898f-018939d3c6d4.wav",
+              instruction: `List what you hear in the audio.`,
+              responseOurs: `Here is what I hear in the audio:
+
+1. A man speaking in Japanese: "えー、じゃあ、やっぱ久しぶりです。丸2年ぶりにやります。"
+
+Translation: "Ah, so it's been a while. It's been two years since we've done this."
+
+I hear:
+
+* A man speaking in Japanese
+* A brief pause
+* The sound of a crowd cheering and applauding`,
+            },
+            {
+              id: 5,
+              category: "Conversation & Format following",
+              audioSrc: "assets/audios/48163453-181f-4f85-916f-875af83bd0b1.wav",
+              instruction: `Your task is to continue the conversation with the user. Answer in the JSON format: 
+
+content: ...
+speaking speed: <slow|normal|fast>
+pitch: <low|normal|high>
+tone: <sad|happy|neutral>`,
+              responseOurs: `{
+  "content": "She's doing okay, I guess. She's been a bit down lately, but the doctor says she's stable. We're just waiting for the test results to come back.",
+  "speaking_speed": "normal",
+  "pitch": "normal",
+  "tone": "neutral"
+}`,
+            },
+        ];
+
+        // Benchmark Data from Table II
+        const benchmarks = [
+            {
+                name: "Dynamic-SUPERB (Phase-1)",
+                description: "Evaluates comprehensive auditory perception across 48 tasks.",
+                max: 80,
+                data: [
+                    { model: "LTU-AS", score: 36.11, color: "bg-gray-200" },
+                    { model: "SALMONN", score: 36.44, color: "bg-gray-200" },
+                    { model: "Qwen-Audio", score: 40.79, color: "bg-gray-300" },
+                    { model: "Qwen2-Audio", score: 51.69, color: "bg-gray-400" },
+                    { model: "DeSTA2.5-Audio (Ours)", score: 69.53, color: "bg-blue-600" }
+                ]
+            },
+            {
+                name: "MMAU-v05.15.25 (Test)",
+                description: "Assesses advanced audio understanding & reasoning (Speech, Sound, Music).",
+                max: 75,
+                data: [
+                    { model: "LTU-AS", score: 17.23, color: "bg-gray-200" },
+                    { model: "SALMONN", score: 36.23, color: "bg-gray-200" },
+                    { model: "Qwen2-Audio", score: 57.40, color: "bg-gray-300" },
+                    { model: "Audio Flamingo 2", score: 61.06, color: "bg-gray-400" },
+                    { model: "DeSTA2.5-Audio (Ours)", score: 65.21, color: "bg-blue-600" },
+                ]
+            },
+            {
+                name: "Speech-IFEval (IFrate)",
+                description: "Measures instruction-following robustness and catastrophic forgetting.",
+                max: 100,
+                data: [
+                    { model: "LTU-AS", score: 29.19, color: "bg-gray-200" },
+                    { model: "SALMONN", score: 36.89, color: "bg-gray-200" },
+                    { model: "Qwen-Audio", score: 32.98, color: "bg-gray-300" },
+                    { model: "Qwen2-Audio", score: 47.11, color: "bg-gray-400" },
+                    { model: "DeSTA2.5-Audio (Ours)", score: 93.89, color: "bg-blue-600" }
+                ]
+            },
+            {
+              name: "SAKURA(Multi-hop)",
+              description: "Evaluates multi-hop reasoning capabilities.",
+              max: 80,
+              data: [
+                { model: "LTU-AS", score: 18.10, color: "bg-gray-200" },
+                { model: "SALMONN", score: 35.30, color: "bg-gray-200" },
+                { model: "Qwen-Audio", score: 46.90, color: "bg-gray-300" },
+                { model: "Qwen2-Audio", score: 49.10, color: "bg-gray-400" },
+                { model: "DeSTA2.5-Audio (Ours)", score: 69.85, color: "bg-blue-600" }
+              ]
+
+            }
+        ];
+
+        const BarChart = ({ title, description, data, max }) => (
+            <div className="bg-white p-8 rounded-xl border border-gray-200 shadow-sm flex flex-col h-full">
+                <h3 className="text-2xl font-bold text-gray-900 mb-2">{title}</h3>
+                <p className="text-base text-gray-500 mb-8 h-12">{description}</p>
+                
+                <div className="flex-1 space-y-6">
+                    {data.map((item, index) => (
+                        <div key={index} className="relative">
+                            <div className="flex justify-between text-base font-medium text-gray-600 mb-2">
+                                <span>{item.model}</span>
+                                <span>{item.score}</span>
+                            </div>
+                            <div className="w-full bg-gray-100 rounded-full h-4 overflow-hidden">
+                                <div 
+                                    className={`h-4 rounded-full ${item.color} bar-enter`} 
+                                    style={{ width: `${(item.score / max) * 100}%` }}
+                                ></div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+
+        // Standard HTML5 Audio Player
+        const AudioPlayer = ({ src }) => {
+            return (
+                <div className="w-full mt-2">
+                    <audio 
+                        controls 
+                        preload="metadata"
+                        className="w-full focus:outline-none"
+                    >
+                        <source src={src} type="audio/wav" />
+                        Your browser does not support the audio element.
+                    </audio>
+                </div>
+            );
+        };
+
+        const DemoRow = ({ item }) => {
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            }, []);
+
+
+            
+            return (
+                <tr className="border-b border-gray-200 hover:bg-gray-50 transition-colors group">
+                  <td className="p-6 align-top min-w-[350px]">
+                    <span className="text-lg font-bold text-gray-500 leading-relaxed mb-8">
+                        {item.category}
+                    </span>
+                    <div className="mb-4">
+                            <div className="bg-yellow-50 p-5 rounded-md border border-yellow-100/80 mt-2 shadow-sm">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <i data-lucide="message-square" className="w-5 h-5 text-yellow-400"></i>
+                                    <span className="text-base font-bold text-yellow-600 uppercase tracking-wide">User</span>
+                                </div>
+                                <div className="mb-4">
+                                  <AudioPlayer src={item.audioSrc} duration={item.duration} />
+                                </div>
+                                <div className="text-2xl
+                                text-gray-900 font-medium leading-relaxed">
+                                    <MarkdownRenderer content={item.instruction} />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="mb-4">
+                            <div className="bg-green-50 p-5 rounded-md border border-green-100/80 mt-2 shadow-sm">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <i data-lucide="message-square" className="w-5 h-5 text-green-400"></i>
+                                    <span className="text-base font-bold text-green-600 uppercase tracking-wide">DeSTA2.5-Audio</span>
+                                </div>
+                                <div className="text-lg text-green-900 font-medium leading-relaxed">
+                                    <MarkdownRenderer content={item.responseOurs} />
+                                </div>
+                            </div>
+                        </div>
+                    
+                    </td>
+                </tr>
+            );
+        };
+        const App = () => {
+            return (
+                <div className="max-w-7xl mx-auto px-8 py-16">
+                    <header className="text-center mb-20">
+                        <h1 className="text-5xl md:text-6xl font-bold text-gray-900 mb-8 tracking-tight">
+                            DeSTA2.5-Audio
+                        </h1>
+                        <p className="text-2xl md:text-3xl text-gray-600 mb-10 max-w-3xl mx-auto leading-relaxed">
+                            Toward General-Purpose Large Audio Language Model with <span className="text-blue-600 font-medium">Self-Generated Cross-Modal Alignment</span>
+                        </p>
+                        
+                        <div className="flex flex-wrap justify-center gap-4 text-lg text-gray-600 mb-10">
+                          <span>Ke-Han Lu, Zhehuai Chen, Szu-Wei Fu, Chao-Han Huck Yang, Sung-Feng Huang,
+                          Chih-Kai Yang, Chee-En Yu, 
+                          Chun-Wei Chen, Wei-Chih Chen, Chien-yu Huang,
+                          Yi-Cheng Lin, Yu-Xiang Lin, Chi-An Fu, Chun-Yi Kuan, Wenze Ren, Xuanjun Chen, Wei-Ping Huang,
+                          En-Pei Hu, Tzu-Quan Lin, Yuan-Kuei Wu, Kuan-Po Huang, Hsiao-Ying Huang, Huang-Cheng Chou, Kai-Wei Chang, Cheng-Han Chiang, 
+                          Boris Ginsburg, Yu-Chiang Frank Wang, Hung-yi Lee </span>
+                        </div>
+                        <div className="flex justify-center gap-4 text-lg text-gray-600 mb-10">
+                          <span>National Taiwan University, NVIDIA Research</span>
+                        </div>
+
+                        <div className="flex justify-center gap-6">
+                            <a href="https://arxiv.org/abs/2507.02768" className="flex items-center gap-3 px-7 py-3 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors font-medium text-lg">
+                                <i data-lucide="file-text" className="w-5 h-5"></i>
+                                Paper
+                            </a>
+                            <a href="https://github.com/kehanlu/DeSTA2.5-Audio" className="flex items-center gap-3 px-7 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium text-lg">
+                                <i data-lucide="github" className="w-5 h-5"></i>
+                                Code
+                            </a>
+                            <a href="https://huggingface.co/collections/DeSTA-ntu/desta25-audio-686a6b9e71afd92e1dd87486" className="flex items-center gap-3 px-7 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium text-lg">
+                                <i data-lucide="box" className="w-5 h-5"></i>
+                                Dataset & Model
+                            </a>
+                        </div>
+                    </header>
+
+                    {/* Abstract */}
+                    <section className="mb-20">
+                        <h2 className="text-base font-bold text-gray-400 uppercase tracking-wider mb-6 border-b pb-3">Abstract</h2>
+                        <p className="text-gray-700 leading-8 text-justify text-lg">
+                          We introduce <strong>DeSTA2.5-Audio</strong>, a general-purpose Large Audio Language Model (LALM) designed for robust auditory perception and instruction-following.
+Recent LALMs augment Large Language Models (LLMs) with auditory capabilities by training on large-scale audio-instruction datasets. However, existing LALMs have often suffered from the catastrophic forgetting of the LLM's original abilities. Therefore, balancing knowledge retention and audio perception has become a critical challenge.
+To address this, we revisit the data construction pipeline and propose a self-generated cross-modal alignment strategy in which the backbone LLM generates its own training targets, named DeSTA. This approach aims at preserving the LLM’s native language proficiency thereby enabling zero-shot generalization without task-specific tuning.
+We construct DeSTA-AQA5M, a large-scale, task-agnostic dataset containing 5 million training samples derived from 7,000 hours of audio spanning 50 diverse datasets, including speech, environmental sounds, and music. DeSTA2.5-Audio achieves state-of-the-art or competitive performance across a wide range of audio-language benchmarks, including Dynamic-SUPERB, MMAU, SAKURA, Speech-IFEval, and VoiceBench.
+Comprehensive comparative studies demonstrate that our self-generated strategy outperforms existing training strategies.
+Our findings underscore the importance of carefully designed data construction in LALM development and offer practical insights for building robust, general-purpose LALMs.
+                        </p>
+                    </section>
+
+                    {/* Benchmark Results - NEW SECTION */}
+                    <section id="benchmarks" className="mb-24">
+                         <div className="flex items-center justify-between mb-8">
+                            <h2 className="text-xl font-bold text-gray-900">Benchmark Results</h2>
+                        </div>
+                        
+                        <div className="grid md:grid-cols-2 gap-8">
+                            {benchmarks.map((bench, idx) => (
+                                <BarChart 
+                                    key={idx}
+                                    title={bench.name}
+                                    description={bench.description}
+                                    data={bench.data}
+                                    max={bench.max}
+                                />
+                            ))}
+                        </div>
+                    </section>
+
+                    {/* Demos Table */}
+                    <section id="demos">
+                        <div className="flex items-center justify-between mb-8">
+                            <h2 className="text-3xl font-bold text-gray-900">Examples</h2>
+                        </div>
+                        <div className="flex items-center justify-center mb-8">
+                            <p className="text-lg text-gray-700">
+                                DeSTA2.5-Audio accepts <em><b>ANY</b></em> text instructions, including audio analysis, conversation, complex reasoning, and more.
+                            </p>
+                        </div>
+                        
+                        <div className="overflow-x-auto border border-gray-200 rounded-lg shadow-sm bg-white custom-scrollbar">
+                            <table className="w-full text-left border-collapse min-w-[1000px]">
+                                <thead>
+                                    <tr className="bg-gray-50 text-gray-500 text-base tracking-wider font-semibold border-b border-gray-200">
+                                        <th className="p-6">Examples</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white">
+                                    {demos.map(demo => (
+                                        <DemoRow key={demo.id} item={demo} />
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
