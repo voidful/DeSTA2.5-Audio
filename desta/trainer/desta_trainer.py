@@ -57,13 +57,20 @@ class DeSTA25Trainer(Trainer):
         loss = outputs.loss
         
         # Add OCAR auxiliary losses if present
-        if getattr(model.config, "ocar_enabled", False):
-            ocar_losses = getattr(outputs, "ocar_losses", None)
-            if ocar_losses is not None:
-                for name, l in ocar_losses.items():
-                    if l is not None:
-                        loss = loss + l
-                        self.log({f"train/{name}": l.item()})
+        # Handle DDP-wrapped models by accessing .module if needed
+        actual_model = model.module if hasattr(model, "module") else model
+        config = getattr(actual_model, "config", None)
+        
+        if config is not None:
+            # Check for OCAR mode using connector_mode (more reliable than ocar_enabled)
+            is_ocar = getattr(config, "connector_mode", "") == "ocar_hybrid"
+            if is_ocar:
+                ocar_losses = getattr(outputs, "ocar_losses", None)
+                if ocar_losses is not None:
+                    for name, l in ocar_losses.items():
+                        if l is not None:
+                            loss = loss + l
+                            self.log({f"train/{name}": l.item()})
         
         self.log({"train/loss": loss.item(), "train/ppl": torch.exp(outputs.loss).item()})
         
