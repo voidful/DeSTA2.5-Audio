@@ -525,7 +525,9 @@ class DeSTA25AudioModel(PreTrainedModel):
         self.perception = WhisperPerception(self.config)
 
         # === OCAR-DeSTA Setup ===
-        if self.config.ocar_enabled:
+        # Check both ocar_enabled and connector_mode for robust detection
+        is_ocar = getattr(self.config, 'ocar_enabled', False) or self.config.connector_mode == "ocar_hybrid"
+        if is_ocar:
             logging.info("Enabling OCAR-DeSTA components")
             
             # Prosody prediction heads
@@ -559,8 +561,12 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_start_positions=batch_start_positions
         )
         
-        # Handle OCAR mode
-        if self.config.ocar_enabled and isinstance(prepare_result, tuple) and len(prepare_result) == 3:
+        # Handle OCAR mode - check based on result type or connector_mode
+        is_ocar_mode = (
+            isinstance(prepare_result, tuple) and len(prepare_result) == 3
+        ) or self.config.connector_mode == "ocar_hybrid"
+        
+        if is_ocar_mode and isinstance(prepare_result, tuple) and len(prepare_result) == 3:
             inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
             
             # Set local tokens for deep injection (accessed by wrapped decoder layers)
@@ -641,7 +647,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         # Handle empty audio case
         if N_audio == 0:
             embeds = self.llm_model.model.embed_tokens(input_ids)
-            if self.config.ocar_enabled:
+            if self.config.connector_mode == "ocar_hybrid":
                 return embeds, None, None
             return embeds
         
@@ -665,8 +671,13 @@ class DeSTA25AudioModel(PreTrainedModel):
             input_features=batch_features, transcription_embeddings_list=transcription_embeddings_list
         )
         
-        # Handle OCAR mode output
-        if self.config.ocar_enabled and self.config.connector_mode == "ocar_hybrid":
+        # Handle OCAR mode output - check based on tuple length or connector_mode
+        # This handles cases where ocar_enabled may not be set but connector_mode is ocar_hybrid
+        is_ocar_output = (
+            isinstance(perception_output, tuple) and len(perception_output) == 3
+        ) or self.config.connector_mode == "ocar_hybrid"
+        
+        if is_ocar_output:
             # perception_output is (global_tokens, local_tokens, lengths)
             batch_global_tokens, batch_local_tokens, batch_audio_feature_lengths = perception_output
             batch_audio_features = batch_global_tokens  # Global tokens are what we splice
@@ -709,7 +720,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             # clean GPU memory
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings
 
-        if self.config.ocar_enabled:
+        if self.config.connector_mode == "ocar_hybrid":
             return inputs_embeds, batch_global_tokens, batch_local_tokens
         return inputs_embeds
     
@@ -718,7 +729,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         Wrap each LLM decoder layer with gated cross-attention for deep injection
         of local prosody tokens.
         """
-        if not self.config.ocar_enabled:
+        is_ocar = getattr(self.config, 'ocar_enabled', False) or self.config.connector_mode == "ocar_hybrid"
+        if not is_ocar:
             return
         
         hidden_size = self.config.llm_config.hidden_size
