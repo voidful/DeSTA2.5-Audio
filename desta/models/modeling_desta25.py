@@ -882,13 +882,19 @@ class DeSTA25AudioModel(PreTrainedModel):
         # batch_audio_features, batch_audio_feature_lengths = self.perception()
 
         # get the generated text
-        inputs_embeds = self._prepare_inputs_for_llm(
+        prepare_result = self._prepare_inputs_for_llm(
             input_ids=input_ids, 
             attention_mask=attention_mask, 
             batch_features=inputs["batch_features"],
             batch_transcription_ids=batch_transcription_ids, 
             batch_start_positions=batch_start_positions
         )
+        
+        # Handle OCAR mode - extract only inputs_embeds
+        if isinstance(prepare_result, tuple):
+            inputs_embeds = prepare_result[0]
+        else:
+            inputs_embeds = prepare_result
 
         if do_sample is False:
             top_p = None
