@@ -47,7 +47,7 @@ class DeSTA25Trainer(Trainer):
         return_outputs: bool = False,
         **kwargs
     ):
-        """Compute loss with perplexity logging."""
+        """Compute loss with perplexity logging and OCAR auxiliary losses."""
         if self._is_empty_batch(inputs):
             logging.warning("Skipping empty batch (audio decode errors)")
             zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
@@ -56,7 +56,16 @@ class DeSTA25Trainer(Trainer):
         outputs = model(**inputs)
         loss = outputs.loss
         
-        self.log({"train/loss": loss.item(), "train/ppl": torch.exp(loss).item()})
+        # Add OCAR auxiliary losses if present
+        if getattr(model.config, "ocar_enabled", False):
+            ocar_losses = getattr(outputs, "ocar_losses", None)
+            if ocar_losses is not None:
+                for name, l in ocar_losses.items():
+                    if l is not None:
+                        loss = loss + l
+                        self.log({f"train/{name}": l.item()})
+        
+        self.log({"train/loss": loss.item(), "train/ppl": torch.exp(outputs.loss).item()})
         
         return (loss, outputs) if return_outputs else loss
 

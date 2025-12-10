@@ -245,7 +245,7 @@ class BaseCollateFn:
         assert len(batch_features) == len(batch_start_positions) == len(batch_transcription_ids), \
             f"Length mismatch: features={len(batch_features)}, positions={len(batch_start_positions)}, transcriptions={len(batch_transcription_ids)}"
 
-        return {
+        result = {
             # Audio-text sequence
             "input_ids": audio_text_inputs['input_ids'],
             "attention_mask": audio_text_inputs['attention_mask'],
@@ -262,6 +262,43 @@ class BaseCollateFn:
             # Metadata
             "metadata": list(batch)
         }
+        
+        # === Optional OCAR prosody fields ===
+        # Collate f0_energy_global if present in samples
+        if any("f0_energy_global" in item for item in batch):
+            global_prosody = []
+            for item in batch:
+                if "f0_energy_global" in item:
+                    global_prosody.append(torch.tensor(item["f0_energy_global"], dtype=torch.float32))
+                else:
+                    global_prosody.append(torch.zeros(4, dtype=torch.float32))
+            result["f0_energy_global"] = torch.stack(global_prosody, dim=0)  # [B, 4]
+        
+        # Collate f0_energy_local if present in samples (with padding)
+        if any("f0_energy_local" in item for item in batch):
+            local_prosody_list = []
+            max_len = 0
+            for item in batch:
+                if "f0_energy_local" in item:
+                    t = torch.tensor(item["f0_energy_local"], dtype=torch.float32)
+                    local_prosody_list.append(t)
+                    max_len = max(max_len, t.size(0))
+                else:
+                    local_prosody_list.append(None)
+            
+            # Pad to max length
+            padded = []
+            for t in local_prosody_list:
+                if t is None:
+                    padded.append(torch.zeros(max_len, 2, dtype=torch.float32))
+                else:
+                    if t.size(0) < max_len:
+                        pad = torch.zeros(max_len - t.size(0), 2, dtype=torch.float32)
+                        t = torch.cat([t, pad], dim=0)
+                    padded.append(t)
+            result["f0_energy_local"] = torch.stack(padded, dim=0)  # [B, T_local, 2]
+        
+        return result
 
 
 class BaseAudioTextDataset:
