@@ -281,22 +281,26 @@ class OCARGatedCrossAttention(nn.Module):
         if audio_local is None or audio_local.shape[1] == 0:
             return hidden_states
         
+        # Ensure audio_local has same dtype and device as hidden_states
+        audio_local = audio_local.to(dtype=hidden_states.dtype, device=hidden_states.device)
+        
         # Build key_padding_mask: True for positions to IGNORE
         if audio_local_mask is not None:
             key_padding_mask = ~audio_local_mask.bool()
         else:
             key_padding_mask = None
         
-        cross_out, _ = self.cross_attn(
+        # Cast cross_attn to same dtype as hidden_states
+        cross_out, _ = self.cross_attn.to(dtype=hidden_states.dtype)(
             query=hidden_states,
             key=audio_local,
             value=audio_local,
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )
-        cross_out = self.ln(cross_out)
+        cross_out = self.ln.to(dtype=hidden_states.dtype)(cross_out)
         
-        return hidden_states + torch.tanh(self.gate) * cross_out
+        return hidden_states + torch.tanh(self.gate.to(dtype=hidden_states.dtype)) * cross_out
 
 @dataclass
 class GenerationOutput():
