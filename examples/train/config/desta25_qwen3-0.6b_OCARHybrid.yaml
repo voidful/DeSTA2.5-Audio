@@ -48,7 +48,7 @@ model:
   # OCAR-DeSTA specific configuration
   ocar:
     enabled: true
-    global_num_tokens: 8  # Keep small to reduce memory
+    global_num_tokens: 64
     local_downsample: 4
     local_kernel_size: 7
     gate_init: 0.1
@@ -62,7 +62,7 @@ model:
   audio_locator: "<|AUDIO|>" # newly created token
 
   generation_kwargs:
-    max_new_tokens: 256
+    max_new_tokens: 512
     do_sample: False
     temperature: 1
     top_p: 1
