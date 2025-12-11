@@ -48,7 +48,7 @@ model:
   # OCAR-DeSTA specific configuration
   ocar:
     enabled: true
-    global_num_tokens: 4
+    global_num_tokens: 8
     local_downsample: 4
     local_kernel_size: 7
     gate_init: 0.1
