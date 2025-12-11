@@ -5,7 +5,7 @@ train_ds:
 
   batch_sampler: null
   max_seq_length: 300
-  batch_size: 64
+  batch_size: 32
   shuffle: True
   pin_memory: True
   num_workers: 4
