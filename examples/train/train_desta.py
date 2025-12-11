@@ -82,6 +82,9 @@ def log_git_info():
 
 def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
     """Create and configure the DeSTA25 model."""
+    # Extract OCAR config if present
+    ocar_cfg = cfg.model.get("ocar", {})
+    
     model_config = DeSTA25Config(
         llm_model_id=cfg.model.llm.model_id,
         encoder_model_id=cfg.model.encoder.model_id,
@@ -91,6 +94,16 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         use_lora=getattr(cfg.model.llm, "use_lora", False),
         audio_locator=cfg.model.audio_locator,
         placeholder_token=cfg.model.placeholder_token,
+        # OCAR-DeSTA configuration
+        ocar_enabled=ocar_cfg.get("enabled", False),
+        ocar_global_num_tokens=ocar_cfg.get("global_num_tokens", 4),
+        ocar_local_downsample=ocar_cfg.get("local_downsample", 4),
+        ocar_local_kernel_size=ocar_cfg.get("local_kernel_size", 7),
+        ocar_gate_init=ocar_cfg.get("gate_init", 0.1),
+        ocar_ortho_weight_global=ocar_cfg.get("ortho_weight_global", 0.01),
+        ocar_ortho_diversity_weight=ocar_cfg.get("ortho_diversity_weight", 0.01),
+        ocar_prosody_weight_global=ocar_cfg.get("prosody_weight_global", 0.1),
+        ocar_prosody_weight_local=ocar_cfg.get("prosody_weight_local", 0.1),
     )
     
     model = DeSTA25AudioModel(model_config)

@@ -336,6 +336,12 @@ class BaseAudioTextDataset:
         self.prompt_size = cfg.model.connector.prompt_size
         self.tokenizer = tokenizer
         self.processor = processor
+        
+        # OCAR configuration: use global_num_tokens for audio size in OCAR mode
+        self.connector_mode = cfg.model.connector.mode
+        ocar_cfg = cfg.model.get("ocar", {})
+        self.ocar_global_num_tokens = ocar_cfg.get("global_num_tokens", 4)
+        
         model_cfg = cfg.model
         if isinstance(model_cfg, DictConfig):
             self.system_prompt = model_cfg.get("system_prompt", None)
@@ -653,7 +659,12 @@ class BaseAudioTextDataset:
                     self._first_missing_audio_logged = True
                 continue
 
-            audio_size_list = [self.prompt_size] * len(new_audios)
+            # Use appropriate audio size based on connector mode
+            if self.connector_mode == "ocar_hybrid":
+                audio_size = self.ocar_global_num_tokens
+            else:
+                audio_size = self.prompt_size
+            audio_size_list = [audio_size] * len(new_audios)
             transcriptions = ["" for _ in new_audios]
             transcription_size_list = [
                 len(self.tokenizer.tokenize(text, add_special_tokens=False))

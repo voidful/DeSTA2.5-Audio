@@ -301,15 +301,29 @@ def evaluate_desta_binary_accuracy_on_dataset(
 # =====================
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate DeSTA model on SAKURA QA datasets")
+    parser.add_argument("--model", type=str, default=DESTA_MODEL_ID,
+                        help="DeSTA model ID or path (supports OCAR models)")
+    parser.add_argument("--judge", type=str, default=JUDGE_MODEL_ID,
+                        help="Judge model ID")
+    parser.add_argument("--output-dir", type=str, default=RESULT_DIR,
+                        help="Output directory for results")
+    args = parser.parse_args()
+
     # 載入 DeSTA
-    print("Loading DeSTA model...")
-    desta_model = DeSTA25AudioModel.from_pretrained(DESTA_MODEL_ID)
+    print(f"Loading DeSTA model from: {args.model}")
+    desta_model = DeSTA25AudioModel.from_pretrained(args.model)
     desta_model.to(device)
     desta_model.eval()
+    
+    # Log OCAR status
+    if desta_model.config.connector_mode == "ocar_hybrid":
+        print(f"✓ OCAR mode enabled (global_num_tokens={desta_model.config.ocar_global_num_tokens})")
 
     # 載入 Qwen 評審
-    print("Loading Qwen judge model...")
-    judge_tokenizer, judge_model = load_qwen_judge(JUDGE_MODEL_ID)
+    print(f"Loading Qwen judge model: {args.judge}")
+    judge_tokenizer, judge_model = load_qwen_judge(args.judge)
 
     # 跑所有 dataset × hop 組合
     all_stats = []
@@ -324,7 +338,7 @@ def main():
                 dataset_name=dataset_name,
                 hop_prefix=hop_prefix,
                 split=DATA_SPLIT,
-                output_dir=RESULT_DIR,
+                output_dir=args.output_dir,
             )
             all_stats.append(stats)
 
@@ -341,3 +355,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
