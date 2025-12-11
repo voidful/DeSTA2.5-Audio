@@ -890,9 +890,12 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_start_positions=batch_start_positions
         )
         
-        # Handle OCAR mode - extract only inputs_embeds
-        if isinstance(prepare_result, tuple):
-            inputs_embeds = prepare_result[0]
+        # Handle OCAR mode - extract inputs_embeds and set local tokens for deep injection
+        if isinstance(prepare_result, tuple) and len(prepare_result) == 3:
+            inputs_embeds, global_tokens, local_tokens = prepare_result
+            # Set local tokens for deep injection during generation
+            self._ocar_audio_local = local_tokens
+            self._ocar_audio_local_mask = None
         else:
             inputs_embeds = prepare_result
 
@@ -900,15 +903,21 @@ class DeSTA25AudioModel(PreTrainedModel):
             top_p = None
             temperature = None
         
-        generated_ids = self.llm_model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            pad_token_id=pad_token_id,
-            temperature=temperature,
-            top_p=top_p,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample
-        )
+        try:
+            generated_ids = self.llm_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                pad_token_id=pad_token_id,
+                temperature=temperature,
+                top_p=top_p,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample
+            )
+        finally:
+            # Clear local tokens after generation
+            if hasattr(self, '_ocar_audio_local'):
+                self._ocar_audio_local = None
+                self._ocar_audio_local_mask = None
 
         return generated_ids
 
@@ -1046,7 +1055,13 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             batch_features = self.processor(batch_features, sampling_rate=16000, return_tensors="pt").input_features
             batch_features = batch_features.to(self.device)
-            audio_size_list = [self.config.prompt_size] * len(batch_features)
+            
+            # Use correct audio token size based on connector mode
+            if self.config.connector_mode == "ocar_hybrid":
+                audio_token_size = getattr(self.config, 'ocar_global_num_tokens', 64)
+            else:
+                audio_token_size = self.config.prompt_size
+            audio_size_list = [audio_token_size] * len(batch_features)
 
 
             # RUN ASR
