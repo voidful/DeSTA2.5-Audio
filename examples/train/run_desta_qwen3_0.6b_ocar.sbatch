@@ -65,8 +65,9 @@ echo "========================================" >> ${exp_dir}/run_info.txt
 
 # ===== 啟動訓練 (使用 torchrun 進行 DDP 分布式訓練) =====
 NUM_GPUS=4
+MASTER_PORT=$((29500 + RANDOM % 1000))
 
-torchrun --nproc_per_node=${NUM_GPUS} \
+torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ${ROOT_DIR}/examples/train/train_desta.py \
     --config-path=config \
     --config-name=${config} \
