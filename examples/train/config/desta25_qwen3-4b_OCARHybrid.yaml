@@ -1,0 +1,76 @@
+hydra:
+  run:
+    dir: ${exp_dir}
+
+
+project: desta25_qwen3_4b_ocar
+name: desta25_qwen3_4b_ocar
+exp_dir: ???
+
+resume_from_checkpoint: null
+init_from_pretrained_weights: null
+
+ptl_module: default
+
+wandb:
+  project: desta25_qwen3_4b_ocar
+  log_model: all
+
+trainer:
+  devices: [0,1,2,3,] # 0 for CPU, or list of the GPUs to use e.g. [0, 1] or [0]
+  num_nodes: 1
+  max_epochs: 5
+  max_steps: -1 # precedence over max_epochs
+  accumulate_grad_batches: 1 # accumulates grads every k batches
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed" #16 # should be set to 16 for O1 and O2 to enable the AMP.
+  accelerator: gpu
+  log_every_n_steps: 10  # interval of logging.
+  val_check_interval: 0.5  # set to 0.25 to check 4 times per epoch, or an int for number of iterations
+  num_sanity_val_steps: 0 # number of steps to perform validation steps for sanity check the validation process before starting the training, setting to 0 disables it
+  enable_checkpointing: True
+
+
+model:
+  llm:
+    model_id: Qwen/Qwen3-4B
+    freeze: True
+
+  encoder:
+    model_id: openai/whisper-large-v3-turbo
+    freeze: True
+
+  connector:
+    mode: ocar_hybrid
+    prompt_size: 64  # Not used in OCAR mode, but kept for compatibility
+    num_hidden_layers: 6
+
+  # OCAR-DeSTA specific configuration
+  ocar:
+    enabled: true
+    global_num_tokens: 64
+    local_downsample: 4
+    local_kernel_size: 7
+    gate_init: 0.1
+    ortho_weight_global: 0.01
+    ortho_diversity_weight: 0.01
+    prosody_weight_global: 0.1
+    prosody_weight_local: 0.1
+
+  # Qwen3 使用 <|video_pad|> 作为 placeholder token (已在词表中)
+  placeholder_token: "<|video_pad|>"
+  audio_locator: "<|AUDIO|>" # newly created token
+
+  generation_kwargs:
+    max_new_tokens: 512
+    do_sample: False
+    temperature: 1
+    top_p: 1
+
+optim:
+  lr: 1e-4
+  betas: [0.9, 0.98]
+  weight_decay: 0.01
+
+  sched:
+    warmup_steps: 5000
