@@ -49,8 +49,8 @@ model:
   ocar:
     enabled: true
     global_num_tokens: 64
-    local_downsample: 4
-    local_kernel_size: 7
+    local_downsample: 8
+    local_kernel_size: 9
     gate_init: 0.1
     ortho_weight_global: 0.01
     ortho_diversity_weight: 0.01
