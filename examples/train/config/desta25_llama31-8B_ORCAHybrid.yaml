@@ -3,8 +3,8 @@ hydra:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_4b_ocar
-name: desta25_qwen3_4b_ocar
+project: a100
+name: desta25_orca
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,11 +13,11 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_4b_ocar
+  project: desta25
   log_model: all
 
 trainer:
-  devices: [0,1,2,3,] # 0 for CPU, or list of the GPUs to use e.g. [0, 1] or [0]
+  devices: 8 # 0 for CPU, or list of the GPUs to use e.g. [0, 1] or [0]
   num_nodes: 1
   max_epochs: 5
   max_steps: -1 # precedence over max_epochs
@@ -33,23 +33,23 @@ trainer:
 
 model:
   llm:
-    model_id: Qwen/Qwen3-4B
+    model_id: DeSTA-ntu/Llama-3.1-8B-Instruct
     freeze: True
 
   encoder:
-    model_id: openai/whisper-large-v3-turbo
+    model_id: openai/whisper-large-v3
     freeze: True
 
   connector:
-    mode: ocar_hybrid
-    prompt_size: 64  # Not used in OCAR mode, but kept for compatibility
+    mode: orca_hybrid
+    prompt_size: 64  # Not used in ORCA mode, but kept for compatibility
     num_hidden_layers: 6
 
-  # OCAR-DeSTA specific configuration
-  ocar:
+  # ORCA-DeSTA specific configuration
+  orca:
     enabled: true
-    global_num_tokens: 64
-    local_downsample: 8
+    global_num_tokens: 8
+    local_downsample: 4
     local_kernel_size: 7
     gate_init: 0.1
     ortho_weight_global: 0.01
@@ -57,12 +57,11 @@ model:
     prosody_weight_global: 0.1
     prosody_weight_local: 0.1
 
-  # Qwen3 使用 <|video_pad|> 作为 placeholder token (已在词表中)
-  placeholder_token: "<|video_pad|>"
+  placeholder_token: "<|reserved_special_token_87|>" # need to be in LLM embedding table, but will be replaced by audio embedding
   audio_locator: "<|AUDIO|>" # newly created token
 
   generation_kwargs:
-    max_new_tokens: 512
+    max_new_tokens: 192
     do_sample: False
     temperature: 1
     top_p: 1

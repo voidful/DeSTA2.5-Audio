@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=desta_qwen3_4b_ocar
+#SBATCH --job-name=desta_qwen3_0.6b_orca
 #SBATCH --partition=normal
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
-#SBATCH --output=./slurm-report/desta_qwen3_4b_ocar_%j.out
-#SBATCH --error=./slurm-report/desta_qwen3_4b_ocar_%j.out
+#SBATCH --output=./slurm-report/desta_qwen3_0.6b_orca_%j.out
+#SBATCH --error=./slurm-report/desta_qwen3_0.6b_orca_%j.out
 
 # ===== 環境設定 =====
 # 載入 Anaconda/Miniconda module (依 cluster 調整)
@@ -37,11 +37,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-4b_OCARHybrid
-dataset_config=DestaAQA-5M_local
+config=desta25_qwen3-0.6b_ORCAHybrid
+dataset_config=DestaAQA-5M_0.6b_orca
 
-project=desta25_qwen3_4b_ocar
-name="qwen3-4b-instruct-ocar"
+project=desta25_qwen3_0.6b_orca
+name="qwen3-0.6b-instruct-orca"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -60,7 +60,7 @@ echo "Start Time: $(date)" >> ${exp_dir}/run_info.txt
 echo "Config: ${config}" >> ${exp_dir}/run_info.txt
 echo "Dataset Config: ${dataset_config}" >> ${exp_dir}/run_info.txt
 echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
-echo "OCAR Mode: enabled" >> ${exp_dir}/run_info.txt
+echo "ORCA Mode: enabled" >> ${exp_dir}/run_info.txt
 echo "========================================" >> ${exp_dir}/run_info.txt
 
 # ===== 啟動訓練 (使用 torchrun 進行 DDP 分布式訓練) =====

@@ -122,9 +122,9 @@ class QformerConnector(nn.Module):
         return output
 
 
-class OCARHybridConnector(nn.Module):
+class ORCAHybridConnector(nn.Module):
     """
-    OCAR Hybrid Connector with dual-branch architecture:
+    ORCA Hybrid Connector with dual-branch architecture:
     - Global branch: Q-Former style cross-attention for style tokens
     - Local branch: Conv1d downsampling for prosody tokens
     
@@ -152,11 +152,11 @@ class OCARHybridConnector(nn.Module):
         # === Global Branch (Q-Former style) ===
         # Learnable queries for each target layer
         self.global_queries = nn.ParameterList([
-            nn.Parameter(torch.randn(1, config.ocar_global_num_tokens, d_encoder))
+            nn.Parameter(torch.randn(1, config.orca_global_num_tokens, d_encoder))
             for _ in range(len(self.target_layer_ids))
         ])
         self.global_layer_weights = nn.Parameter(
-            torch.zeros(config.ocar_global_num_tokens, len(self.target_layer_ids), dtype=torch.float)
+            torch.zeros(config.orca_global_num_tokens, len(self.target_layer_ids), dtype=torch.float)
         )
         
         # Q-Former for global branch
@@ -175,8 +175,8 @@ class OCARHybridConnector(nn.Module):
         )
         
         # === Local Branch (Conv1d downsampling) ===
-        kernel_size = config.ocar_local_kernel_size
-        stride = config.ocar_local_downsample
+        kernel_size = config.orca_local_kernel_size
+        stride = config.orca_local_downsample
         padding = kernel_size // 2
         
         self.local_proj_in = nn.Linear(d_encoder, d_llm)
@@ -195,7 +195,7 @@ class OCARHybridConnector(nn.Module):
         audio_attention_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass of OCARHybridConnector.
+        Forward pass of ORCAHybridConnector.
         
         Args:
             encoder_hidden_states: List of hidden states from Whisper encoder layers
@@ -244,7 +244,7 @@ class OCARHybridConnector(nn.Module):
         return global_tokens, local_tokens
 
 
-class OCARGatedCrossAttention(nn.Module):
+class ORCAGatedCrossAttention(nn.Module):
     """
     Gated cross-attention module for deep injection of local prosody tokens
     into LLM decoder layers.
@@ -319,8 +319,8 @@ class WhisperPerception(nn.Module):
             self.config.encoder_model_id, cache_dir=os.getenv("HF_HOME"))
 
         # Create connector based on mode
-        if config.connector_mode == "ocar_hybrid":
-            self.connector = OCARHybridConnector(config)
+        if config.connector_mode == "orca_hybrid":
+            self.connector = ORCAHybridConnector(config)
         else:
             self.connector = QformerConnector(config)
 
@@ -336,16 +336,16 @@ class WhisperPerception(nn.Module):
 
         Returns:
             For qformer_1: tuple[torch.Tensor, list[int]]: (audio_features, speech_feature_lengths)
-            For ocar_hybrid: tuple[torch.Tensor, torch.Tensor, list[int]]: (global_tokens, local_tokens, global_lengths)
+            For orca_hybrid: tuple[torch.Tensor, torch.Tensor, list[int]]: (global_tokens, local_tokens, global_lengths)
         """
         bs = input_features.size(0)
 
         result = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list)
         
-        if self.config.connector_mode == "ocar_hybrid":
+        if self.config.connector_mode == "orca_hybrid":
             # result is (global_tokens, local_tokens)
             global_tokens, local_tokens = result
-            speech_feature_lengths = [self.config.ocar_global_num_tokens] * bs
+            speech_feature_lengths = [self.config.orca_global_num_tokens] * bs
             return global_tokens, local_tokens, speech_feature_lengths
         else:
             # result is audio_features tensor
@@ -376,7 +376,7 @@ class WhisperPerception(nn.Module):
 
         hidden_states = inputs_embeds + embed_pos
         
-        # Collect all layer outputs for OCAR
+        # Collect all layer outputs for ORCA
         all_layer_outputs = []
 
         if self.config.connector_mode == "qformer_1":
@@ -414,7 +414,7 @@ class WhisperPerception(nn.Module):
             
             return prompt_output
         
-        elif self.config.connector_mode == "ocar_hybrid":
+        elif self.config.connector_mode == "orca_hybrid":
             # Collect all layer hidden states
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = encoder_layer(
@@ -426,7 +426,7 @@ class WhisperPerception(nn.Module):
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
             
-            # Pass all layer outputs to OCARHybridConnector
+            # Pass all layer outputs to ORCAHybridConnector
             global_tokens, local_tokens = self.connector(all_layer_outputs)
             return global_tokens, local_tokens
 
@@ -449,16 +449,16 @@ class DeSTA25Config(PretrainedConfig):
                  use_lora=False,
                  audio_locator="<|AUDIO|>",
                  placeholder_token="<|reserved_special_token_87|>",
-                 # OCAR-DeSTA configuration fields
-                 ocar_enabled=False,
-                 ocar_global_num_tokens=4,
-                 ocar_local_downsample=4,
-                 ocar_local_kernel_size=7,
-                 ocar_gate_init=0.1,
-                 ocar_ortho_weight_global=0.01,
-                 ocar_ortho_diversity_weight=0.01,
-                 ocar_prosody_weight_global=0.1,
-                 ocar_prosody_weight_local=0.1,
+                 # ORCA-DeSTA configuration fields
+                 orca_enabled=False,
+                 orca_global_num_tokens=4,
+                 orca_local_downsample=4,
+                 orca_local_kernel_size=7,
+                 orca_gate_init=0.1,
+                 orca_ortho_weight_global=0.01,
+                 orca_ortho_diversity_weight=0.01,
+                 orca_prosody_weight_global=0.1,
+                 orca_prosody_weight_local=0.1,
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -477,16 +477,16 @@ class DeSTA25Config(PretrainedConfig):
 
         self.use_lora = use_lora
 
-        # OCAR-DeSTA configuration
-        self.ocar_enabled = ocar_enabled
-        self.ocar_global_num_tokens = ocar_global_num_tokens
-        self.ocar_local_downsample = ocar_local_downsample
-        self.ocar_local_kernel_size = ocar_local_kernel_size
-        self.ocar_gate_init = ocar_gate_init
-        self.ocar_ortho_weight_global = ocar_ortho_weight_global
-        self.ocar_ortho_diversity_weight = ocar_ortho_diversity_weight
-        self.ocar_prosody_weight_global = ocar_prosody_weight_global
-        self.ocar_prosody_weight_local = ocar_prosody_weight_local
+        # ORCA-DeSTA configuration
+        self.orca_enabled = orca_enabled
+        self.orca_global_num_tokens = orca_global_num_tokens
+        self.orca_local_downsample = orca_local_downsample
+        self.orca_local_kernel_size = orca_local_kernel_size
+        self.orca_gate_init = orca_gate_init
+        self.orca_ortho_weight_global = orca_ortho_weight_global
+        self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
+        self.orca_prosody_weight_global = orca_prosody_weight_global
+        self.orca_prosody_weight_local = orca_prosody_weight_local
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 
@@ -528,11 +528,11 @@ class DeSTA25AudioModel(PreTrainedModel):
         logging.info(f"Loading Audio model from {self.config.encoder_model_id}")
         self.perception = WhisperPerception(self.config)
 
-        # === OCAR-DeSTA Setup ===
-        # Check both ocar_enabled and connector_mode for robust detection
-        is_ocar = getattr(self.config, 'ocar_enabled', False) or self.config.connector_mode == "ocar_hybrid"
-        if is_ocar:
-            logging.info("Enabling OCAR-DeSTA components")
+        # === ORCA-DeSTA Setup ===
+        # Check both orca_enabled and connector_mode for robust detection
+        is_orca = getattr(self.config, 'orca_enabled', False) or self.config.connector_mode == "orca_hybrid"
+        if is_orca:
+            logging.info("Enabling ORCA-DeSTA components")
             
             # Prosody prediction heads
             d_llm = self.config.llm_config.hidden_size
@@ -540,11 +540,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             self.local_prosody_head = nn.Linear(d_llm, 2)   # [f0_t, energy_t] per frame
             
             # Enable deep cross-attention injection
-            self._enable_ocar_deep_injection()
+            self._enable_orca_deep_injection()
             
             # Storage for audio_local during forward (set before LLM call, cleared after)
-            self._ocar_audio_local = None
-            self._ocar_audio_local_mask = None
+            self._orca_audio_local = None
+            self._orca_audio_local_mask = None
 
         self.configure_trainable_parameters()
 
@@ -556,7 +556,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 labels=None,
                 **kwargs):
         
-        # Prepare inputs, which handles both OCAR and non-OCAR paths
+        # Prepare inputs, which handles both ORCA and non-ORCA paths
         prepare_result = self._prepare_inputs_for_llm(
             input_ids=input_ids, 
             attention_mask=attention_mask, 
@@ -565,17 +565,17 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_start_positions=batch_start_positions
         )
         
-        # Handle OCAR mode - check based on result type or connector_mode
-        is_ocar_mode = (
+        # Handle ORCA mode - check based on result type or connector_mode
+        is_orca_mode = (
             isinstance(prepare_result, tuple) and len(prepare_result) == 3
-        ) or self.config.connector_mode == "ocar_hybrid"
+        ) or self.config.connector_mode == "orca_hybrid"
         
-        if is_ocar_mode and isinstance(prepare_result, tuple) and len(prepare_result) == 3:
+        if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) == 3:
             inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
             
             # Set local tokens for deep injection (accessed by wrapped decoder layers)
-            self._ocar_audio_local = local_audio_tokens
-            self._ocar_audio_local_mask = None  # No mask needed for now
+            self._orca_audio_local = local_audio_tokens
+            self._orca_audio_local_mask = None  # No mask needed for now
             
             # Call LLM with output_hidden_states to get text hidden states for orthogonality loss
             outputs = self.llm_model(
@@ -586,10 +586,10 @@ class DeSTA25AudioModel(PreTrainedModel):
             )
             
             # Clear local tokens after LLM forward
-            self._ocar_audio_local = None
-            self._ocar_audio_local_mask = None
+            self._orca_audio_local = None
+            self._orca_audio_local_mask = None
             
-            # Compute OCAR auxiliary losses
+            # Compute ORCA auxiliary losses
             text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
             
             # Compute prosody predictions
@@ -601,8 +601,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             if local_audio_tokens is not None and hasattr(self, 'local_prosody_head'):
                 local_prosody_pred = self.local_prosody_head(local_audio_tokens)  # [B, T_local, 2]
             
-            # Compute OCAR losses
-            ocar_losses = self.compute_ocar_losses(
+            # Compute ORCA losses
+            orca_losses = self.compute_orca_losses(
                 global_tokens=global_audio_tokens,
                 text_hidden=text_hidden,
                 batch=kwargs,
@@ -611,13 +611,13 @@ class DeSTA25AudioModel(PreTrainedModel):
             )
             
             # Attach losses to outputs
-            outputs.ocar_losses = ocar_losses
+            outputs.orca_losses = orca_losses
             outputs.audio_global = global_audio_tokens
             outputs.audio_local = local_audio_tokens
             
             return outputs
         else:
-            # Standard non-OCAR path
+            # Standard non-ORCA path
             inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
             
             outputs = self.llm_model(
@@ -641,8 +641,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         Batch_start_positions: list of start positions
         
         Returns:
-            For non-OCAR: inputs_embeds tensor
-            For OCAR: (inputs_embeds, global_audio_tokens, local_audio_tokens)
+            For non-ORCA: inputs_embeds tensor
+            For ORCA: (inputs_embeds, global_audio_tokens, local_audio_tokens)
         """
 
         N_audio = len(batch_start_positions)
@@ -651,7 +651,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         # Handle empty audio case
         if N_audio == 0:
             embeds = self.llm_model.model.embed_tokens(input_ids)
-            if self.config.connector_mode == "ocar_hybrid":
+            if self.config.connector_mode == "orca_hybrid":
                 return embeds, None, None
             return embeds
         
@@ -675,13 +675,13 @@ class DeSTA25AudioModel(PreTrainedModel):
             input_features=batch_features, transcription_embeddings_list=transcription_embeddings_list
         )
         
-        # Handle OCAR mode output - check based on tuple length or connector_mode
-        # This handles cases where ocar_enabled may not be set but connector_mode is ocar_hybrid
-        is_ocar_output = (
+        # Handle ORCA mode output - check based on tuple length or connector_mode
+        # This handles cases where orca_enabled may not be set but connector_mode is orca_hybrid
+        is_orca_output = (
             isinstance(perception_output, tuple) and len(perception_output) == 3
-        ) or self.config.connector_mode == "ocar_hybrid"
+        ) or self.config.connector_mode == "orca_hybrid"
         
-        if is_ocar_output:
+        if is_orca_output:
             # perception_output is (global_tokens, local_tokens, lengths)
             batch_global_tokens, batch_local_tokens, batch_audio_feature_lengths = perception_output
             batch_audio_features = batch_global_tokens  # Global tokens are what we splice
@@ -724,22 +724,22 @@ class DeSTA25AudioModel(PreTrainedModel):
             # clean GPU memory
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings
 
-        if self.config.connector_mode == "ocar_hybrid":
+        if self.config.connector_mode == "orca_hybrid":
             return inputs_embeds, batch_global_tokens, batch_local_tokens
         return inputs_embeds
     
-    def _enable_ocar_deep_injection(self):
+    def _enable_orca_deep_injection(self):
         """
         Wrap each LLM decoder layer with gated cross-attention for deep injection
         of local prosody tokens.
         """
-        is_ocar = getattr(self.config, 'ocar_enabled', False) or self.config.connector_mode == "ocar_hybrid"
-        if not is_ocar:
+        is_orca = getattr(self.config, 'orca_enabled', False) or self.config.connector_mode == "orca_hybrid"
+        if not is_orca:
             return
         
         hidden_size = self.config.llm_config.hidden_size
         num_heads = self.config.llm_config.num_attention_heads
-        gate_init = getattr(self.config, 'ocar_gate_init', 0.1)
+        gate_init = getattr(self.config, 'orca_gate_init', 0.1)
         
         # Get number of layers from config to ensure consistency across DDP ranks
         num_layers = getattr(self.config.llm_config, 'num_hidden_layers', None)
@@ -750,7 +750,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         elif hasattr(self.llm_model, 'transformer') and hasattr(self.llm_model.transformer, 'h'):
             layers = self.llm_model.transformer.h  # GPT-style
         else:
-            logging.warning("Could not find decoder layers for OCAR deep injection")
+            logging.warning("Could not find decoder layers for ORCA deep injection")
             return
         
         # Verify layer count matches config (DDP consistency check)
@@ -760,19 +760,19 @@ class DeSTA25AudioModel(PreTrainedModel):
         # Create cross-attention modules and wrap layer forwards
         # Use fixed number from config if available to ensure DDP consistency
         actual_num_layers = num_layers if num_layers is not None else len(layers)
-        self.ocar_cross_attns = nn.ModuleList()
+        self.orca_cross_attns = nn.ModuleList()
         
         for layer_idx in range(actual_num_layers):
-            cross_attn = OCARGatedCrossAttention(
+            cross_attn = ORCAGatedCrossAttention(
                 hidden_size=hidden_size,
                 num_heads=num_heads,
                 gate_init=gate_init,
             )
-            self.ocar_cross_attns.append(cross_attn)
+            self.orca_cross_attns.append(cross_attn)
         
         # Wrap each layer's forward method
         for layer_idx, layer in enumerate(layers):
-            cross_attn = self.ocar_cross_attns[layer_idx]
+            cross_attn = self.orca_cross_attns[layer_idx]
             
             # Store reference to parent model for accessing audio_local
             parent_model = self
@@ -792,8 +792,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                         rest = ()
                     
                     # Apply cross-attention if audio_local is available
-                    audio_local = getattr(parent, "_ocar_audio_local", None)
-                    audio_local_mask = getattr(parent, "_ocar_audio_local_mask", None)
+                    audio_local = getattr(parent, "_orca_audio_local", None)
+                    audio_local_mask = getattr(parent, "_orca_audio_local_mask", None)
                     
                     if audio_local is not None:
                         h = xattn(
@@ -811,9 +811,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             layer.forward = make_wrapped_forward(orig_forward, layer_cross_attn, parent_model)
         
-        logging.info(f"OCAR deep injection enabled for {len(layers)} decoder layers")
+        logging.info(f"ORCA deep injection enabled for {len(layers)} decoder layers")
     
-    def compute_ocar_losses(
+    def compute_orca_losses(
         self,
         global_tokens: Optional[torch.Tensor],
         text_hidden: Optional[torch.Tensor],
@@ -822,7 +822,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         local_prosody_pred: Optional[torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute OCAR auxiliary losses:
+        Compute ORCA auxiliary losses:
         - Global-text orthogonality loss
         - Global token diversity loss
         - Prosody supervision losses (if targets provided)
@@ -837,19 +837,19 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Compute cosine similarity
             cos = torch.einsum("bkh,bth->bkt", g, t)  # [B, K, T]
             L_ortho = (cos ** 2).mean()
-            losses["L_ortho_global"] = self.config.ocar_ortho_weight_global * L_ortho
+            losses["L_ortho_global"] = self.config.orca_ortho_weight_global * L_ortho
             
             # Diversity between global tokens (Gram matrix close to identity)
             gram = torch.einsum("bkh,bqh->bkq", g, g)  # [B, K, K]
             I = torch.eye(gram.size(-1), device=gram.device)
             L_div = ((gram - I) ** 2).mean()
-            losses["L_ortho_diversity"] = self.config.ocar_ortho_diversity_weight * L_div
+            losses["L_ortho_diversity"] = self.config.orca_ortho_diversity_weight * L_div
         
         # Prosody supervision (targets are provided in the batch if available)
         if global_prosody_pred is not None and "f0_energy_global" in batch:
             target_global = batch["f0_energy_global"]  # [B, 4]
             L_pg = F.mse_loss(global_prosody_pred, target_global)
-            losses["L_prosody_global"] = self.config.ocar_prosody_weight_global * L_pg
+            losses["L_prosody_global"] = self.config.orca_prosody_weight_global * L_pg
         
         if local_prosody_pred is not None and "f0_energy_local" in batch:
             target_local = batch["f0_energy_local"]  # [B, T_local, 2]
@@ -862,7 +862,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                     align_corners=False,
                 ).transpose(1, 2)
             L_pl = F.mse_loss(local_prosody_pred, target_local)
-            losses["L_prosody_local"] = self.config.ocar_prosody_weight_local * L_pl
+            losses["L_prosody_local"] = self.config.orca_prosody_weight_local * L_pl
         
         return losses
         
@@ -894,12 +894,12 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_start_positions=batch_start_positions
         )
         
-        # Handle OCAR mode - extract inputs_embeds and set local tokens for deep injection
+        # Handle ORCA mode - extract inputs_embeds and set local tokens for deep injection
         if isinstance(prepare_result, tuple) and len(prepare_result) == 3:
             inputs_embeds, global_tokens, local_tokens = prepare_result
             # Set local tokens for deep injection during generation
-            self._ocar_audio_local = local_tokens
-            self._ocar_audio_local_mask = None
+            self._orca_audio_local = local_tokens
+            self._orca_audio_local_mask = None
         else:
             inputs_embeds = prepare_result
 
@@ -919,9 +919,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             )
         finally:
             # Clear local tokens after generation
-            if hasattr(self, '_ocar_audio_local'):
-                self._ocar_audio_local = None
-                self._ocar_audio_local_mask = None
+            if hasattr(self, '_orca_audio_local'):
+                self._orca_audio_local = None
+                self._orca_audio_local_mask = None
 
         return generated_ids
 
@@ -1061,8 +1061,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_features = batch_features.to(self.device)
             
             # Use correct audio token size based on connector mode
-            if self.config.connector_mode == "ocar_hybrid":
-                audio_token_size = getattr(self.config, 'ocar_global_num_tokens', 64)
+            if self.config.connector_mode == "orca_hybrid":
+                audio_token_size = getattr(self.config, 'orca_global_num_tokens', 64)
             else:
                 audio_token_size = self.config.prompt_size
             audio_size_list = [audio_token_size] * len(batch_features)

@@ -47,7 +47,7 @@ class DeSTA25Trainer(Trainer):
         return_outputs: bool = False,
         **kwargs
     ):
-        """Compute loss with perplexity logging and OCAR auxiliary losses."""
+        """Compute loss with perplexity logging and ORCA auxiliary losses."""
         if self._is_empty_batch(inputs):
             logging.warning("Skipping empty batch (audio decode errors)")
             zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
@@ -56,18 +56,18 @@ class DeSTA25Trainer(Trainer):
         outputs = model(**inputs)
         loss = outputs.loss
         
-        # Add OCAR auxiliary losses if present
+        # Add ORCA auxiliary losses if present
         # Handle DDP-wrapped models by accessing .module if needed
         actual_model = model.module if hasattr(model, "module") else model
         config = getattr(actual_model, "config", None)
         
         if config is not None:
-            # Check for OCAR mode using connector_mode (more reliable than ocar_enabled)
-            is_ocar = getattr(config, "connector_mode", "") == "ocar_hybrid"
-            if is_ocar:
-                ocar_losses = getattr(outputs, "ocar_losses", None)
-                if ocar_losses is not None:
-                    for name, l in ocar_losses.items():
+            # Check for ORCA mode using connector_mode (more reliable than orca_enabled)
+            is_orca = getattr(config, "connector_mode", "") == "orca_hybrid"
+            if is_orca:
+                orca_losses = getattr(outputs, "orca_losses", None)
+                if orca_losses is not None:
+                    for name, l in orca_losses.items():
                         if l is not None:
                             loss = loss + l
                             self.log({f"train/{name}": l.item()})

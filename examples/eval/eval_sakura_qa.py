@@ -1,8 +1,8 @@
 """
-DeSTA2.5-Audio Evaluation Script (with OCAR support)
+DeSTA2.5-Audio Evaluation Script (with ORCA support)
 
 Evaluates DeSTA model on SAKURA QA datasets using a Qwen judge model.
-Supports OCAR-hybrid connector mode.
+Supports ORCA-hybrid connector mode.
 """
 import os
 import json
@@ -304,7 +304,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Evaluate DeSTA model on SAKURA QA datasets")
     parser.add_argument("--model", type=str, default=DESTA_MODEL_ID,
-                        help="DeSTA model ID or path (supports OCAR models)")
+                        help="DeSTA model ID or path (supports ORCA models)")
     parser.add_argument("--judge", type=str, default=JUDGE_MODEL_ID,
                         help="Judge model ID")
     parser.add_argument("--output-dir", type=str, default=RESULT_DIR,
@@ -317,9 +317,9 @@ def main():
     desta_model.to(device)
     desta_model.eval()
     
-    # Log OCAR status
-    if desta_model.config.connector_mode == "ocar_hybrid":
-        print(f"✓ OCAR mode enabled (global_num_tokens={desta_model.config.ocar_global_num_tokens})")
+    # Log ORCA status
+    if desta_model.config.connector_mode == "orca_hybrid":
+        print(f"✓ ORCA mode enabled (global_num_tokens={desta_model.config.orca_global_num_tokens})")
 
     # 載入 Qwen 評審
     print(f"Loading Qwen judge model: {args.judge}")

@@ -263,7 +263,7 @@ class BaseCollateFn:
             "metadata": list(batch)
         }
         
-        # === Optional OCAR prosody fields ===
+        # === Optional ORCA prosody fields ===
         # Collate f0_energy_global if present in samples
         if any("f0_energy_global" in item for item in batch):
             global_prosody = []
@@ -337,10 +337,10 @@ class BaseAudioTextDataset:
         self.tokenizer = tokenizer
         self.processor = processor
         
-        # OCAR configuration: use global_num_tokens for audio size in OCAR mode
+        # ORCA configuration: use global_num_tokens for audio size in ORCA mode
         self.connector_mode = cfg.model.connector.mode
-        ocar_cfg = cfg.model.get("ocar", {})
-        self.ocar_global_num_tokens = ocar_cfg.get("global_num_tokens", 4)
+        orca_cfg = cfg.model.get("orca", {})
+        self.orca_global_num_tokens = orca_cfg.get("global_num_tokens", 4)
         
         model_cfg = cfg.model
         if isinstance(model_cfg, DictConfig):
@@ -660,8 +660,8 @@ class BaseAudioTextDataset:
                 continue
 
             # Use appropriate audio size based on connector mode
-            if self.connector_mode == "ocar_hybrid":
-                audio_size = self.ocar_global_num_tokens
+            if self.connector_mode == "orca_hybrid":
+                audio_size = self.orca_global_num_tokens
             else:
                 audio_size = self.prompt_size
             audio_size_list = [audio_size] * len(new_audios)

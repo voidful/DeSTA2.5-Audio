@@ -3,8 +3,8 @@ hydra:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_0.6b_ocar
-name: desta25_qwen3_0.6b_ocar
+project: desta25_qwen3_4b_orca
+name: desta25_qwen3_4b_orca
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,7 +13,7 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_0.6b_ocar
+  project: desta25_qwen3_4b_orca
   log_model: all
 
 trainer:
@@ -33,7 +33,7 @@ trainer:
 
 model:
   llm:
-    model_id: Qwen/Qwen3-0.6B
+    model_id: Qwen/Qwen3-4B
     freeze: True
 
   encoder:
@@ -41,16 +41,16 @@ model:
     freeze: True
 
   connector:
-    mode: ocar_hybrid
-    prompt_size: 64  # Not used in OCAR mode, but kept for compatibility
+    mode: orca_hybrid
+    prompt_size: 64  # Not used in ORCA mode, but kept for compatibility
     num_hidden_layers: 6
 
-  # OCAR-DeSTA specific configuration
-  ocar:
+  # ORCA-DeSTA specific configuration
+  orca:
     enabled: true
     global_num_tokens: 64
     local_downsample: 8
-    local_kernel_size: 9
+    local_kernel_size: 
     gate_init: 0.1
     ortho_weight_global: 0.01
     ortho_diversity_weight: 0.01
