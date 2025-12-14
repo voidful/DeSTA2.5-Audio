@@ -875,6 +875,25 @@ class DeSTA25AudioModel(PreTrainedModel):
             if param.requires_grad:
                 trainable_state_dict[name] = param.data.clone().detach()
         return trainable_state_dict
+    
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """
+        Custom load_state_dict that handles backward compatibility:
+        - Maps old 'ocar_cross_attns' keys to new 'orca_cross_attns' keys
+        """
+        # Create a new state dict with renamed keys
+        new_state_dict = OrderedDict()
+        for key, value in state_dict.items():
+            # Handle ocar -> orca renaming for backward compatibility
+            if key.startswith("ocar_cross_attns"):
+                new_key = key.replace("ocar_cross_attns", "orca_cross_attns")
+                logging.debug(f"Renaming checkpoint key: {key} -> {new_key}")
+                new_state_dict[new_key] = value
+            else:
+                new_state_dict[key] = value
+        
+        return super().load_state_dict(new_state_dict, strict=strict, assign=assign)
+
 
 
     def _generate_step(self, inputs, pad_token_id, temperature=0.7, top_p=0.9, max_new_tokens=512, do_sample=True):
