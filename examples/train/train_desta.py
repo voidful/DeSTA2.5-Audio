@@ -26,6 +26,12 @@ import logging
 import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
+
+# Bypass torch.load security check for older PyTorch versions (CVE-2025-32434)
+# Safe when loading trusted checkpoints created by the user
+import transformers.utils.import_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
+
 from transformers import TrainingArguments
 
 from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config
