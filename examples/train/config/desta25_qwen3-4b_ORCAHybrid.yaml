@@ -53,6 +53,7 @@ model:
     local_downsample: 4
     local_kernel_size: 7
     gate_init: 0.1
+    audio_position_scale: 1.0  # Scale factor for audio position IDs (e.g. 4.0 = slow rotation)
     ortho_weight_global: 0.05
     ortho_diversity_weight: 0.05
     ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens

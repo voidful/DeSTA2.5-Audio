@@ -470,6 +470,7 @@ class DeSTA25Config(PretrainedConfig):
                  # ORCA-DeSTA configuration fields
                  orca_enabled=False,
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
+                 orca_audio_position_scale=1.0,  # Scale factor for audio token position IDs (e.g. 4.0 = slow rotation)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
                  orca_local_kernel_size=7,
@@ -500,6 +501,7 @@ class DeSTA25Config(PretrainedConfig):
         # ORCA-DeSTA configuration
         self.orca_enabled = orca_enabled
         self.orca_local_enabled = orca_local_enabled
+        self.orca_audio_position_scale = orca_audio_position_scale
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
         self.orca_local_kernel_size = orca_local_kernel_size
@@ -589,11 +591,15 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         # Handle ORCA mode - check based on result type or connector_mode
         is_orca_mode = (
-            isinstance(prepare_result, tuple) and len(prepare_result) == 3
+            isinstance(prepare_result, tuple) and len(prepare_result) >= 3
         ) or self.config.connector_mode == "orca_hybrid"
         
-        if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) == 3:
-            inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
+        if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
+            if len(prepare_result) == 4:
+                inputs_embeds, global_audio_tokens, local_audio_tokens, position_ids = prepare_result
+            else:
+                inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
+                position_ids = None
             
             # Set local tokens for deep injection (accessed by wrapped decoder layers)
             self._orca_audio_local = local_audio_tokens
@@ -603,6 +609,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
+                position_ids=position_ids,  # Pass custom position_ids if available
                 labels=labels,
                 output_hidden_states=True,
             )
@@ -747,8 +754,79 @@ class DeSTA25AudioModel(PreTrainedModel):
             # clean GPU memory
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings
 
+        # === 4. Compute Position IDs with Audio Scaling ===
+        # If scale != 1.0, we construct fractional position_ids
+        audio_scale = getattr(self.config, 'orca_audio_position_scale', 1.0)
+        
+        # Default position_ids (integer based)
+        # Qwen/Llama usually expect position_ids as LongTensor, but we verified FloatTensor works for RoPE
+        # We start with arange
+        position_ids = torch.arange(inputs_embeds.size(1), dtype=torch.float, device=inputs_embeds.device)
+        position_ids = position_ids.unsqueeze(0).expand(inputs_embeds.size(0), -1).clone()
+        
+        # If scaling is needed, we must adjust position_ids per sample
+        if audio_scale != 1.0:
+            for audio_batch_idx in range(N_audio):
+                start_position = batch_start_positions[audio_batch_idx] # tuple (text_idx, audio_start_position)
+                text_batch_idx = start_position[0]
+                audio_start = start_position[1]
+                
+                # We need the length of the inserted audio embedding (which includes transcription if any)
+                # However, audio_embeddings was deleted above. We need to re-calculate or cache the length.
+                # Fortunately we have inputs_embeds shape, but there might be suffix text.
+                # Let's rely on the fact that we sliced into inputs_embeds.
+                
+                # Re-calculate total inserted audio length:
+                feat_len = batch_audio_feature_lengths[audio_batch_idx]
+                trans_len = transcription_embeddings_list[audio_batch_idx].size(0)
+                total_audio_len = feat_len + trans_len
+                
+                audio_end = audio_start + total_audio_len
+                
+                # Audio segment: from audio_start to audio_end
+                # Increments should be 1/scale instead of 1
+                # Text before Audio: 0, 1, 2... (audio_start-1) -> Correct in default arange
+                
+                # Audio: Start at 'audio_start', then increment by 1/scale
+                audio_indices = torch.arange(total_audio_len, dtype=torch.float, device=inputs_embeds.device)
+                audio_pos = audio_start + (audio_indices / audio_scale)
+                position_ids[text_batch_idx, audio_start:audio_end] = audio_pos
+                
+                # Text after Audio: Must continue from where Audio left off?
+                # Usually text after audio should continue logically.
+                # Standard causal masking implies relative distance matters.
+                # If audio was "compressed", the text after it should physically appear "closer" to the text before it?
+                # YES. If audio is 1000 tokens but treated as 250 positions.
+                # The text at index 1001 should have position 251.
+                # Otherwise there is a huge gap of 750 unused positions.
+                
+                # Adjust remaining tokens after audio
+                if audio_end < position_ids.size(1):
+                    # The last audio position was roughly: audio_start + (len-1)/scale
+                    last_audio_pos = audio_pos[-1]
+                    
+                    # The next text token should be at: last_audio_pos + 1.0 ??
+                    # Or should we just shift everything by (original_len - compressed_len)?
+                    # Shift = len - (len/scale) = len * (1 - 1/scale)
+                    # We subtract this shift from all subsequent positions.
+                    
+                    shift = total_audio_len * (1.0 - 1.0/audio_scale)
+                    position_ids[text_batch_idx, audio_end:] -= shift
+
         if self.config.connector_mode == "orca_hybrid":
+             # Pass position_ids to the LLM if we customized them
+            if audio_scale != 1.0:
+                 # Monkey-patching forward might be needed if llm_model() doesn't expose position_ids easily in all paths
+                 # But AutoModelForCausalLM usually takes position_ids.
+                 # We need to make sure we return them or pass them.
+                 # The 'forward' of DeSTA25AudioModel calls self.llm_model later.
+                 # We need to return position_ids from this method.
+                 return inputs_embeds, batch_global_tokens, batch_local_tokens, position_ids
             return inputs_embeds, batch_global_tokens, batch_local_tokens
+
+        # For non-ORCA mode (or if scale=1.0 and we want default behavior)
+        if audio_scale != 1.0:
+             return inputs_embeds, position_ids
         return inputs_embeds
     
     def _enable_orca_deep_injection(self):
