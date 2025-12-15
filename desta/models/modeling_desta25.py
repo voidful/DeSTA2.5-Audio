@@ -182,6 +182,11 @@ class ORCAHybridConnector(nn.Module):
             stride = config.orca_local_downsample
             padding = kernel_size // 2
             
+            # Learnable weights for layer fusion (same target layers as global)
+            self.local_layer_weights = nn.Parameter(
+                torch.zeros(len(self.target_layer_ids), dtype=torch.float)
+            )
+            
             self.local_proj_in = nn.Linear(d_encoder, d_llm)
             self.local_conv = nn.Conv1d(
                 in_channels=d_llm,
@@ -211,18 +216,22 @@ class ORCAHybridConnector(nn.Module):
         """
         batch_size = encoder_hidden_states[0].size(0)
         
-        # === Global Branch ===
-        global_outputs = []
+        # Collect target layer outputs (used by both branches)
+        target_layer_outputs = []
         for idx, hidden_state in enumerate(encoder_hidden_states):
             if idx in self.target_layer_ids:
-                layer_idx = self.target_layer_ids.index(idx)
-                queries = self.global_queries[layer_idx].expand(batch_size, -1, -1)
-                
-                qformer_out = self.global_qformer(
-                    hidden_states=queries,
-                    encoder_hidden_states=hidden_state,
-                )
-                global_outputs.append(qformer_out.last_hidden_state)
+                target_layer_outputs.append(hidden_state)
+        
+        # === Global Branch ===
+        global_outputs = []
+        for layer_idx, hidden_state in enumerate(target_layer_outputs):
+            queries = self.global_queries[layer_idx].expand(batch_size, -1, -1)
+            
+            qformer_out = self.global_qformer(
+                hidden_states=queries,
+                encoder_hidden_states=hidden_state,
+            )
+            global_outputs.append(qformer_out.last_hidden_state)
         
         # Weighted sum across layers
         global_outputs = torch.stack(global_outputs, dim=0)  # [L, B, K, D]
@@ -233,11 +242,14 @@ class ORCAHybridConnector(nn.Module):
         
         # === Local Branch (only if enabled) ===
         if self.local_enabled:
-            # Use the last encoder layer output for local features
-            last_hidden = encoder_hidden_states[-1]  # [B, T, d_encoder]
+            # Learnable weighted sum of target layers (same layers as global)
+            target_layers = torch.stack(target_layer_outputs, dim=0)  # [L, B, T, D]
+            target_layers = target_layers.permute(1, 2, 0, 3)  # [B, T, L, D]
+            local_weights = torch.softmax(self.local_layer_weights, dim=-1).unsqueeze(-1)  # [L, 1]
+            fused_hidden = (target_layers * local_weights).sum(dim=2)  # [B, T, D]
             
-            # Project to LLM dimension first
-            local_features = self.local_proj_in(last_hidden)  # [B, T, d_llm]
+            # Project to LLM dimension
+            local_features = self.local_proj_in(fused_hidden)  # [B, T, d_llm]
             
             # Conv1d downsampling: [B, T, D] -> [B, D, T] -> conv -> [B, D, T'] -> [B, T', D]
             local_features = local_features.transpose(1, 2)  # [B, D, T]
