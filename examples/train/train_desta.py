@@ -109,12 +109,14 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         placeholder_token=cfg.model.placeholder_token,
         # ORCA-DeSTA configuration
         orca_enabled=orca_cfg.get("enabled", False),
+        orca_local_enabled=orca_cfg.get("local_enabled", True),
         orca_global_num_tokens=orca_cfg.get("global_num_tokens", 4),
         orca_local_downsample=orca_cfg.get("local_downsample", 4),
         orca_local_kernel_size=orca_cfg.get("local_kernel_size", 7),
         orca_gate_init=orca_cfg.get("gate_init", 0.1),
         orca_ortho_weight_global=orca_cfg.get("ortho_weight_global", 0.01),
         orca_ortho_diversity_weight=orca_cfg.get("ortho_diversity_weight", 0.01),
+        orca_ortho_weight_qformer_local=orca_cfg.get("ortho_weight_qformer_local", 0.01),
         orca_prosody_weight_global=orca_cfg.get("prosody_weight_global", 0.1),
         orca_prosody_weight_local=orca_cfg.get("prosody_weight_local", 0.1),
     )

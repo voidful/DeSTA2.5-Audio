@@ -174,20 +174,23 @@ class ORCAHybridConnector(nn.Module):
             nn.Linear(d_encoder, d_llm)
         )
         
-        # === Local Branch (Conv1d downsampling) ===
-        kernel_size = config.orca_local_kernel_size
-        stride = config.orca_local_downsample
-        padding = kernel_size // 2
+        # === Local Branch (Conv1d downsampling) - only if enabled ===
+        self.local_enabled = config.orca_local_enabled
         
-        self.local_proj_in = nn.Linear(d_encoder, d_llm)
-        self.local_conv = nn.Conv1d(
-            in_channels=d_llm,
-            out_channels=d_llm,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding
-        )
-        self.local_ln = nn.LayerNorm(d_llm)
+        if self.local_enabled:
+            kernel_size = config.orca_local_kernel_size
+            stride = config.orca_local_downsample
+            padding = kernel_size // 2
+            
+            self.local_proj_in = nn.Linear(d_encoder, d_llm)
+            self.local_conv = nn.Conv1d(
+                in_channels=d_llm,
+                out_channels=d_llm,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding
+            )
+            self.local_ln = nn.LayerNorm(d_llm)
     
     def forward(
         self, 
@@ -228,18 +231,21 @@ class ORCAHybridConnector(nn.Module):
         global_tokens = (global_outputs * weights).sum(dim=2)  # [B, K, D]
         global_tokens = self.global_proj(global_tokens)  # [B, K, d_llm]
         
-        # === Local Branch ===
-        # Use the last encoder layer output for local features
-        last_hidden = encoder_hidden_states[-1]  # [B, T, d_encoder]
-        
-        # Project to LLM dimension first
-        local_features = self.local_proj_in(last_hidden)  # [B, T, d_llm]
-        
-        # Conv1d downsampling: [B, T, D] -> [B, D, T] -> conv -> [B, D, T'] -> [B, T', D]
-        local_features = local_features.transpose(1, 2)  # [B, D, T]
-        local_features = self.local_conv(local_features)  # [B, D, T']
-        local_features = local_features.transpose(1, 2)  # [B, T', D]
-        local_tokens = self.local_ln(local_features)  # [B, T_local, d_llm]
+        # === Local Branch (only if enabled) ===
+        if self.local_enabled:
+            # Use the last encoder layer output for local features
+            last_hidden = encoder_hidden_states[-1]  # [B, T, d_encoder]
+            
+            # Project to LLM dimension first
+            local_features = self.local_proj_in(last_hidden)  # [B, T, d_llm]
+            
+            # Conv1d downsampling: [B, T, D] -> [B, D, T] -> conv -> [B, D, T'] -> [B, T', D]
+            local_features = local_features.transpose(1, 2)  # [B, D, T]
+            local_features = self.local_conv(local_features)  # [B, D, T']
+            local_features = local_features.transpose(1, 2)  # [B, T', D]
+            local_tokens = self.local_ln(local_features)  # [B, T_local, d_llm]
+        else:
+            local_tokens = None
         
         return global_tokens, local_tokens
 
@@ -451,12 +457,14 @@ class DeSTA25Config(PretrainedConfig):
                  placeholder_token="<|reserved_special_token_87|>",
                  # ORCA-DeSTA configuration fields
                  orca_enabled=False,
+                 orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
                  orca_local_kernel_size=7,
                  orca_gate_init=0.1,
                  orca_ortho_weight_global=0.01,
                  orca_ortho_diversity_weight=0.01,
+                 orca_ortho_weight_qformer_local=0.01,  # Orthogonality between Q-Former global and local tokens
                  orca_prosody_weight_global=0.1,
                  orca_prosody_weight_local=0.1,
                  **kwargs):
@@ -479,12 +487,14 @@ class DeSTA25Config(PretrainedConfig):
 
         # ORCA-DeSTA configuration
         self.orca_enabled = orca_enabled
+        self.orca_local_enabled = orca_local_enabled
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
         self.orca_local_kernel_size = orca_local_kernel_size
         self.orca_gate_init = orca_gate_init
         self.orca_ortho_weight_global = orca_ortho_weight_global
         self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
+        self.orca_ortho_weight_qformer_local = orca_ortho_weight_qformer_local
         self.orca_prosody_weight_global = orca_prosody_weight_global
         self.orca_prosody_weight_local = orca_prosody_weight_local
 
@@ -604,6 +614,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Compute ORCA losses
             orca_losses = self.compute_orca_losses(
                 global_tokens=global_audio_tokens,
+                local_tokens=local_audio_tokens,
                 text_hidden=text_hidden,
                 batch=kwargs,
                 global_prosody_pred=global_prosody_pred,
@@ -816,6 +827,7 @@ class DeSTA25AudioModel(PreTrainedModel):
     def compute_orca_losses(
         self,
         global_tokens: Optional[torch.Tensor],
+        local_tokens: Optional[torch.Tensor],
         text_hidden: Optional[torch.Tensor],
         batch: Dict,
         global_prosody_pred: Optional[torch.Tensor],
@@ -825,6 +837,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         Compute ORCA auxiliary losses:
         - Global-text orthogonality loss
         - Global token diversity loss
+        - Global-local orthogonality loss (Q-Former/local)
         - Prosody supervision losses (if targets provided)
         """
         losses = {}
@@ -844,6 +857,14 @@ class DeSTA25AudioModel(PreTrainedModel):
             I = torch.eye(gram.size(-1), device=gram.device)
             L_div = ((gram - I) ** 2).mean()
             losses["L_ortho_diversity"] = self.config.orca_ortho_diversity_weight * L_div
+        
+        # Q-Former global vs local orthogonality loss
+        if global_tokens is not None and local_tokens is not None:
+            g = F.normalize(global_tokens, dim=-1)  # [B, Kg, H]
+            l = F.normalize(local_tokens, dim=-1)   # [B, Tl, H]
+            cos_gl = torch.einsum("bgh,blh->bgl", g, l)  # [B, Kg, Tl]
+            L_ortho_ql = (cos_gl ** 2).mean()
+            losses["L_ortho_qformer_local"] = self.config.orca_ortho_weight_qformer_local * L_ortho_ql
         
         # Prosody supervision (targets are provided in the batch if available)
         if global_prosody_pred is not None and "f0_energy_global" in batch:
