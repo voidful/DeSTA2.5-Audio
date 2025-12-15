@@ -89,7 +89,12 @@ class QformerConnector(nn.Module):
                     nn.Linear(self.config.encoder_config.d_model, self.config.llm_config.hidden_size) # project to llm hidden size
                 )
         else:
-            raise NotImplementedError(f"connector_mode {self.config.connector_mode} not implemented")
+            # Note: orca_hybrid is handled by ORCAHybridConnector, not QformerConnector
+            # If you see this error for orca_hybrid, please update your desta package
+            raise NotImplementedError(
+                f"connector_mode '{self.config.connector_mode}' not implemented in QformerConnector. "
+                f"Supported modes: 'qformer_1'. If using 'orca_hybrid', please update your desta package."
+            )
         
 
     def forward(self, encoder_hidden_states: List[torch.Tensor]) -> torch.Tensor:
