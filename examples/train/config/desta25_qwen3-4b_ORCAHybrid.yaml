@@ -53,9 +53,9 @@ model:
     local_downsample: 4
     local_kernel_size: 7
     gate_init: 0.1
-    ortho_weight_global: 0.01
-    ortho_diversity_weight: 0.01
-    ortho_weight_qformer_local: 0.01  # Orthogonality between global and local tokens
+    ortho_weight_global: 0.05
+    ortho_diversity_weight: 0.05
+    ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens
     prosody_weight_global: 0.1
     prosody_weight_local: 0.1
 
