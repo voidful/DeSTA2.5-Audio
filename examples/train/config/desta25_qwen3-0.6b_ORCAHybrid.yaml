@@ -50,8 +50,8 @@ model:
     enabled: true
     local_enabled: true  # Set to false to disable local downsample features
     global_num_tokens: 64
-    local_downsample: 8
-    local_kernel_size: 9
+    local_downsample: 4
+    local_kernel_size: 7
     gate_init: 0.1
     ortho_weight_global: 0.05
     ortho_diversity_weight: 0.05
