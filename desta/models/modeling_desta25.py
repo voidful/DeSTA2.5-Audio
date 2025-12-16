@@ -653,11 +653,21 @@ class DeSTA25AudioModel(PreTrainedModel):
             return outputs
         else:
             # Standard non-ORCA path
-            inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
+            # Handle potential 2-tuple return when audio_position_scale != 1.0
+            if isinstance(prepare_result, tuple):
+                if len(prepare_result) == 2:
+                    inputs_embeds, position_ids = prepare_result
+                else:
+                    inputs_embeds = prepare_result[0]
+                    position_ids = None
+            else:
+                inputs_embeds = prepare_result
+                position_ids = None
             
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
+                position_ids=position_ids,
                 labels=labels,
             )
             return outputs 
