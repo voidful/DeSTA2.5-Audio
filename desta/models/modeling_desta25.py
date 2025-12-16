@@ -1366,6 +1366,13 @@ class DeSTA25AudioModel(PreTrainedModel):
         cache_dir = kwargs.get("cache_dir", os.getenv("HF_HOME"))
 
         config = cls.config_class.from_pretrained(pretrained_model_name_or_path, cache_dir=cache_dir)
+        
+        # Backward compatibility: old checkpoints don't have audio_position_scale
+        # Default to 1.0 (no scaling) to maintain consistency with how they were trained
+        if not hasattr(config, 'orca_audio_position_scale') or config.orca_audio_position_scale is None:
+            config.orca_audio_position_scale = 1.0
+            logging.info("Old checkpoint detected: setting orca_audio_position_scale=1.0 for backward compatibility")
+        
         model = cls(config)
         
         if os.path.isdir(pretrained_model_name_or_path):
