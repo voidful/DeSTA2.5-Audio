@@ -1063,10 +1063,14 @@ class DeSTA25AudioModel(PreTrainedModel):
             temperature = None
         
         try:
+            # NOTE: Do NOT pass position_ids to generate()!
+            # HuggingFace's generate() manages position_ids internally for autoregressive decoding.
+            # Passing custom position_ids (especially fractional ones) conflicts with KV cache
+            # and causes repetitive/broken output.
+            # Position scaling is only applied during training (forward pass with labels).
             generated_ids = self.llm_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                position_ids=position_ids,  # Pass position_ids if available
                 pad_token_id=pad_token_id,
                 temperature=temperature,
                 top_p=top_p,
