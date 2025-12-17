@@ -131,7 +131,10 @@ class DeSTA25Trainer(Trainer):
         gen_kwargs = self.cfg.model.generation_kwargs
         eos_id = self.processing_class.eos_token_id
         
-        generated_ids = self.model._generate_step(
+        # Handle DDP-wrapped model by accessing the underlying module
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        
+        generated_ids = model._generate_step(
             batch,
             pad_token_id=eos_id,
             temperature=gen_kwargs.temperature,

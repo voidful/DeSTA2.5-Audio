@@ -840,7 +840,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         if N_audio == 0:
             embeds = self.llm_model.model.embed_tokens(input_ids)
             if self.config.connector_mode == "orca_hybrid":
-                return embeds, None, None
+                # Return 4-element tuple consistent with normal ORCA path
+                return embeds, None, None, None
             return embeds
         
         # Ensure batch_features is on the correct device
@@ -1130,8 +1131,9 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         # Handle ORCA mode - extract inputs_embeds and set local tokens for deep injection
         local_tokens = None
-        if isinstance(prepare_result, tuple) and len(prepare_result) == 3:
-            inputs_embeds, global_tokens, local_tokens = prepare_result
+        if isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
+            # Can be 3 or 4 elements: (embeds, global, local) or (embeds, global, local, transcription_positions)
+            inputs_embeds, global_tokens, local_tokens = prepare_result[:3]
             # Set local tokens for deep injection during generation
             if local_tokens is not None:
                 self._orca_audio_local = local_tokens
