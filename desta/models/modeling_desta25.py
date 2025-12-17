@@ -1038,26 +1038,177 @@ class DeSTA25AudioModel(PreTrainedModel):
             temperature = None
         
         try:
-            # NOTE: Do NOT pass position_ids to generate()!
-            # HuggingFace's generate() manages position_ids internally for autoregressive decoding.
-            # Passing custom position_ids (especially fractional ones) conflicts with KV cache
-            # and causes repetitive/broken output.
-            # Position scaling is only applied during training (forward pass with labels).
-            generated_ids = self.llm_model.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                pad_token_id=pad_token_id,
-                temperature=temperature,
-                top_p=top_p,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample
-            )
+            # Check if we need custom position handling
+            audio_scale = getattr(self.config, 'orca_audio_position_scale', 1.0)
+            
+            if audio_scale != 1.0 and position_ids is not None:
+                # Use custom autoregressive loop to maintain fractional position_ids
+                generated_ids = self._generate_with_custom_positions(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    pad_token_id=pad_token_id,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=do_sample,
+                )
+            else:
+                # Standard HuggingFace generate for non-scaled positions
+                generated_ids = self.llm_model.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    pad_token_id=pad_token_id,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=do_sample
+                )
         finally:
             # Clear local tokens after generation
             if hasattr(self, '_orca_audio_local'):
                 self._orca_audio_local = None
                 self._orca_audio_local_mask = None
 
+        return generated_ids
+    
+    def _generate_with_custom_positions(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        pad_token_id: int,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_new_tokens: int = 512,
+        do_sample: bool = True,
+    ) -> torch.Tensor:
+        """
+        Custom autoregressive generation loop that maintains fractional position_ids.
+        This ensures train-inference consistency when using audio_position_scale.
+        
+        Args:
+            inputs_embeds: Initial embeddings [B, seq_len, hidden_size]
+            attention_mask: Attention mask [B, seq_len]
+            position_ids: Fractional position IDs [B, seq_len]
+            pad_token_id: Token ID for padding
+            temperature: Sampling temperature
+            top_p: Nucleus sampling probability
+            max_new_tokens: Maximum tokens to generate
+            do_sample: Whether to use sampling
+            
+        Returns:
+            Generated token IDs [B, generated_len]
+        """
+        batch_size = inputs_embeds.size(0)
+        device = inputs_embeds.device
+        
+        # Get the last position for each sequence (to continue from)
+        # Take the last non-padded position
+        last_positions = position_ids[:, -1].clone()  # [B]
+        
+        # Initialize KV cache with prefill
+        past_key_values = None
+        
+        # Prefill: process the entire prompt with custom position_ids
+        with torch.no_grad():
+            outputs = self.llm_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_key_values = outputs.past_key_values
+            logits = outputs.logits[:, -1, :]  # [B, vocab_size]
+        
+        # Initialize generated sequence
+        generated_ids = []
+        
+        # EOS token ID (for stopping)
+        eos_token_id = getattr(self.llm_model.config, 'eos_token_id', None)
+        if isinstance(eos_token_id, list):
+            eos_token_ids = set(eos_token_id)
+        elif eos_token_id is not None:
+            eos_token_ids = {eos_token_id}
+        else:
+            eos_token_ids = set()
+        
+        # Track which sequences have finished
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        # Autoregressive generation loop
+        for step in range(max_new_tokens):
+            # Sample or greedy decode
+            if do_sample and temperature is not None and temperature > 0:
+                # Apply temperature
+                logits = logits / temperature
+                
+                # Apply top-p (nucleus) sampling
+                if top_p is not None and top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Remove tokens with cumulative probability above threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = False
+                    
+                    # Scatter back to original ordering
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    logits[indices_to_remove] = float('-inf')
+                
+                probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+            else:
+                # Greedy decoding
+                next_token = torch.argmax(logits, dim=-1)  # [B]
+            
+            # Replace finished sequences with pad token
+            next_token = torch.where(finished, torch.tensor(pad_token_id, device=device), next_token)
+            generated_ids.append(next_token)
+            
+            # Check for EOS
+            for eos_id in eos_token_ids:
+                finished = finished | (next_token == eos_id)
+            
+            # Stop if all sequences have finished
+            if finished.all():
+                break
+            
+            # Prepare for next step
+            # Increment positions by 1.0 (text tokens after audio use integer increments)
+            last_positions = last_positions + 1.0
+            next_position_ids = last_positions.unsqueeze(1)  # [B, 1]
+            
+            # Get embedding for next token
+            next_embeds = self.llm_model.model.embed_tokens(next_token.unsqueeze(1))  # [B, 1, H]
+            
+            # Extend attention mask
+            attention_mask = torch.cat([
+                attention_mask,
+                torch.ones((batch_size, 1), dtype=attention_mask.dtype, device=device)
+            ], dim=1)
+            
+            # Forward pass with cache
+            with torch.no_grad():
+                outputs = self.llm_model(
+                    inputs_embeds=next_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=next_position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                past_key_values = outputs.past_key_values
+                logits = outputs.logits[:, -1, :]  # [B, vocab_size]
+        
+        # Stack generated IDs
+        if generated_ids:
+            generated_ids = torch.stack(generated_ids, dim=1)  # [B, gen_len]
+        else:
+            generated_ids = torch.empty((batch_size, 0), dtype=torch.long, device=device)
+        
         return generated_ids
 
 
