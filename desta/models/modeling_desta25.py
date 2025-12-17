@@ -19,21 +19,28 @@ from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
 
 
-def sinusoidal_position_embedding(positions: torch.Tensor, dim: int) -> torch.Tensor:
+def sinusoidal_position_embedding(
+    positions: torch.Tensor, 
+    dim: int, 
+    rope_theta: float = 10000.0
+) -> torch.Tensor:
     """
     Generate sinusoidal position embeddings for given positions.
-    Compatible with RoPE-style models - can handle fractional positions for interpolation.
+    Uses the same frequency calculation as RoPE to ensure consistency with LLM.
+    Supports fractional positions for interpolation/compression.
     
     Args:
-        positions: Position indices [B, T] or [T], can be fractional
+        positions: Position indices [B, T] or [T], can be fractional for interpolation
         dim: Embedding dimension
+        rope_theta: Base frequency for RoPE (from LLM config, e.g., 10000 for Qwen, 500000 for Llama-3.1)
         
     Returns:
         Position embeddings [B, T, dim] or [T, dim]
     """
     half_dim = dim // 2
     freq_seq = torch.arange(half_dim, dtype=torch.float, device=positions.device)
-    inv_freq = 1.0 / (10000 ** (freq_seq / half_dim))
+    # Use rope_theta from LLM config for consistency
+    inv_freq = 1.0 / (rope_theta ** (freq_seq / half_dim))
     
     # Handle both 1D and 2D position tensors
     if positions.dim() == 1:
@@ -297,12 +304,16 @@ class ORCAHybridConnector(nn.Module):
             seq_len = local_tokens.size(1)
             d_llm = local_tokens.size(2)
             
+            # Get rope_theta from LLM config for consistency with text position encoding
+            rope_theta = getattr(self.config.llm_config, 'rope_theta', 10000.0)
+            
             # Generate fractional positions: [0, 1/scale, 2/scale, ...]
+            # This compresses position range - e.g., with scale=4, 1000 tokens span position 0-249.75
             positions = torch.arange(seq_len, dtype=torch.float, device=local_tokens.device) / audio_position_scale
             positions = positions.unsqueeze(0).expand(batch_size, -1)  # [B, T']
             
-            # Add sinusoidal position embeddings
-            pos_embed = sinusoidal_position_embedding(positions, d_llm)  # [B, T', d_llm]
+            # Add sinusoidal position embeddings using LLM's rope_theta
+            pos_embed = sinusoidal_position_embedding(positions, d_llm, rope_theta=rope_theta)  # [B, T', d_llm]
             local_tokens = local_tokens + pos_embed.to(local_tokens.dtype)
         else:
             local_tokens = None
