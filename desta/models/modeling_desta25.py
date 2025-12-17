@@ -483,6 +483,7 @@ class DeSTA25Config(PretrainedConfig):
                  orca_ortho_weight_global=0.01,
                  orca_ortho_diversity_weight=0.01,
                  orca_ortho_weight_qformer_local=0.01,  # Orthogonality between Q-Former global and local tokens
+                 orca_align_weight_local=0.05,  # Alignment loss to bring local tokens closer to text embeddings
                  orca_prosody_weight_global=0.1,
                  orca_prosody_weight_local=0.1,
                  **kwargs):
@@ -514,6 +515,7 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_ortho_weight_global = orca_ortho_weight_global
         self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
         self.orca_ortho_weight_qformer_local = orca_ortho_weight_qformer_local
+        self.orca_align_weight_local = orca_align_weight_local
         self.orca_prosody_weight_global = orca_prosody_weight_global
         self.orca_prosody_weight_local = orca_prosody_weight_local
 
@@ -970,6 +972,22 @@ class DeSTA25AudioModel(PreTrainedModel):
             cos_gl = torch.einsum("bgh,blh->bgl", g, l)  # [B, Kg, Tl]
             L_ortho_ql = (cos_gl ** 2).mean()
             losses["L_ortho_qformer_local"] = self.config.orca_ortho_weight_qformer_local * L_ortho_ql
+        
+        # Local-text alignment loss: bring local tokens CLOSER to text embeddings
+        # This helps cross-attention work better by putting them in the same semantic space
+        if local_tokens is not None and text_hidden is not None:
+            l = F.normalize(local_tokens, dim=-1)   # [B, Tl, H]
+            t = F.normalize(text_hidden, dim=-1)    # [B, T, H]
+            
+            # Compute mean cosine similarity between local tokens and text
+            # Use pooled representations to avoid O(Tl * T) complexity
+            l_pooled = l.mean(dim=1)  # [B, H]
+            t_pooled = t.mean(dim=1)  # [B, H]
+            cos_lt = F.cosine_similarity(l_pooled, t_pooled, dim=-1)  # [B]
+            
+            # Alignment loss: maximize similarity (minimize 1 - cos)
+            L_align_local = (1 - cos_lt).mean()
+            losses["L_align_local"] = self.config.orca_align_weight_local * L_align_local
         
         # Prosody supervision (targets are provided in the batch if available)
         if global_prosody_pred is not None and "f0_energy_global" in batch:

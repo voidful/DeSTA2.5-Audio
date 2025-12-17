@@ -57,6 +57,7 @@ model:
     ortho_weight_global: 0.05
     ortho_diversity_weight: 0.05
     ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens
+    align_weight_local: 0.05  # Alignment loss to bring local tokens closer to text
     prosody_weight_global: 0.1
     prosody_weight_local: 0.1
 
