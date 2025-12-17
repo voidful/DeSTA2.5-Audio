@@ -580,7 +580,7 @@ class DeSTA25Config(PretrainedConfig):
                  orca_enabled=False,
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
-                 orca_audio_position_scale=4.0,  # Position interpolation scale for audio tokens (higher = more compression)
+                 orca_audio_position_scale=5.0,  # Position interpolation scale for audio tokens (higher = more compression)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
                  orca_local_kernel_size=7,
