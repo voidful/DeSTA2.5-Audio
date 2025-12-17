@@ -50,8 +50,8 @@ model:
     enabled: true
     local_enabled: true  # Set to false to disable local downsample features
     global_num_tokens: 64
-    local_downsample: 4
-    local_kernel_size: 7
+    local_downsample: 2
+    local_kernel_size: 5
     gate_init: 0.1
     audio_position_scale: 4.0  # Scale factor for audio position IDs (e.g. 4.0 = slow rotation)
     ortho_weight_global: 0.05
