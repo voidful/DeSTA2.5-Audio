@@ -301,6 +301,7 @@ class ORCAGatedCrossAttention(nn.Module):
         hidden_states: torch.Tensor,
         audio_local: torch.Tensor,
         audio_local_mask: Optional[torch.Tensor] = None,
+        transcription_positions: Optional[List[Tuple[int, int, int]]] = None,
     ) -> torch.Tensor:
         """
         Apply gated cross-attention with data-dependent gating.
@@ -310,6 +311,7 @@ class ORCAGatedCrossAttention(nn.Module):
             hidden_states: LLM hidden states [B, T_text, H]
             audio_local: Audio tokens [B, T_audio, H]
             audio_local_mask: Optional mask [B, T_audio], True for valid positions
+            transcription_positions: List of (batch_idx, start, end) for transcription in hidden_states
             
         Returns:
             Updated hidden states [B, T_text, H]
@@ -340,14 +342,34 @@ class ORCAGatedCrossAttention(nn.Module):
         # Data-dependent gate: compute gate from hidden states
         gate = torch.sigmoid(self.gate_proj.to(dtype=hidden_states.dtype)(hidden_states))  # [B, T, 1]
         
-        # Compute per-layer alignment loss: audio tokens should be close to text hidden states
-        # Use pooled representations for efficiency
+        # Compute per-layer alignment loss: audio tokens should be close to transcription hidden states
         if self.training:
             with torch.no_grad():
                 audio_pooled = F.normalize(audio_local.mean(dim=1), dim=-1)  # [B, H]
-            text_pooled = F.normalize(hidden_states.mean(dim=1), dim=-1)  # [B, H]
-            cos_sim = F.cosine_similarity(audio_pooled, text_pooled, dim=-1)  # [B]
-            self.layer_align_loss = (1 - cos_sim).mean()
+            
+            # Use transcription positions if available, else fallback to full hidden states
+            if transcription_positions is not None and len(transcription_positions) > 0:
+                # Extract transcription hidden states and pool per sample
+                trans_pooled_list = []
+                for batch_idx, start, end in transcription_positions:
+                    if start < end and end <= hidden_states.size(1):
+                        trans_hidden = hidden_states[batch_idx, start:end, :]  # [trans_len, H]
+                        trans_pooled_list.append(trans_hidden.mean(dim=0))  # [H]
+                
+                if len(trans_pooled_list) > 0:
+                    trans_pooled = torch.stack(trans_pooled_list, dim=0)  # [N, H]
+                    trans_pooled = F.normalize(trans_pooled, dim=-1)
+                    # audio_pooled may have different batch size, align by taking first N
+                    n = min(audio_pooled.size(0), trans_pooled.size(0))
+                    cos_sim = F.cosine_similarity(audio_pooled[:n], trans_pooled[:n], dim=-1)
+                    self.layer_align_loss = (1 - cos_sim).mean()
+                else:
+                    self.layer_align_loss = None
+            else:
+                # Fallback: use full hidden states
+                text_pooled = F.normalize(hidden_states.mean(dim=1), dim=-1)  # [B, H]
+                cos_sim = F.cosine_similarity(audio_pooled, text_pooled, dim=-1)  # [B]
+                self.layer_align_loss = (1 - cos_sim).mean()
         else:
             self.layer_align_loss = None
         
@@ -621,7 +643,14 @@ class DeSTA25AudioModel(PreTrainedModel):
         ) or self.config.connector_mode == "orca_hybrid"
         
         if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
-            inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
+            if len(prepare_result) == 4:
+                inputs_embeds, global_audio_tokens, local_audio_tokens, transcription_positions = prepare_result
+            else:
+                inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
+                transcription_positions = None
+            
+            # Store transcription positions for cross-attention alignment loss
+            self._orca_transcription_positions = transcription_positions
             
             # Set audio tokens for deep injection (accessed by wrapped decoder layers)
             # If global_cross_attn is enabled, combine global and local tokens for injection
@@ -751,6 +780,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         # [---- Other text embeddings ----][---- placeholder embeddings ----][---- Other text embeddings ----]
         inputs_embeds = self.llm_model.model.embed_tokens(input_ids)
         
+        # Track transcription positions for alignment loss
+        transcription_positions = []
         
         for audio_batch_idx in range(N_audio):
             start_position = batch_start_positions[audio_batch_idx] # tuple (text_idx, audio_start_position)
@@ -763,11 +794,18 @@ class DeSTA25AudioModel(PreTrainedModel):
 
             # get transcription embeddings
             transcription_embeddings = transcription_embeddings_list[audio_batch_idx] # (length, dim)
+            trans_len = transcription_embeddings.size(0)
+            
+            # Compute transcription position in final sequence
+            # Transcription is placed after audio features
+            trans_start = audio_start_position + speech_feature_length
+            trans_end = trans_start + trans_len
+            transcription_positions.append((text_batch_idx, trans_start, trans_end))
 
             # # concat the speech features and transcription embeddings
             audio_embeddings = torch.cat([audio_features, transcription_embeddings], dim=0)
 
-            assert audio_embeddings.size(0) == (speech_feature_length + transcription_embeddings.size(0))
+            assert audio_embeddings.size(0) == (speech_feature_length + trans_len)
 
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
@@ -779,7 +817,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings
 
         if self.config.connector_mode == "orca_hybrid":
-            return inputs_embeds, batch_global_tokens, batch_local_tokens
+            return inputs_embeds, batch_global_tokens, batch_local_tokens, transcription_positions
 
         return inputs_embeds
     
@@ -849,12 +887,14 @@ class DeSTA25AudioModel(PreTrainedModel):
                     # Apply cross-attention if audio_local is available
                     audio_local = getattr(parent, "_orca_audio_local", None)
                     audio_local_mask = getattr(parent, "_orca_audio_local_mask", None)
+                    transcription_positions = getattr(parent, "_orca_transcription_positions", None)
                     
                     if audio_local is not None:
                         h = xattn(
                             hidden_states=h,
                             audio_local=audio_local,
                             audio_local_mask=audio_local_mask,
+                            transcription_positions=transcription_positions,
                         )
                     
                     if isinstance(outputs, tuple):
