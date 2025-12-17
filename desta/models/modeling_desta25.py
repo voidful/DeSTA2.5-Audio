@@ -266,13 +266,12 @@ class ORCAHybridConnector(nn.Module):
         
         return global_tokens, local_tokens
 
-
 class ORCAGatedCrossAttention(nn.Module):
     """
-    Gated cross-attention module for deep injection of local prosody tokens
-    into LLM decoder layers.
+    Gated cross-attention module for deep injection of audio tokens into LLM decoder layers.
+    Uses data-dependent gating (following Audio Flamingo 3 design).
     
-    hidden_out = hidden + tanh(gate) * LayerNorm(CrossAttn(hidden, audio_local))
+    hidden_out = hidden + gate(hidden) * LayerNorm(CrossAttn(hidden, audio))
     """
     def __init__(self, hidden_size: int, num_heads: int, gate_init: float = 0.1):
         super().__init__()
@@ -281,7 +280,16 @@ class ORCAGatedCrossAttention(nn.Module):
             num_heads=num_heads,
             batch_first=True,
         )
-        self.gate = nn.Parameter(torch.full([], gate_init))
+        # Data-dependent gate: projects hidden state to gate value
+        self.gate_proj = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 4),
+            nn.GELU(),
+            nn.Linear(hidden_size // 4, 1),
+        )
+        # Initialize to small values for stable training
+        nn.init.zeros_(self.gate_proj[-1].weight)
+        nn.init.constant_(self.gate_proj[-1].bias, gate_init)
+        
         self.ln = nn.LayerNorm(hidden_size)
     
     def forward(
@@ -291,12 +299,12 @@ class ORCAGatedCrossAttention(nn.Module):
         audio_local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Apply gated cross-attention.
+        Apply gated cross-attention with data-dependent gating.
         
         Args:
             hidden_states: LLM hidden states [B, T_text, H]
-            audio_local: Local prosody tokens [B, T_local, H]
-            audio_local_mask: Optional mask [B, T_local], True for valid positions
+            audio_local: Audio tokens [B, T_audio, H]
+            audio_local_mask: Optional mask [B, T_audio], True for valid positions
             
         Returns:
             Updated hidden states [B, T_text, H]
@@ -323,7 +331,10 @@ class ORCAGatedCrossAttention(nn.Module):
         )
         cross_out = self.ln.to(dtype=hidden_states.dtype)(cross_out)
         
-        return hidden_states + torch.tanh(self.gate.to(dtype=hidden_states.dtype)) * cross_out
+        # Data-dependent gate: compute gate from hidden states
+        gate = torch.sigmoid(self.gate_proj.to(dtype=hidden_states.dtype)(hidden_states))  # [B, T, 1]
+        
+        return hidden_states + gate * cross_out
 
 @dataclass
 class GenerationOutput():
@@ -475,6 +486,7 @@ class DeSTA25Config(PretrainedConfig):
                  # ORCA-DeSTA configuration fields
                  orca_enabled=False,
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
+                 orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
                  orca_local_kernel_size=7,
@@ -504,6 +516,7 @@ class DeSTA25Config(PretrainedConfig):
         # ORCA-DeSTA configuration
         self.orca_enabled = orca_enabled
         self.orca_local_enabled = orca_local_enabled
+        self.orca_global_cross_attn = orca_global_cross_attn
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
         self.orca_local_kernel_size = orca_local_kernel_size
@@ -593,9 +606,20 @@ class DeSTA25AudioModel(PreTrainedModel):
         if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
             inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
             
-            # Set local tokens for deep injection (accessed by wrapped decoder layers)
-            self._orca_audio_local = local_audio_tokens
-            self._orca_audio_local_mask = None  # No mask needed for now
+            # Set audio tokens for deep injection (accessed by wrapped decoder layers)
+            # If global_cross_attn is enabled, combine global and local tokens for injection
+            if getattr(self.config, 'orca_global_cross_attn', False):
+                # Combine global + local tokens for cross-attention injection
+                if local_audio_tokens is not None and global_audio_tokens is not None:
+                    self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
+                elif global_audio_tokens is not None:
+                    self._orca_audio_local = global_audio_tokens
+                else:
+                    self._orca_audio_local = local_audio_tokens
+            else:
+                # Standard mode: only local tokens for cross-attention
+                self._orca_audio_local = local_audio_tokens
+            self._orca_audio_local_mask = None
             
             # Call LLM with output_hidden_states to get text hidden states for orthogonality loss
             outputs = self.llm_model(
@@ -605,7 +629,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 output_hidden_states=True,
             )
             
-            # Clear local tokens after LLM forward
+            # Clear audio tokens after LLM forward
             self._orca_audio_local = None
             self._orca_audio_local_mask = None
             
