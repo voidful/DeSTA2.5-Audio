@@ -475,7 +475,6 @@ class DeSTA25Config(PretrainedConfig):
                  # ORCA-DeSTA configuration fields
                  orca_enabled=False,
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
-                 orca_audio_position_scale=1.0,  # Scale factor for audio token position IDs (e.g. 4.0 = slow rotation)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
                  orca_local_kernel_size=7,
@@ -505,7 +504,6 @@ class DeSTA25Config(PretrainedConfig):
         # ORCA-DeSTA configuration
         self.orca_enabled = orca_enabled
         self.orca_local_enabled = orca_local_enabled
-        self.orca_audio_position_scale = orca_audio_position_scale
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
         self.orca_local_kernel_size = orca_local_kernel_size
@@ -593,11 +591,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         ) or self.config.connector_mode == "orca_hybrid"
         
         if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
-            if len(prepare_result) == 4:
-                inputs_embeds, global_audio_tokens, local_audio_tokens, position_ids = prepare_result
-            else:
-                inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
-                position_ids = None
+            inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
             
             # Set local tokens for deep injection (accessed by wrapped decoder layers)
             self._orca_audio_local = local_audio_tokens
@@ -607,7 +601,6 @@ class DeSTA25AudioModel(PreTrainedModel):
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                position_ids=position_ids,  # Pass custom position_ids if available
                 labels=labels,
                 output_hidden_states=True,
             )
@@ -634,21 +627,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             return outputs
         else:
             # Standard non-ORCA path
-            # Handle potential 2-tuple return when audio_position_scale != 1.0
-            if isinstance(prepare_result, tuple):
-                if len(prepare_result) == 2:
-                    inputs_embeds, position_ids = prepare_result
-                else:
-                    inputs_embeds = prepare_result[0]
-                    position_ids = None
-            else:
-                inputs_embeds = prepare_result
-                position_ids = None
+            inputs_embeds = prepare_result
             
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                position_ids=position_ids,
                 labels=labels,
             )
             return outputs 
@@ -750,79 +733,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             # clean GPU memory
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings
 
-        # === 4. Compute Position IDs with Audio Scaling ===
-        # If scale != 1.0, we construct fractional position_ids
-        audio_scale = getattr(self.config, 'orca_audio_position_scale', 1.0)
-        
-        # Default position_ids (integer based)
-        # Qwen/Llama usually expect position_ids as LongTensor, but we verified FloatTensor works for RoPE
-        # We start with arange
-        position_ids = torch.arange(inputs_embeds.size(1), dtype=torch.float, device=inputs_embeds.device)
-        position_ids = position_ids.unsqueeze(0).expand(inputs_embeds.size(0), -1).clone()
-        
-        # If scaling is needed, we must adjust position_ids per sample
-        if audio_scale != 1.0:
-            for audio_batch_idx in range(N_audio):
-                start_position = batch_start_positions[audio_batch_idx] # tuple (text_idx, audio_start_position)
-                text_batch_idx = start_position[0]
-                audio_start = start_position[1]
-                
-                # We need the length of the inserted audio embedding (which includes transcription if any)
-                # However, audio_embeddings was deleted above. We need to re-calculate or cache the length.
-                # Fortunately we have inputs_embeds shape, but there might be suffix text.
-                # Let's rely on the fact that we sliced into inputs_embeds.
-                
-                # Re-calculate total inserted audio length:
-                feat_len = batch_audio_feature_lengths[audio_batch_idx]
-                trans_len = transcription_embeddings_list[audio_batch_idx].size(0)
-                total_audio_len = feat_len + trans_len
-                
-                audio_end = audio_start + total_audio_len
-                
-                # Audio segment: from audio_start to audio_end
-                # Increments should be 1/scale instead of 1
-                # Text before Audio: 0, 1, 2... (audio_start-1) -> Correct in default arange
-                
-                # Audio: Start at 'audio_start', then increment by 1/scale
-                audio_indices = torch.arange(total_audio_len, dtype=torch.float, device=inputs_embeds.device)
-                audio_pos = audio_start + (audio_indices / audio_scale)
-                position_ids[text_batch_idx, audio_start:audio_end] = audio_pos
-                
-                # Text after Audio: Must continue from where Audio left off?
-                # Usually text after audio should continue logically.
-                # Standard causal masking implies relative distance matters.
-                # If audio was "compressed", the text after it should physically appear "closer" to the text before it?
-                # YES. If audio is 1000 tokens but treated as 250 positions.
-                # The text at index 1001 should have position 251.
-                # Otherwise there is a huge gap of 750 unused positions.
-                
-                # Adjust remaining tokens after audio
-                if audio_end < position_ids.size(1):
-                    # The last audio position was roughly: audio_start + (len-1)/scale
-                    last_audio_pos = audio_pos[-1]
-                    
-                    # The next text token should be at: last_audio_pos + 1.0 ??
-                    # Or should we just shift everything by (original_len - compressed_len)?
-                    # Shift = len - (len/scale) = len * (1 - 1/scale)
-                    # We subtract this shift from all subsequent positions.
-                    
-                    shift = total_audio_len * (1.0 - 1.0/audio_scale)
-                    position_ids[text_batch_idx, audio_end:] -= shift
-
         if self.config.connector_mode == "orca_hybrid":
-             # Pass position_ids to the LLM if we customized them
-            if audio_scale != 1.0:
-                 # Monkey-patching forward might be needed if llm_model() doesn't expose position_ids easily in all paths
-                 # But AutoModelForCausalLM usually takes position_ids.
-                 # We need to make sure we return them or pass them.
-                 # The 'forward' of DeSTA25AudioModel calls self.llm_model later.
-                 # We need to return position_ids from this method.
-                 return inputs_embeds, batch_global_tokens, batch_local_tokens, position_ids
             return inputs_embeds, batch_global_tokens, batch_local_tokens
 
-        # For non-ORCA mode (or if scale=1.0 and we want default behavior)
-        if audio_scale != 1.0:
-             return inputs_embeds, position_ids
         return inputs_embeds
     
     def _enable_orca_deep_injection(self):
@@ -1015,17 +928,9 @@ class DeSTA25AudioModel(PreTrainedModel):
         )
         
         # Handle ORCA mode - extract inputs_embeds and set local tokens for deep injection
-        position_ids = None
-        local_tokens = None  # Initialize to None to avoid NameError
-        if isinstance(prepare_result, tuple):
-            if len(prepare_result) == 4:
-                # ORCA with position scaling
-                inputs_embeds, global_tokens, local_tokens, position_ids = prepare_result
-            elif len(prepare_result) == 3:
-                # ORCA without position scaling
-                inputs_embeds, global_tokens, local_tokens = prepare_result
-            else:
-                inputs_embeds = prepare_result[0]
+        local_tokens = None
+        if isinstance(prepare_result, tuple) and len(prepare_result) == 3:
+            inputs_embeds, global_tokens, local_tokens = prepare_result
             # Set local tokens for deep injection during generation
             if local_tokens is not None:
                 self._orca_audio_local = local_tokens
@@ -1038,177 +943,21 @@ class DeSTA25AudioModel(PreTrainedModel):
             temperature = None
         
         try:
-            # Check if we need custom position handling
-            audio_scale = getattr(self.config, 'orca_audio_position_scale', 1.0)
-            
-            if audio_scale != 1.0 and position_ids is not None:
-                # Use custom autoregressive loop to maintain fractional position_ids
-                generated_ids = self._generate_with_custom_positions(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    pad_token_id=pad_token_id,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=do_sample,
-                )
-            else:
-                # Standard HuggingFace generate for non-scaled positions
-                generated_ids = self.llm_model.generate(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    pad_token_id=pad_token_id,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=do_sample
-                )
+            generated_ids = self.llm_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                pad_token_id=pad_token_id,
+                temperature=temperature,
+                top_p=top_p,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample
+            )
         finally:
             # Clear local tokens after generation
             if hasattr(self, '_orca_audio_local'):
                 self._orca_audio_local = None
                 self._orca_audio_local_mask = None
 
-        return generated_ids
-    
-    def _generate_with_custom_positions(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        position_ids: torch.Tensor,
-        pad_token_id: int,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        max_new_tokens: int = 512,
-        do_sample: bool = True,
-    ) -> torch.Tensor:
-        """
-        Custom autoregressive generation loop that maintains fractional position_ids.
-        This ensures train-inference consistency when using audio_position_scale.
-        
-        Args:
-            inputs_embeds: Initial embeddings [B, seq_len, hidden_size]
-            attention_mask: Attention mask [B, seq_len]
-            position_ids: Fractional position IDs [B, seq_len]
-            pad_token_id: Token ID for padding
-            temperature: Sampling temperature
-            top_p: Nucleus sampling probability
-            max_new_tokens: Maximum tokens to generate
-            do_sample: Whether to use sampling
-            
-        Returns:
-            Generated token IDs [B, generated_len]
-        """
-        batch_size = inputs_embeds.size(0)
-        device = inputs_embeds.device
-        
-        # Get the last position for each sequence (to continue from)
-        # Take the last non-padded position
-        last_positions = position_ids[:, -1].clone()  # [B]
-        
-        # Initialize KV cache with prefill
-        past_key_values = None
-        
-        # Prefill: process the entire prompt with custom position_ids
-        with torch.no_grad():
-            outputs = self.llm_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=True,
-                return_dict=True,
-            )
-            past_key_values = outputs.past_key_values
-            logits = outputs.logits[:, -1, :]  # [B, vocab_size]
-        
-        # Initialize generated sequence
-        generated_ids = []
-        
-        # EOS token ID (for stopping)
-        eos_token_id = getattr(self.llm_model.config, 'eos_token_id', None)
-        if isinstance(eos_token_id, list):
-            eos_token_ids = set(eos_token_id)
-        elif eos_token_id is not None:
-            eos_token_ids = {eos_token_id}
-        else:
-            eos_token_ids = set()
-        
-        # Track which sequences have finished
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        
-        # Autoregressive generation loop
-        for step in range(max_new_tokens):
-            # Sample or greedy decode
-            if do_sample and temperature is not None and temperature > 0:
-                # Apply temperature
-                logits = logits / temperature
-                
-                # Apply top-p (nucleus) sampling
-                if top_p is not None and top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    
-                    # Remove tokens with cumulative probability above threshold
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = False
-                    
-                    # Scatter back to original ordering
-                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-                    logits[indices_to_remove] = float('-inf')
-                
-                probs = F.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
-            else:
-                # Greedy decoding
-                next_token = torch.argmax(logits, dim=-1)  # [B]
-            
-            # Replace finished sequences with pad token
-            next_token = torch.where(finished, torch.tensor(pad_token_id, device=device), next_token)
-            generated_ids.append(next_token)
-            
-            # Check for EOS
-            for eos_id in eos_token_ids:
-                finished = finished | (next_token == eos_id)
-            
-            # Stop if all sequences have finished
-            if finished.all():
-                break
-            
-            # Prepare for next step
-            # Increment positions by 1.0 (text tokens after audio use integer increments)
-            last_positions = last_positions + 1.0
-            next_position_ids = last_positions.unsqueeze(1)  # [B, 1]
-            
-            # Get embedding for next token
-            next_embeds = self.llm_model.model.embed_tokens(next_token.unsqueeze(1))  # [B, 1, H]
-            
-            # Extend attention mask
-            attention_mask = torch.cat([
-                attention_mask,
-                torch.ones((batch_size, 1), dtype=attention_mask.dtype, device=device)
-            ], dim=1)
-            
-            # Forward pass with cache
-            with torch.no_grad():
-                outputs = self.llm_model(
-                    inputs_embeds=next_embeds,
-                    attention_mask=attention_mask,
-                    position_ids=next_position_ids,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                    return_dict=True,
-                )
-                past_key_values = outputs.past_key_values
-                logits = outputs.logits[:, -1, :]  # [B, vocab_size]
-        
-        # Stack generated IDs
-        if generated_ids:
-            generated_ids = torch.stack(generated_ids, dim=1)  # [B, gen_len]
-        else:
-            generated_ids = torch.empty((batch_size, 0), dtype=torch.long, device=device)
-        
         return generated_ids
 
 
@@ -1506,13 +1255,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         cache_dir = kwargs.get("cache_dir", os.getenv("HF_HOME"))
 
         config = cls.config_class.from_pretrained(pretrained_model_name_or_path, cache_dir=cache_dir)
-        
-        # Backward compatibility: old checkpoints don't have audio_position_scale
-        # Default to 1.0 (no scaling) to maintain consistency with how they were trained
-        if not hasattr(config, 'orca_audio_position_scale') or config.orca_audio_position_scale is None:
-            config.orca_audio_position_scale = 1.0
-            logging.info("Old checkpoint detected: setting orca_audio_position_scale=1.0 for backward compatibility")
-        
+
         model = cls(config)
         
         if os.path.isdir(pretrained_model_name_or_path):
