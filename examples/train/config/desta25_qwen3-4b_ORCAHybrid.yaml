@@ -49,6 +49,7 @@ model:
   orca:
     enabled: true
     local_enabled: true  # Set to false to disable local downsample features
+    global_cross_attn: true  # Global tokens also use cross-attention instead of concat
     global_num_tokens: 64
     local_downsample: 2
     local_kernel_size: 5
