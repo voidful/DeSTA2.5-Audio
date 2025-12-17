@@ -484,8 +484,6 @@ class DeSTA25Config(PretrainedConfig):
                  orca_ortho_diversity_weight=0.01,
                  orca_ortho_weight_qformer_local=0.01,  # Orthogonality between Q-Former global and local tokens
                  orca_align_weight_local=0.05,  # Alignment loss to bring local tokens closer to text embeddings
-                 orca_prosody_weight_global=0.1,
-                 orca_prosody_weight_local=0.1,
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -516,8 +514,6 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
         self.orca_ortho_weight_qformer_local = orca_ortho_weight_qformer_local
         self.orca_align_weight_local = orca_align_weight_local
-        self.orca_prosody_weight_global = orca_prosody_weight_global
-        self.orca_prosody_weight_local = orca_prosody_weight_local
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 
@@ -564,11 +560,6 @@ class DeSTA25AudioModel(PreTrainedModel):
         is_orca = getattr(self.config, 'orca_enabled', False) or self.config.connector_mode == "orca_hybrid"
         if is_orca:
             logging.info("Enabling ORCA-DeSTA components")
-            
-            # Prosody prediction heads
-            d_llm = self.config.llm_config.hidden_size
-            self.global_prosody_head = nn.Linear(d_llm, 4)  # [f0_mean, f0_std, energy_mean, energy_std]
-            self.local_prosody_head = nn.Linear(d_llm, 2)   # [f0_t, energy_t] per frame
             
             # Enable deep cross-attention injection
             self._enable_orca_deep_injection()
@@ -628,23 +619,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Compute ORCA auxiliary losses
             text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
             
-            # Compute prosody predictions
-            global_prosody_pred = None
-            local_prosody_pred = None
-            if global_audio_tokens is not None and hasattr(self, 'global_prosody_head'):
-                global_pooled = global_audio_tokens.mean(dim=1)  # [B, H]
-                global_prosody_pred = self.global_prosody_head(global_pooled)  # [B, 4]
-            if local_audio_tokens is not None and hasattr(self, 'local_prosody_head'):
-                local_prosody_pred = self.local_prosody_head(local_audio_tokens)  # [B, T_local, 2]
-            
             # Compute ORCA losses
             orca_losses = self.compute_orca_losses(
                 global_tokens=global_audio_tokens,
                 local_tokens=local_audio_tokens,
                 text_hidden=text_hidden,
-                batch=kwargs,
-                global_prosody_pred=global_prosody_pred,
-                local_prosody_pred=local_prosody_pred,
             )
             
             # Attach losses to outputs
@@ -936,16 +915,13 @@ class DeSTA25AudioModel(PreTrainedModel):
         global_tokens: Optional[torch.Tensor],
         local_tokens: Optional[torch.Tensor],
         text_hidden: Optional[torch.Tensor],
-        batch: Dict,
-        global_prosody_pred: Optional[torch.Tensor],
-        local_prosody_pred: Optional[torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """
         Compute ORCA auxiliary losses:
         - Global-text orthogonality loss
         - Global token diversity loss
-        - Global-local orthogonality loss (Q-Former/local)
-        - Prosody supervision losses (if targets provided)
+        - Global-local orthogonality loss
+        - Local-text alignment loss
         """
         losses = {}
         
@@ -988,25 +964,6 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Alignment loss: maximize similarity (minimize 1 - cos)
             L_align_local = (1 - cos_lt).mean()
             losses["L_align_local"] = self.config.orca_align_weight_local * L_align_local
-        
-        # Prosody supervision (targets are provided in the batch if available)
-        if global_prosody_pred is not None and "f0_energy_global" in batch:
-            target_global = batch["f0_energy_global"]  # [B, 4]
-            L_pg = F.mse_loss(global_prosody_pred, target_global)
-            losses["L_prosody_global"] = self.config.orca_prosody_weight_global * L_pg
-        
-        if local_prosody_pred is not None and "f0_energy_local" in batch:
-            target_local = batch["f0_energy_local"]  # [B, T_local, 2]
-            # Interpolate to match lengths if needed
-            if target_local.shape[1] != local_prosody_pred.shape[1]:
-                target_local = F.interpolate(
-                    target_local.transpose(1, 2),
-                    size=local_prosody_pred.shape[1],
-                    mode="linear",
-                    align_corners=False,
-                ).transpose(1, 2)
-            L_pl = F.mse_loss(local_prosody_pred, target_local)
-            losses["L_prosody_local"] = self.config.orca_prosody_weight_local * L_pl
         
         return losses
         

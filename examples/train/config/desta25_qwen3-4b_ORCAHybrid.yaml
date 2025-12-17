@@ -58,8 +58,6 @@ model:
     ortho_diversity_weight: 0.05
     ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens
     align_weight_local: 0.05  # Alignment loss to bring local tokens closer to text
-    prosody_weight_global: 0.1
-    prosody_weight_local: 0.1
 
   # Qwen3 使用 <|video_pad|> 作为 placeholder token (已在词表中)
   placeholder_token: "<|video_pad|>"
