@@ -270,6 +270,7 @@ class ORCAGatedCrossAttention(nn.Module):
     """
     Gated cross-attention module for deep injection of audio tokens into LLM decoder layers.
     Uses data-dependent gating (following Audio Flamingo 3 design).
+    Also computes per-layer alignment loss for layer-wise supervision.
     
     hidden_out = hidden + gate(hidden) * LayerNorm(CrossAttn(hidden, audio))
     """
@@ -291,6 +292,9 @@ class ORCAGatedCrossAttention(nn.Module):
         nn.init.constant_(self.gate_proj[-1].bias, gate_init)
         
         self.ln = nn.LayerNorm(hidden_size)
+        
+        # Per-layer loss storage (populated during forward, cleared after collection)
+        self.layer_align_loss = None
     
     def forward(
         self,
@@ -300,6 +304,7 @@ class ORCAGatedCrossAttention(nn.Module):
     ) -> torch.Tensor:
         """
         Apply gated cross-attention with data-dependent gating.
+        Also computes per-layer alignment loss if in training mode.
         
         Args:
             hidden_states: LLM hidden states [B, T_text, H]
@@ -310,6 +315,7 @@ class ORCAGatedCrossAttention(nn.Module):
             Updated hidden states [B, T_text, H]
         """
         if audio_local is None or audio_local.shape[1] == 0:
+            self.layer_align_loss = None
             return hidden_states
         
         # Ensure audio_local has same dtype and device as hidden_states
@@ -333,6 +339,17 @@ class ORCAGatedCrossAttention(nn.Module):
         
         # Data-dependent gate: compute gate from hidden states
         gate = torch.sigmoid(self.gate_proj.to(dtype=hidden_states.dtype)(hidden_states))  # [B, T, 1]
+        
+        # Compute per-layer alignment loss: audio tokens should be close to text hidden states
+        # Use pooled representations for efficiency
+        if self.training:
+            with torch.no_grad():
+                audio_pooled = F.normalize(audio_local.mean(dim=1), dim=-1)  # [B, H]
+            text_pooled = F.normalize(hidden_states.mean(dim=1), dim=-1)  # [B, H]
+            cos_sim = F.cosine_similarity(audio_pooled, text_pooled, dim=-1)  # [B]
+            self.layer_align_loss = (1 - cos_sim).mean()
+        else:
+            self.layer_align_loss = None
         
         return hidden_states + gate * cross_out
 
@@ -633,6 +650,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             self._orca_audio_local = None
             self._orca_audio_local_mask = None
             
+            # Collect per-layer alignment losses from cross-attention modules
+            layer_align_losses = self._collect_layer_align_losses()
+            
             # Compute ORCA auxiliary losses
             text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
             
@@ -641,6 +661,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 global_tokens=global_audio_tokens,
                 local_tokens=local_audio_tokens,
                 text_hidden=text_hidden,
+                layer_align_losses=layer_align_losses,
             )
             
             # Attach losses to outputs
@@ -847,18 +868,33 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         logging.info(f"ORCA deep injection enabled for {len(layers)} decoder layers")
     
+    def _collect_layer_align_losses(self) -> List[torch.Tensor]:
+        """
+        Collect per-layer alignment losses from all ORCA cross-attention modules.
+        Returns list of losses, one per layer.
+        """
+        losses = []
+        if hasattr(self, 'orca_cross_attns'):
+            for name, xattn in self.orca_cross_attns.named_modules():
+                if isinstance(xattn, ORCAGatedCrossAttention):
+                    if xattn.layer_align_loss is not None:
+                        losses.append(xattn.layer_align_loss)
+                        xattn.layer_align_loss = None  # Clear after collection
+        return losses
+    
     def compute_orca_losses(
         self,
         global_tokens: Optional[torch.Tensor],
         local_tokens: Optional[torch.Tensor],
         text_hidden: Optional[torch.Tensor],
+        layer_align_losses: Optional[List[torch.Tensor]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Compute ORCA auxiliary losses:
         - Global-text orthogonality loss
         - Global token diversity loss
         - Global-local orthogonality loss
-        - Local-text alignment loss
+        - Layer-wise alignment loss (aggregated from cross-attention modules)
         """
         losses = {}
         
@@ -886,21 +922,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             L_ortho_ql = (cos_gl ** 2).mean()
             losses["L_ortho_qformer_local"] = self.config.orca_ortho_weight_qformer_local * L_ortho_ql
         
-        # Local-text alignment loss: bring local tokens CLOSER to text embeddings
-        # This helps cross-attention work better by putting them in the same semantic space
-        if local_tokens is not None and text_hidden is not None:
-            l = F.normalize(local_tokens, dim=-1)   # [B, Tl, H]
-            t = F.normalize(text_hidden, dim=-1)    # [B, T, H]
-            
-            # Compute mean cosine similarity between local tokens and text
-            # Use pooled representations to avoid O(Tl * T) complexity
-            l_pooled = l.mean(dim=1)  # [B, H]
-            t_pooled = t.mean(dim=1)  # [B, H]
-            cos_lt = F.cosine_similarity(l_pooled, t_pooled, dim=-1)  # [B]
-            
-            # Alignment loss: maximize similarity (minimize 1 - cos)
-            L_align_local = (1 - cos_lt).mean()
-            losses["L_align_local"] = self.config.orca_align_weight_local * L_align_local
+        # Layer-wise alignment loss: aggregated from cross-attention modules
+        # Each layer computes alignment between audio and text at that layer's representation
+        if layer_align_losses is not None and len(layer_align_losses) > 0:
+            L_align_layerwise = torch.stack(layer_align_losses).mean()
+            losses["L_align_layerwise"] = self.config.orca_align_weight_local * L_align_layerwise
         
         return losses
         
