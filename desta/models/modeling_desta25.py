@@ -1,6 +1,7 @@
 
 import os
 import types
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,6 +18,34 @@ from transformers.models.bert.modeling_bert import BertEncoder
 from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
 
+
+def sinusoidal_position_embedding(positions: torch.Tensor, dim: int) -> torch.Tensor:
+    """
+    Generate sinusoidal position embeddings for given positions.
+    Compatible with RoPE-style models - can handle fractional positions for interpolation.
+    
+    Args:
+        positions: Position indices [B, T] or [T], can be fractional
+        dim: Embedding dimension
+        
+    Returns:
+        Position embeddings [B, T, dim] or [T, dim]
+    """
+    half_dim = dim // 2
+    freq_seq = torch.arange(half_dim, dtype=torch.float, device=positions.device)
+    inv_freq = 1.0 / (10000 ** (freq_seq / half_dim))
+    
+    # Handle both 1D and 2D position tensors
+    if positions.dim() == 1:
+        positions = positions.unsqueeze(-1)  # [T, 1]
+        sinusoid = positions * inv_freq  # [T, half_dim]
+        pos_embed = torch.cat([torch.sin(sinusoid), torch.cos(sinusoid)], dim=-1)  # [T, dim]
+    else:
+        positions = positions.unsqueeze(-1)  # [B, T, 1]
+        sinusoid = positions * inv_freq  # [B, T, half_dim]
+        pos_embed = torch.cat([torch.sin(sinusoid), torch.cos(sinusoid)], dim=-1)  # [B, T, dim]
+    
+    return pos_embed
 
 def _prepare_audio_context_and_start_positions(
                                              token_list,
@@ -261,6 +290,20 @@ class ORCAHybridConnector(nn.Module):
             local_features = self.local_conv(local_features)  # [B, D, T']
             local_features = local_features.transpose(1, 2)  # [B, T', D]
             local_tokens = self.local_ln(local_features)  # [B, T_local, d_llm]
+            
+            # Apply interpolated position embedding (RoPE-style, with compression)
+            # Use fractional positions to compress position range
+            audio_position_scale = getattr(self.config, 'orca_audio_position_scale', 4.0)
+            seq_len = local_tokens.size(1)
+            d_llm = local_tokens.size(2)
+            
+            # Generate fractional positions: [0, 1/scale, 2/scale, ...]
+            positions = torch.arange(seq_len, dtype=torch.float, device=local_tokens.device) / audio_position_scale
+            positions = positions.unsqueeze(0).expand(batch_size, -1)  # [B, T']
+            
+            # Add sinusoidal position embeddings
+            pos_embed = sinusoidal_position_embedding(positions, d_llm)  # [B, T', d_llm]
+            local_tokens = local_tokens + pos_embed.to(local_tokens.dtype)
         else:
             local_tokens = None
         
@@ -526,6 +569,7 @@ class DeSTA25Config(PretrainedConfig):
                  orca_enabled=False,
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
+                 orca_audio_position_scale=4.0,  # Position interpolation scale for audio tokens (higher = more compression)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
                  orca_local_kernel_size=7,
@@ -556,6 +600,7 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_enabled = orca_enabled
         self.orca_local_enabled = orca_local_enabled
         self.orca_global_cross_attn = orca_global_cross_attn
+        self.orca_audio_position_scale = orca_audio_position_scale
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
         self.orca_local_kernel_size = orca_local_kernel_size

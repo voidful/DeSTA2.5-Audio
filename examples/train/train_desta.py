@@ -111,6 +111,7 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         orca_enabled=orca_cfg.get("enabled", False),
         orca_local_enabled=orca_cfg.get("local_enabled", True),
         orca_global_cross_attn=orca_cfg.get("global_cross_attn", False),
+        orca_audio_position_scale=orca_cfg.get("audio_position_scale", 4.0),
         orca_global_num_tokens=orca_cfg.get("global_num_tokens", 4),
         orca_local_downsample=orca_cfg.get("local_downsample", 4),
         orca_local_kernel_size=orca_cfg.get("local_kernel_size", 7),
