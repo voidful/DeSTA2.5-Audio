@@ -19,40 +19,82 @@ from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
 
 
-def sinusoidal_position_embedding(
-    positions: torch.Tensor, 
-    dim: int, 
-    rope_theta: float = 10000.0
-) -> torch.Tensor:
+def compute_rope_freqs(
+    seq_len: int,
+    dim: int,
+    rope_theta: float = 10000.0,
+    device: torch.device = None,
+    positions: torch.Tensor = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Generate sinusoidal position embeddings for given positions.
-    Uses the same frequency calculation as RoPE to ensure consistency with LLM.
-    Supports fractional positions for interpolation/compression.
+    Compute RoPE cos and sin frequencies.
     
     Args:
-        positions: Position indices [B, T] or [T], can be fractional for interpolation
-        dim: Embedding dimension
-        rope_theta: Base frequency for RoPE (from LLM config, e.g., 10000 for Qwen, 500000 for Llama-3.1)
+        seq_len: Sequence length
+        dim: Head dimension (will compute for dim/2 pairs)
+        rope_theta: Base frequency (from LLM config)
+        device: Device for tensors
+        positions: Optional custom positions [B, T] or [T], can be fractional for interpolation
         
     Returns:
-        Position embeddings [B, T, dim] or [T, dim]
+        (cos, sin) tensors each of shape [1, T, dim] or [B, T, dim]
     """
     half_dim = dim // 2
-    freq_seq = torch.arange(half_dim, dtype=torch.float, device=positions.device)
-    # Use rope_theta from LLM config for consistency
+    freq_seq = torch.arange(half_dim, dtype=torch.float, device=device)
     inv_freq = 1.0 / (rope_theta ** (freq_seq / half_dim))
+    
+    if positions is None:
+        positions = torch.arange(seq_len, dtype=torch.float, device=device)
     
     # Handle both 1D and 2D position tensors
     if positions.dim() == 1:
-        positions = positions.unsqueeze(-1)  # [T, 1]
-        sinusoid = positions * inv_freq  # [T, half_dim]
-        pos_embed = torch.cat([torch.sin(sinusoid), torch.cos(sinusoid)], dim=-1)  # [T, dim]
+        # [T] x [half_dim] -> [T, half_dim]
+        freqs = positions.unsqueeze(-1) * inv_freq.unsqueeze(0)
+        # Duplicate for pairs: [T, half_dim] -> [T, dim]
+        freqs = torch.cat([freqs, freqs], dim=-1)
+        cos = freqs.cos().unsqueeze(0)  # [1, T, dim]
+        sin = freqs.sin().unsqueeze(0)  # [1, T, dim]
     else:
-        positions = positions.unsqueeze(-1)  # [B, T, 1]
-        sinusoid = positions * inv_freq  # [B, T, half_dim]
-        pos_embed = torch.cat([torch.sin(sinusoid), torch.cos(sinusoid)], dim=-1)  # [B, T, dim]
+        # [B, T] x [half_dim] -> [B, T, half_dim]
+        freqs = positions.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
+        # Duplicate for pairs: [B, T, half_dim] -> [B, T, dim]
+        freqs = torch.cat([freqs, freqs], dim=-1)
+        cos = freqs.cos()  # [B, T, dim]
+        sin = freqs.sin()  # [B, T, dim]
     
-    return pos_embed
+    return cos, sin
+
+
+def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """
+    Apply RoPE rotation to a tensor.
+    This is the same rotation used in LLM's attention.
+    
+    Args:
+        x: Input tensor [B, T, D] or [B, num_heads, T, head_dim]
+        cos: Cosine frequencies [1, T, D] or [B, T, D]
+        sin: Sine frequencies [1, T, D] or [B, T, D]
+        
+    Returns:
+        Rotated tensor with same shape as input
+    """
+    # Ensure correct dtype
+    cos = cos.to(x.dtype)
+    sin = sin.to(x.dtype)
+    
+    # RoPE rotation: pair-wise rotation
+    # Split into pairs and rotate
+    x_half1 = x[..., : x.shape[-1] // 2]
+    x_half2 = x[..., x.shape[-1] // 2 :]
+    
+    # Rotate: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
+    cos_half = cos[..., : cos.shape[-1] // 2]
+    sin_half = sin[..., : sin.shape[-1] // 2]
+    
+    rotated_half1 = x_half1 * cos_half - x_half2 * sin_half
+    rotated_half2 = x_half1 * sin_half + x_half2 * cos_half
+    
+    return torch.cat([rotated_half1, rotated_half2], dim=-1)
 
 def _prepare_audio_context_and_start_positions(
                                              token_list,
@@ -297,24 +339,7 @@ class ORCAHybridConnector(nn.Module):
             local_features = self.local_conv(local_features)  # [B, D, T']
             local_features = local_features.transpose(1, 2)  # [B, T', D]
             local_tokens = self.local_ln(local_features)  # [B, T_local, d_llm]
-            
-            # Apply interpolated position embedding (RoPE-style, with compression)
-            # Use fractional positions to compress position range
-            audio_position_scale = getattr(self.config, 'orca_audio_position_scale', 4.0)
-            seq_len = local_tokens.size(1)
-            d_llm = local_tokens.size(2)
-            
-            # Get rope_theta from LLM config for consistency with text position encoding
-            rope_theta = getattr(self.config.llm_config, 'rope_theta', 10000.0)
-            
-            # Generate fractional positions: [0, 1/scale, 2/scale, ...]
-            # This compresses position range - e.g., with scale=4, 1000 tokens span position 0-249.75
-            positions = torch.arange(seq_len, dtype=torch.float, device=local_tokens.device) / audio_position_scale
-            positions = positions.unsqueeze(0).expand(batch_size, -1)  # [B, T']
-            
-            # Add sinusoidal position embeddings using LLM's rope_theta
-            pos_embed = sinusoidal_position_embedding(positions, d_llm, rope_theta=rope_theta)  # [B, T', d_llm]
-            local_tokens = local_tokens + pos_embed.to(local_tokens.dtype)
+            # Note: RoPE rotation is applied in ORCAGatedCrossAttention, not here
         else:
             local_tokens = None
         
@@ -328,7 +353,8 @@ class ORCAGatedCrossAttention(nn.Module):
     
     hidden_out = hidden + gate(hidden) * LayerNorm(CrossAttn(hidden, audio))
     """
-    def __init__(self, hidden_size: int, num_heads: int, gate_init: float = 0.1):
+    def __init__(self, hidden_size: int, num_heads: int, gate_init: float = 0.1,
+                 rope_theta: float = 10000.0, audio_position_scale: float = 5.0):
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=hidden_size,
@@ -346,6 +372,11 @@ class ORCAGatedCrossAttention(nn.Module):
         nn.init.constant_(self.gate_proj[-1].bias, gate_init)
         
         self.ln = nn.LayerNorm(hidden_size)
+        
+        # RoPE config for audio position encoding
+        self.rope_theta = rope_theta
+        self.audio_position_scale = audio_position_scale
+        self.hidden_size = hidden_size
         
         # Per-layer loss storage (populated during forward, cleared after collection)
         self.layer_align_loss = None
@@ -376,6 +407,24 @@ class ORCAGatedCrossAttention(nn.Module):
         
         # Ensure audio_local has same dtype and device as hidden_states
         audio_local = audio_local.to(dtype=hidden_states.dtype, device=hidden_states.device)
+        
+        # Apply RoPE rotation to audio tokens with interpolated positions
+        batch_size, seq_len, _ = audio_local.shape
+        
+        # Generate fractional positions for compression: [0, 1/scale, 2/scale, ...]
+        positions = torch.arange(seq_len, dtype=torch.float, device=audio_local.device) / self.audio_position_scale
+        
+        # Compute RoPE cos/sin
+        cos, sin = compute_rope_freqs(
+            seq_len=seq_len,
+            dim=self.hidden_size,
+            rope_theta=self.rope_theta,
+            device=audio_local.device,
+            positions=positions,
+        )
+        
+        # Apply RoPE rotation to audio tokens (like LLM does for text)
+        audio_local = apply_rotary_pos_emb(audio_local, cos, sin)
         
         # Build key_padding_mask: True for positions to IGNORE
         if audio_local_mask is not None:
@@ -911,11 +960,17 @@ class DeSTA25AudioModel(PreTrainedModel):
         actual_num_layers = num_layers if num_layers is not None else len(layers)
         self.orca_cross_attns = nn.ModuleList()
         
+        # Get RoPE config from LLM for consistency
+        rope_theta = getattr(self.config.llm_config, 'rope_theta', 10000.0)
+        audio_position_scale = getattr(self.config, 'orca_audio_position_scale', 5.0)
+        
         for layer_idx in range(actual_num_layers):
             cross_attn = ORCAGatedCrossAttention(
                 hidden_size=hidden_size,
                 num_heads=num_heads,
                 gate_init=gate_init,
+                rope_theta=rope_theta,
+                audio_position_scale=audio_position_scale,
             )
             self.orca_cross_attns.append(cross_attn)
         
