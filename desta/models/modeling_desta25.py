@@ -299,16 +299,20 @@ class ORCAHybridConnector(nn.Module):
         """
         batch_size = encoder_hidden_states[0].size(0)
         
+        target_dtype = self.global_proj[1].weight.dtype
+        target_device = self.global_proj[1].weight.device
+        
         # Collect target layer outputs (used by both branches)
         target_layer_outputs = []
         for idx, hidden_state in enumerate(encoder_hidden_states):
             if idx in self.target_layer_ids:
-                target_layer_outputs.append(hidden_state)
+                # Ensure input hidden states match module dtype
+                target_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
         
         # === Global Branch ===
         global_outputs = []
         for layer_idx, hidden_state in enumerate(target_layer_outputs):
-            queries = self.global_queries[layer_idx].expand(batch_size, -1, -1)
+            queries = self.global_queries[layer_idx].expand(batch_size, -1, -1).to(dtype=target_dtype, device=target_device)
             
             qformer_out = self.global_qformer(
                 hidden_states=queries,
@@ -329,6 +333,7 @@ class ORCAHybridConnector(nn.Module):
             target_layers = torch.stack(target_layer_outputs, dim=0)  # [L, B, T, D]
             target_layers = target_layers.permute(1, 2, 0, 3)  # [B, T, L, D]
             local_weights = torch.softmax(self.local_layer_weights, dim=-1).unsqueeze(-1)  # [L, 1]
+            local_weights = local_weights.to(dtype=target_dtype, device=target_device)
             fused_hidden = (target_layers * local_weights).sum(dim=2)  # [B, T, D]
             
             # Project to LLM dimension
@@ -536,6 +541,11 @@ class WhisperPerception(nn.Module):
         """
         bs = input_features.size(0)
         
+        # Ensure input_features match Whisper's dtype
+        target_dtype = self.whisper.model.encoder.conv1.weight.dtype
+        target_device = self.whisper.model.encoder.conv1.weight.device
+        input_features = input_features.to(dtype=target_dtype, device=target_device)
+        
         expected_seq_length = self.whisper.model.encoder.config.max_source_positions * self.whisper.model.encoder.conv1.stride[0] * self.whisper.model.encoder.conv2.stride[0]
 
         if input_features.shape[-1] != expected_seq_length:
@@ -549,6 +559,7 @@ class WhisperPerception(nn.Module):
 
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
         embed_pos = self.whisper.model.encoder.embed_positions.weight[:self.whisper.model.encoder.config.max_source_positions, :] # @kehan
+        embed_pos = embed_pos.to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos
         

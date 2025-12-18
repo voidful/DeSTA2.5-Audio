@@ -156,3 +156,28 @@ def test_orca_backward_compatibility():
     connector = QformerConnector(config)
     assert isinstance(connector, torch.nn.Module)
     assert config.orca_enabled is False
+
+
+def test_orca_mixed_precision(orca_config):
+    """Test that ORCAHybridConnector handles float32 inputs when module is in bfloat16."""
+    from desta.models.modeling_desta25 import ORCAHybridConnector
+    connector = ORCAHybridConnector(orca_config)
+    
+    # Move connector to bfloat16
+    connector = connector.to(dtype=torch.bfloat16)
+    
+    batch_size = 2
+    seq_len = 20
+    d_encoder = 384
+    
+    # Inputs remain in float32 (standard behavior from dataloader)
+    encoder_hidden_states = [torch.randn(batch_size, seq_len, d_encoder, dtype=torch.float32) for _ in range(4)]
+    
+    # This should not raise RuntimeError: expected mat1 and mat2 to have the same dtype
+    try:
+        global_tokens, local_tokens = connector(encoder_hidden_states)
+    except RuntimeError as e:
+        pytest.fail(f"ORCAHybridConnector failed with mixed precision: {e}")
+    
+    assert global_tokens.dtype == torch.bfloat16
+    assert local_tokens.dtype == torch.bfloat16
