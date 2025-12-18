@@ -218,6 +218,14 @@ def main(cfg: DictConfig):
     # Save config
     OmegaConf.save(cfg, f"{cfg.exp_dir}/config.yaml")
     
+    # === Safety First: Eval before train to catch logic errors early ===
+    if not cfg.resume_from_checkpoint:
+        logging.info("Running initial evaluation to verify model and trainer logic...")
+        trainer.evaluate()
+        
+        logging.info(f"Saving initial checkpoint to {cfg.exp_dir}/checkpoint-initial")
+        trainer.save_model(os.path.join(cfg.exp_dir, "checkpoint-initial"))
+    
     # Train
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
 

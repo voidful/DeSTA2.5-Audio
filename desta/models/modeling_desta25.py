@@ -432,18 +432,18 @@ class ORCAGatedCrossAttention(nn.Module):
         else:
             key_padding_mask = None
         
-        # Cast cross_attn to same dtype as hidden_states
-        cross_out, _ = self.cross_attn.to(dtype=hidden_states.dtype)(
+        # Apply cross-attention
+        cross_out, _ = self.cross_attn(
             query=hidden_states,
             key=audio_local,
             value=audio_local,
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )
-        cross_out = self.ln.to(dtype=hidden_states.dtype)(cross_out)
+        cross_out = self.ln(cross_out)
         
         # Data-dependent gate: compute gate from hidden states
-        gate = torch.sigmoid(self.gate_proj.to(dtype=hidden_states.dtype)(hidden_states))  # [B, T, 1]
+        gate = torch.sigmoid(self.gate_proj(hidden_states))  # [B, T, 1]
         
         # Compute per-layer alignment loss: audio tokens should be close to transcription hidden states
         if self.training:
@@ -722,6 +722,12 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Storage for audio_local during forward (set before LLM call, cleared after)
             self._orca_audio_local = None
             self._orca_audio_local_mask = None
+            
+            # Ensure ORCA modules are in correct dtype (align with LLM)
+            if hasattr(self, "orca_cross_attns"):
+                self.orca_cross_attns.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
+            if hasattr(self.perception, "connector") and self.config.connector_mode == "orca_hybrid":
+                self.perception.connector.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
 
         self.configure_trainable_parameters()
 
