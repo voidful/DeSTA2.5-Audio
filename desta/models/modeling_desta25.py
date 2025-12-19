@@ -780,18 +780,23 @@ class DeSTA25AudioModel(PreTrainedModel):
             self._orca_transcription_positions = transcription_positions
             
             # Set audio tokens for deep injection (accessed by wrapped decoder layers)
-            # If global_cross_attn is enabled, combine global and local tokens for injection
-            if getattr(self.config, 'orca_global_cross_attn', False):
-                # Combine global + local tokens for cross-attention injection
-                if local_audio_tokens is not None and global_audio_tokens is not None:
-                    self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
-                elif global_audio_tokens is not None:
-                    self._orca_audio_local = global_audio_tokens
+            # Only set if deep injection is enabled in ablation config
+            if getattr(self.config, 'orca_deep_injection_enabled', True):
+                # If global_cross_attn is enabled, combine global and local tokens for injection
+                if getattr(self.config, 'orca_global_cross_attn', False):
+                    # Combine global + local tokens for cross-attention injection
+                    if local_audio_tokens is not None and global_audio_tokens is not None:
+                        self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
+                    elif global_audio_tokens is not None:
+                        self._orca_audio_local = global_audio_tokens
+                    else:
+                        self._orca_audio_local = local_audio_tokens
                 else:
+                    # Standard mode: only local tokens for cross-attention
                     self._orca_audio_local = local_audio_tokens
             else:
-                # Standard mode: only local tokens for cross-attention
-                self._orca_audio_local = local_audio_tokens
+                self._orca_audio_local = None
+                
             self._orca_audio_local_mask = None
             
             # Call LLM with output_hidden_states to get text hidden states for orthogonality loss
@@ -1167,18 +1172,23 @@ class DeSTA25AudioModel(PreTrainedModel):
             self._orca_transcription_positions = transcription_positions
             
             # Set audio tokens for deep injection (accessed by wrapped decoder layers)
-            # If global_cross_attn is enabled, combine global and local tokens for injection
-            if getattr(self.config, 'orca_global_cross_attn', False):
-                # Combine global + local tokens for cross-attention injection
-                if local_audio_tokens is not None and global_audio_tokens is not None:
-                    self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
-                elif global_audio_tokens is not None:
-                    self._orca_audio_local = global_audio_tokens
+            # Only set if deep injection is enabled in ablation config
+            if getattr(self.config, 'orca_deep_injection_enabled', True):
+                # If global_cross_attn is enabled, combine global and local tokens for injection
+                if getattr(self.config, 'orca_global_cross_attn', False):
+                    # Combine global + local tokens for cross-attention injection
+                    if local_audio_tokens is not None and global_audio_tokens is not None:
+                        self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
+                    elif global_audio_tokens is not None:
+                        self._orca_audio_local = global_audio_tokens
+                    else:
+                        self._orca_audio_local = local_audio_tokens
                 else:
+                    # Standard mode: only local tokens for cross-attention
                     self._orca_audio_local = local_audio_tokens
             else:
-                # Standard mode: only local tokens for cross-attention
-                self._orca_audio_local = local_audio_tokens
+                self._orca_audio_local = None
+            
             self._orca_audio_local_mask = None
         elif isinstance(prepare_result, tuple):
             inputs_embeds = prepare_result[0]
