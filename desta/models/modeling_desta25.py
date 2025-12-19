@@ -1147,14 +1147,15 @@ class DeSTA25AudioModel(PreTrainedModel):
         )
         
         # Handle ORCA mode - extract inputs_embeds and set local tokens for deep injection
-        local_tokens = None
-        if isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
-            # Can be 3 or 4 elements: (embeds, global, local) or (embeds, global, local, transcription_positions)
-            inputs_embeds, global_tokens, local_tokens = prepare_result[:3]
-            # Set local tokens for deep injection during generation
-            if local_tokens is not None:
-                self._orca_audio_local = local_tokens
-                self._orca_audio_local_mask = None
+        if isinstance(prepare_result, tuple):
+            inputs_embeds = prepare_result[0]
+            if len(prepare_result) >= 3:
+                # Can be 3 or 4 elements: (embeds, global, local) or (embeds, global, local, transcription_positions)
+                global_tokens, local_tokens = prepare_result[1:3]
+                # Set local tokens for deep injection during generation
+                if local_tokens is not None:
+                    self._orca_audio_local = local_tokens
+                    self._orca_audio_local_mask = None
         else:
             inputs_embeds = prepare_result
 
