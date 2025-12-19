@@ -1152,15 +1152,36 @@ class DeSTA25AudioModel(PreTrainedModel):
         )
         
         # Handle ORCA mode - extract inputs_embeds and set local tokens for deep injection
-        if isinstance(prepare_result, tuple):
+        is_orca_mode = (
+            isinstance(prepare_result, tuple) and len(prepare_result) >= 3
+        ) or self.config.connector_mode == "orca_hybrid"
+        
+        if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
+            if len(prepare_result) == 4:
+                inputs_embeds, global_audio_tokens, local_audio_tokens, transcription_positions = prepare_result
+            else:
+                inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
+                transcription_positions = None
+            
+            # Store transcription positions for consistency
+            self._orca_transcription_positions = transcription_positions
+            
+            # Set audio tokens for deep injection (accessed by wrapped decoder layers)
+            # If global_cross_attn is enabled, combine global and local tokens for injection
+            if getattr(self.config, 'orca_global_cross_attn', False):
+                # Combine global + local tokens for cross-attention injection
+                if local_audio_tokens is not None and global_audio_tokens is not None:
+                    self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
+                elif global_audio_tokens is not None:
+                    self._orca_audio_local = global_audio_tokens
+                else:
+                    self._orca_audio_local = local_audio_tokens
+            else:
+                # Standard mode: only local tokens for cross-attention
+                self._orca_audio_local = local_audio_tokens
+            self._orca_audio_local_mask = None
+        elif isinstance(prepare_result, tuple):
             inputs_embeds = prepare_result[0]
-            if len(prepare_result) >= 3:
-                # Can be 3 or 4 elements: (embeds, global, local) or (embeds, global, local, transcription_positions)
-                global_tokens, local_tokens = prepare_result[1:3]
-                # Set local tokens for deep injection during generation
-                if local_tokens is not None:
-                    self._orca_audio_local = local_tokens
-                    self._orca_audio_local_mask = None
         else:
             inputs_embeds = prepare_result
 
@@ -1183,6 +1204,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             if hasattr(self, '_orca_audio_local'):
                 self._orca_audio_local = None
                 self._orca_audio_local_mask = None
+            if hasattr(self, '_orca_transcription_positions'):
+                self._orca_transcription_positions = None
 
         return generated_ids
 
