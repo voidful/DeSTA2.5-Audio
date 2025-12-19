@@ -640,6 +640,7 @@ class DeSTA25Config(PretrainedConfig):
                  orca_enabled=False,
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
+                 orca_deep_injection_enabled=True, # If False, disable gated cross-attention in all LLM layers
                  orca_audio_position_scale=5.0,  # Position interpolation scale for audio tokens (higher = more compression)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
@@ -671,6 +672,7 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_enabled = orca_enabled
         self.orca_local_enabled = orca_local_enabled
         self.orca_global_cross_attn = orca_global_cross_attn
+        self.orca_deep_injection_enabled = orca_deep_injection_enabled
         self.orca_audio_position_scale = orca_audio_position_scale
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
@@ -727,8 +729,11 @@ class DeSTA25AudioModel(PreTrainedModel):
         if is_orca:
             logging.info("Enabling ORCA-DeSTA components")
             
-            # Enable deep cross-attention injection
-            self._enable_orca_deep_injection()
+            # Enable deep cross-attention injection (if enabled in config)
+            if getattr(self.config, 'orca_deep_injection_enabled', True):
+                self._enable_orca_deep_injection()
+            else:
+                logging.info("ORCA deep injection explicitly disabled via config")
             
             # Storage for audio_local during forward (set before LLM call, cleared after)
             self._orca_audio_local = None
