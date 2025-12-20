@@ -47,20 +47,28 @@ class DeSTA25Trainer(Trainer):
         return_outputs: bool = False,
         **kwargs
     ):
-        """Compute loss with perplexity logging and ORCA auxiliary losses."""
+        """Compute loss with comprehensive WandB logging including all ORCA auxiliary losses."""
         if self._is_empty_batch(inputs):
             logging.warning("Skipping empty batch (audio decode errors)")
             zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
             return (zero_loss, None) if return_outputs else zero_loss
         
         outputs = model(**inputs)
-        loss = outputs.loss
+        lm_loss = outputs.loss
+        total_loss = lm_loss
+        
+        # Prepare comprehensive logging dictionary
+        log_dict = {
+            "train/lm_loss": lm_loss.item(),
+            "train/ppl": torch.exp(lm_loss).item(),
+        }
         
         # Add ORCA auxiliary losses if present
         # Handle DDP-wrapped models by accessing .module if needed
         actual_model = model.module if hasattr(model, "module") else model
         config = getattr(actual_model, "config", None)
         
+        orca_total = 0.0
         if config is not None:
             # Check for ORCA mode using connector_mode (more reliable than orca_enabled)
             is_orca = getattr(config, "connector_mode", "") == "orca_hybrid"
@@ -69,12 +77,29 @@ class DeSTA25Trainer(Trainer):
                 if orca_losses is not None:
                     for name, l in orca_losses.items():
                         if l is not None:
-                            loss = loss + l
-                            self.log({f"train/{name}": l.item()})
+                            total_loss = total_loss + l
+                            orca_total += l.item()
+                            # Log weighted loss
+                            log_dict[f"train/{name}"] = l.item()
+                    
+                    # Log total ORCA loss
+                    if orca_total > 0:
+                        log_dict["train/orca_total"] = orca_total
         
-        self.log({"train/loss": loss.item(), "train/ppl": torch.exp(outputs.loss).item()})
+        # Log total loss and loss breakdown
+        log_dict["train/loss"] = total_loss.item()
+        if orca_total > 0:
+            log_dict["train/lm_ratio"] = lm_loss.item() / total_loss.item()
+            log_dict["train/orca_ratio"] = orca_total / total_loss.item()
         
-        return (loss, outputs) if return_outputs else loss
+        # Log learning rate
+        if self.lr_scheduler is not None:
+            log_dict["train/learning_rate"] = self.lr_scheduler.get_last_lr()[0]
+        
+        # Log to WandB
+        self.log(log_dict)
+        
+        return (total_loss, outputs) if return_outputs else total_loss
 
     def evaluate(
         self, 
@@ -119,7 +144,13 @@ class DeSTA25Trainer(Trainer):
             f"{metric_key_prefix}_loss": avg_loss,
             f"{metric_key_prefix}_ppl": avg_ppl,
             f"{metric_key_prefix}_accuracy": report.get("accuracy_by_sample", 0),
+            f"{metric_key_prefix}_accuracy_by_category": report.get("avg_accuracy_by_category", 0),
         }
+        
+        # Add category-wise accuracy to metrics
+        categories_accuracy = report.get("categories_accuracy", {})
+        for category, acc in categories_accuracy.items():
+            metrics[f"{metric_key_prefix}_acc/{category}"] = acc
         
         self.log(metrics)
         self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, metrics)

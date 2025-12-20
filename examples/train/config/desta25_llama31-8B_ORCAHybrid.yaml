@@ -55,6 +55,7 @@ model:
     local_downsample: 2
     local_kernel_size: 5
     gate_init: 0.1
+    audio_position_scale: 5.0  # RoPE position interpolation (adjusted for 2x downsample)
     ortho_weight_global: 0.05
     ortho_diversity_weight: 0.05
     ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens

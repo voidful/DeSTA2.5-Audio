@@ -217,29 +217,22 @@ class ORCAHybridConnector(nn.Module):
         super().__init__()
         self.config = config
         
-        # Determine target layer IDs based on Whisper model
-        if config.encoder_model_id == "openai/whisper-medium":
-            self.target_layer_ids = [5, 11, 17, 23]
-        elif config.encoder_model_id == "openai/whisper-small":
-            self.target_layer_ids = [2, 5, 8, 11]
-        elif config.encoder_model_id == "openai/whisper-tiny":
-            self.target_layer_ids = [0, 1, 2, 3]
-        elif config.encoder_model_id in ["openai/whisper-large-v3", "openai/whisper-large-v3-turbo"]:
-            self.target_layer_ids = [7, 15, 23, 31]
-        else:
-            raise NotImplementedError(f"model_id {config.encoder_model_id} not implemented")
+        # Use ALL encoder layers instead of selected target layers
+        num_encoder_layers = config.encoder_config.num_hidden_layers
+        self.num_encoder_layers = num_encoder_layers
         
         d_encoder = config.encoder_config.d_model
         d_llm = config.llm_config.hidden_size
         
         # === Global Branch (Q-Former style) ===
-        # Learnable queries for each target layer
+        # Learnable queries for each encoder layer
         self.global_queries = nn.ParameterList([
             nn.Parameter(torch.randn(1, config.orca_global_num_tokens, d_encoder))
-            for _ in range(len(self.target_layer_ids))
+            for _ in range(num_encoder_layers)
         ])
+        # Each global token has learnable weights for all encoder layers
         self.global_layer_weights = nn.Parameter(
-            torch.zeros(config.orca_global_num_tokens, len(self.target_layer_ids), dtype=torch.float)
+            torch.zeros(config.orca_global_num_tokens, num_encoder_layers, dtype=torch.float)
         )
         
         # Q-Former for global branch
@@ -265,9 +258,9 @@ class ORCAHybridConnector(nn.Module):
             stride = config.orca_local_downsample
             padding = kernel_size // 2
             
-            # Learnable weights for layer fusion (same target layers as global)
+            # Learnable weights for all encoder layers
             self.local_layer_weights = nn.Parameter(
-                torch.zeros(len(self.target_layer_ids), dtype=torch.float)
+                torch.zeros(num_encoder_layers, dtype=torch.float)
             )
             
             self.local_proj_in = nn.Linear(d_encoder, d_llm)
@@ -302,16 +295,15 @@ class ORCAHybridConnector(nn.Module):
         target_dtype = self.global_proj[1].weight.dtype
         target_device = self.global_proj[1].weight.device
         
-        # Collect target layer outputs (used by both branches)
-        target_layer_outputs = []
-        for idx, hidden_state in enumerate(encoder_hidden_states):
-            if idx in self.target_layer_ids:
-                # Ensure input hidden states match module dtype
-                target_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
+        # Use ALL encoder layer outputs (not just selected target layers)
+        all_layer_outputs = []
+        for hidden_state in encoder_hidden_states:
+            # Ensure input hidden states match module dtype
+            all_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
         
         # === Global Branch ===
         global_outputs = []
-        for layer_idx, hidden_state in enumerate(target_layer_outputs):
+        for layer_idx, hidden_state in enumerate(all_layer_outputs):
             queries = self.global_queries[layer_idx].expand(batch_size, -1, -1).to(dtype=target_dtype, device=target_device)
             
             qformer_out = self.global_qformer(
@@ -320,21 +312,21 @@ class ORCAHybridConnector(nn.Module):
             )
             global_outputs.append(qformer_out.last_hidden_state)
         
-        # Weighted sum across layers
-        global_outputs = torch.stack(global_outputs, dim=0)  # [L, B, K, D]
-        global_outputs = global_outputs.permute(1, 2, 0, 3)  # [B, K, L, D]
-        weights = torch.softmax(self.global_layer_weights, dim=-1).unsqueeze(-1)  # [K, L, 1]
+        # Weighted sum across all layers
+        global_outputs = torch.stack(global_outputs, dim=0)  # [num_layers, B, K, D]
+        global_outputs = global_outputs.permute(1, 2, 0, 3)  # [B, K, num_layers, D]
+        weights = torch.softmax(self.global_layer_weights, dim=-1).unsqueeze(-1)  # [K, num_layers, 1]
         global_tokens = (global_outputs * weights).sum(dim=2)  # [B, K, D]
         global_tokens = self.global_proj(global_tokens)  # [B, K, d_llm]
         
         # === Local Branch (only if enabled) ===
         if self.local_enabled:
-            # Learnable weighted sum of target layers (same layers as global)
-            target_layers = torch.stack(target_layer_outputs, dim=0)  # [L, B, T, D]
-            target_layers = target_layers.permute(1, 2, 0, 3)  # [B, T, L, D]
-            local_weights = torch.softmax(self.local_layer_weights, dim=-1).unsqueeze(-1)  # [L, 1]
+            # Learnable weighted sum of ALL encoder layers
+            all_layers = torch.stack(all_layer_outputs, dim=0)  # [num_layers, B, T, D]
+            all_layers = all_layers.permute(1, 2, 0, 3)  # [B, T, num_layers, D]
+            local_weights = torch.softmax(self.local_layer_weights, dim=-1).unsqueeze(-1)  # [num_layers, 1]
             local_weights = local_weights.to(dtype=target_dtype, device=target_device)
-            fused_hidden = (target_layers * local_weights).sum(dim=2)  # [B, T, D]
+            fused_hidden = (all_layers * local_weights).sum(dim=2)  # [B, T, D]
             
             # Project to LLM dimension
             local_features = self.local_proj_in(fused_hidden)  # [B, T, d_llm]
@@ -641,10 +633,10 @@ class DeSTA25Config(PretrainedConfig):
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
                  orca_deep_injection_enabled=True, # If False, disable gated cross-attention in all LLM layers
-                 orca_audio_position_scale=5.0,  # Position interpolation scale for audio tokens (higher = more compression)
+                 orca_audio_position_scale=5.0,  # Position interpolation scale for audio tokens (adjusted for 2x downsample)
                  orca_global_num_tokens=4,
-                 orca_local_downsample=4,
-                 orca_local_kernel_size=7,
+                 orca_local_downsample=2,
+                 orca_local_kernel_size=5,
                  orca_gate_init=0.1,
                  orca_ortho_weight_global=0.01,
                  orca_ortho_diversity_weight=0.01,
@@ -1070,36 +1062,18 @@ class DeSTA25AudioModel(PreTrainedModel):
     ) -> Dict[str, torch.Tensor]:
         """
         Compute ORCA auxiliary losses:
-        - Global-text orthogonality loss
         - Global token diversity loss
-        - Global-local orthogonality loss
         - Layer-wise alignment loss (aggregated from cross-attention modules)
         """
         losses = {}
         
-        if global_tokens is not None and text_hidden is not None:
-            # Global-text orthogonality: encourage global tokens to be orthogonal to text
-            g = F.normalize(global_tokens, dim=-1)  # [B, K, H]
-            t = F.normalize(text_hidden, dim=-1)    # [B, T, H]
-            
-            # Compute cosine similarity
-            cos = torch.einsum("bkh,bth->bkt", g, t)  # [B, K, T]
-            L_ortho = (cos ** 2).mean()
-            losses["L_ortho_global"] = self.config.orca_ortho_weight_global * L_ortho
-            
+        if global_tokens is not None:
             # Diversity between global tokens (Gram matrix close to identity)
+            g = F.normalize(global_tokens, dim=-1)  # [B, K, H]
             gram = torch.einsum("bkh,bqh->bkq", g, g)  # [B, K, K]
             I = torch.eye(gram.size(-1), device=gram.device)
             L_div = ((gram - I) ** 2).mean()
             losses["L_ortho_diversity"] = self.config.orca_ortho_diversity_weight * L_div
-        
-        # Q-Former global vs local orthogonality loss
-        if global_tokens is not None and local_tokens is not None:
-            g = F.normalize(global_tokens, dim=-1)  # [B, Kg, H]
-            l = F.normalize(local_tokens, dim=-1)   # [B, Tl, H]
-            cos_gl = torch.einsum("bgh,blh->bgl", g, l)  # [B, Kg, Tl]
-            L_ortho_ql = (cos_gl ** 2).mean()
-            losses["L_ortho_qformer_local"] = self.config.orca_ortho_weight_qformer_local * L_ortho_ql
         
         # Layer-wise alignment loss: aggregated from cross-attention modules
         # Each layer computes alignment between audio and text at that layer's representation
