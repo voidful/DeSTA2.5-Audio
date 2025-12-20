@@ -15,7 +15,15 @@ logging.basicConfig(level = logging.INFO)
 # 基本設定
 # =====================
 
-DESTA_MODEL_ID = "voidful/QAQ_0.6b_orca_all"
+# Expected ORCA Configuration:
+# - Whisper: openai/whisper-large-v3 (standard, not turbo)
+# - Target layers: [7, 15, 23, 31] (4 selected layers)
+# - Local downsample: 2x (not 4x)
+# - Local kernel size: 5
+# - Audio position scale: 5.0
+# - Losses: L_ortho_diversity + L_align_layerwise (simplified)
+
+DESTA_MODEL_ID = "voidful/DeSTA2.5-Qwen3-0.6B-ORCA"  # Update to your trained model
 
 DATASETS = {
     "AnimalQA":  "SLLM-multi-hop/AnimalQA",
