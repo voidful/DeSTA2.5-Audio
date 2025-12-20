@@ -25,8 +25,11 @@ export TRANSFORMERS_CACHE=$HF_HOME
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-0.6b_ORCAHybrid
-dataset_config=DestaAQA-5M_0.6b_orca
+dataset_config=DestaAQA-5M_0.6b_ablation32  # Reduced batch size for 32-layer experiments
 project=desta25_ablation_v2
+
+# Disable tokenizers parallelism warning
+export TOKENIZERS_PARALLELISM=false
 
 exp_suffix="exp5_add_alignment"
 output_root="/work/voidful2nlp/desta/outputs/ablation_v2"
