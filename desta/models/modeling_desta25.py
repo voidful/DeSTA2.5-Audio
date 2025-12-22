@@ -217,17 +217,23 @@ class ORCAHybridConnector(nn.Module):
         super().__init__()
         self.config = config
         
-        # Determine target layer IDs based on Whisper model
-        if config.encoder_model_id == "openai/whisper-medium":
-            self.target_layer_ids = [5, 11, 17, 23]
-        elif config.encoder_model_id == "openai/whisper-small":
-            self.target_layer_ids = [2, 5, 8, 11]
-        elif config.encoder_model_id == "openai/whisper-tiny":
-            self.target_layer_ids = [0, 1, 2, 3]
-        elif config.encoder_model_id in ["openai/whisper-large-v3", "openai/whisper-large-v3-turbo"]:
-            self.target_layer_ids = [7, 15, 23, 31]
+        # Determine target layer IDs based on configuration
+        if getattr(config, 'orca_use_all_layers', False):
+            # Use all encoder layers
+            num_encoder_layers = config.encoder_config.num_hidden_layers
+            self.target_layer_ids = list(range(num_encoder_layers))
         else:
-            raise NotImplementedError(f"model_id {config.encoder_model_id} not implemented")
+            # Use selected layers based on Whisper model
+            if config.encoder_model_id == "openai/whisper-medium":
+                self.target_layer_ids = [5, 11, 17, 23]
+            elif config.encoder_model_id == "openai/whisper-small":
+                self.target_layer_ids = [2, 5, 8, 11]
+            elif config.encoder_model_id == "openai/whisper-tiny":
+                self.target_layer_ids = [0, 1, 2, 3]
+            elif config.encoder_model_id in ["openai/whisper-large-v3", "openai/whisper-large-v3-turbo"]:
+                self.target_layer_ids = [7, 15, 23, 31]
+            else:
+                raise NotImplementedError(f"model_id {config.encoder_model_id} not implemented")
         
         d_encoder = config.encoder_config.d_model
         d_llm = config.llm_config.hidden_size
@@ -638,6 +644,7 @@ class DeSTA25Config(PretrainedConfig):
                  placeholder_token="<|reserved_special_token_87|>",
                  # ORCA-DeSTA configuration fields
                  orca_enabled=False,
+                 orca_use_all_layers=False,  # If True, use all encoder layers; if False, use selected layers
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
                  orca_deep_injection_enabled=True, # If False, disable gated cross-attention in all LLM layers
@@ -670,6 +677,7 @@ class DeSTA25Config(PretrainedConfig):
 
         # ORCA-DeSTA configuration
         self.orca_enabled = orca_enabled
+        self.orca_use_all_layers = orca_use_all_layers
         self.orca_local_enabled = orca_local_enabled
         self.orca_global_cross_attn = orca_global_cross_attn
         self.orca_deep_injection_enabled = orca_deep_injection_enabled
@@ -1105,6 +1113,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         """
         Custom load_state_dict that handles backward compatibility:
         - Maps old 'ocar_cross_attns' keys to new 'orca_cross_attns' keys
+        - Automatically detects checkpoint layer configuration and adjusts model accordingly
         """
         # Create a new state dict with renamed keys
         new_state_dict = OrderedDict()
@@ -1116,6 +1125,49 @@ class DeSTA25AudioModel(PreTrainedModel):
                 new_state_dict[new_key] = value
             else:
                 new_state_dict[key] = value
+        
+        # Auto-detect layer configuration from checkpoint
+        if 'perception.connector.global_layer_weights' in new_state_dict:
+            checkpoint_shape = new_state_dict['perception.connector.global_layer_weights'].shape
+            checkpoint_num_layers = checkpoint_shape[1]  # [K, L] -> L is number of layers
+            
+            # Get current model configuration
+            if hasattr(self.perception, 'connector') and hasattr(self.perception.connector, 'target_layer_ids'):
+                current_num_layers = len(self.perception.connector.target_layer_ids)
+                
+                if checkpoint_num_layers != current_num_layers:
+                    logging.warning(
+                        f"Layer count mismatch detected: checkpoint has {checkpoint_num_layers} layers, "
+                        f"current model has {current_num_layers} layers. "
+                        f"Automatically adjusting model configuration to match checkpoint."
+                    )
+                    
+                    # Determine if checkpoint used all layers
+                    num_encoder_layers = self.config.encoder_config.num_hidden_layers
+                    if checkpoint_num_layers == num_encoder_layers:
+                        # Checkpoint used all layers
+                        logging.info(f"Checkpoint uses all {num_encoder_layers} encoder layers. Reconfiguring model...")
+                        self.config.orca_use_all_layers = True
+                    else:
+                        # Checkpoint used selected layers - we can't automatically determine which ones
+                        # So we'll just update the target_layer_ids to match the checkpoint size
+                        logging.info(f"Checkpoint uses {checkpoint_num_layers} selected layers. Reconfiguring model...")
+                        self.config.orca_use_all_layers = False
+                        # Use first N layers as a fallback
+                        self.perception.connector.target_layer_ids = list(range(checkpoint_num_layers))
+                    
+                    # Reinitialize connector with new configuration
+                    from desta.models.modeling_desta25 import ORCAHybridConnector
+                    old_connector = self.perception.connector
+                    self.perception.connector = ORCAHybridConnector(self.config)
+                    
+                    # Move to same device and dtype as old connector
+                    self.perception.connector.to(
+                        device=old_connector.global_proj[1].weight.device,
+                        dtype=old_connector.global_proj[1].weight.dtype
+                    )
+                    
+                    logging.info(f"Model reconfigured to use {len(self.perception.connector.target_layer_ids)} layers")
         
         return super().load_state_dict(new_state_dict, strict=strict, assign=assign)
 
