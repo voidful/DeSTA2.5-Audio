@@ -42,8 +42,22 @@ dataset_config=DestaAQA-5M_0.6b_orca
 
 project=desta25_qwen3_0.6b_orca
 name="qwen3-0.6b-instruct-orca"
+output_root="/work/voidful2nlp/desta/outputs/${project}"
+
+# ===== 自動檢測並 Resume Checkpoint =====
 exp_name=$(date +%y%m%d-%H%M)_${name}
-exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
+exp_dir="${output_root}/${exp_name}"
+resume_args=""
+
+# 尋找最新的實驗目錄 (包含 checkpoint-latest)
+latest_dir=$(ls -td ${output_root}/*_${name} 2>/dev/null | head -n 1)
+if [ -d "$latest_dir" ] && [ -d "$latest_dir/checkpoint-latest" ]; then
+    exp_dir="$latest_dir"
+    resume_args="++resume_from_checkpoint=$latest_dir/checkpoint-latest"
+    echo "Found existing checkpoint, will resume from: $latest_dir/checkpoint-latest"
+else
+    echo "No existing checkpoint found, starting new training run"
+fi
 
 # 建立輸出目錄
 mkdir -p ${exp_dir}
@@ -61,6 +75,11 @@ echo "Config: ${config}" >> ${exp_dir}/run_info.txt
 echo "Dataset Config: ${dataset_config}" >> ${exp_dir}/run_info.txt
 echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
 echo "ORCA Mode: enabled" >> ${exp_dir}/run_info.txt
+if [ -n "$resume_args" ]; then
+    echo "Resume: Yes (from checkpoint-latest)" >> ${exp_dir}/run_info.txt
+else
+    echo "Resume: No (fresh start)" >> ${exp_dir}/run_info.txt
+fi
 echo "========================================" >> ${exp_dir}/run_info.txt
 
 # ===== 啟動訓練 (使用 torchrun 進行 DDP 分布式訓練) =====
@@ -77,7 +96,7 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     name=${name} \
     ++dataset.train_ds.data_root=/work/voidful2nlp/desta \
     ++dataset.validation_ds.data_root=/work/voidful2nlp/desta \
-    ++resume_from_checkpoint=null \
+    ${resume_args} \
     ++init_from_pretrained_weights=null
 
 echo "Training finished at $(date)" >> ${exp_dir}/run_info.txt
