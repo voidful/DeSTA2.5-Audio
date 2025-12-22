@@ -23,7 +23,7 @@ logging.basicConfig(level = logging.INFO)
 # - Audio position scale: 5.0
 # - Losses: L_ortho_diversity + L_align_layerwise (simplified)
 
-DESTA_MODEL_ID = "voidful/DeSTA2.5-Qwen3-0.6B-ORCA"  # Update to your trained model
+DESTA_MODEL_ID = "voidful/QAQ_0.6b_abl_global32"  # Update to your trained model
 
 DATASETS = {
     "AnimalQA":  "SLLM-multi-hop/AnimalQA",
