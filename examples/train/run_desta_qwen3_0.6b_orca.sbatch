@@ -49,14 +49,20 @@ exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="${output_root}/${exp_name}"
 resume_args=""
 
-# 尋找最新的實驗目錄 (包含 checkpoint-latest)
+# 尋找最新的實驗目錄
 latest_dir=$(ls -td ${output_root}/*_${name} 2>/dev/null | head -n 1)
-if [ -d "$latest_dir" ] && [ -d "$latest_dir/checkpoint-latest" ]; then
-    exp_dir="$latest_dir"
-    resume_args="++resume_from_checkpoint=$latest_dir/checkpoint-latest"
-    echo "Found existing checkpoint, will resume from: $latest_dir/checkpoint-latest"
+if [ -d "$latest_dir" ]; then
+    # 尋找該目錄中最新的 checkpoint (可能是 checkpoint-latest 或 checkpoint-XXXXX)
+    latest_checkpoint=$(ls -td "$latest_dir"/checkpoint-* 2>/dev/null | head -n 1)
+    if [ -d "$latest_checkpoint" ]; then
+        exp_dir="$latest_dir"
+        resume_args="++resume_from_checkpoint=$latest_checkpoint"
+        echo "Found existing checkpoint, will resume from: $latest_checkpoint"
+    else
+        echo "No checkpoint found in $latest_dir, starting new training run"
+    fi
 else
-    echo "No existing checkpoint found, starting new training run"
+    echo "No existing experiment directory found, starting new training run"
 fi
 
 # 建立輸出目錄
@@ -76,7 +82,7 @@ echo "Dataset Config: ${dataset_config}" >> ${exp_dir}/run_info.txt
 echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
 echo "ORCA Mode: enabled" >> ${exp_dir}/run_info.txt
 if [ -n "$resume_args" ]; then
-    echo "Resume: Yes (from checkpoint-latest)" >> ${exp_dir}/run_info.txt
+    echo "Resume: Yes (from ${latest_checkpoint})" >> ${exp_dir}/run_info.txt
 else
     echo "Resume: No (fresh start)" >> ${exp_dir}/run_info.txt
 fi
