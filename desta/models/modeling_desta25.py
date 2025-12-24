@@ -648,9 +648,9 @@ class DeSTA25Config(PretrainedConfig):
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
                  orca_deep_injection_enabled=True, # If False, disable gated cross-attention in all LLM layers
-                 orca_audio_position_scale=5.0,  # Position interpolation scale for audio tokens (adjusted for 2x downsample)
+                 orca_audio_position_scale=2.5,  # Position interpolation scale for audio tokens (adjusted for 4x downsample)
                  orca_global_num_tokens=4,
-                 orca_local_downsample=2,
+                 orca_local_downsample=4,
                  orca_local_kernel_size=5,
                  orca_gate_init=0.1,
                  orca_ortho_weight_global=0.01,
@@ -1078,7 +1078,8 @@ class DeSTA25AudioModel(PreTrainedModel):
     ) -> Dict[str, torch.Tensor]:
         """
         Compute ORCA auxiliary losses:
-        - Global token diversity loss
+        - Global token diversity loss (orthogonality within global tokens)
+        - Global-Local orthogonality loss (orthogonality between global and local tokens)
         - Layer-wise alignment loss (aggregated from cross-attention modules)
         """
         losses = {}
@@ -1090,6 +1091,24 @@ class DeSTA25AudioModel(PreTrainedModel):
             I = torch.eye(gram.size(-1), device=gram.device)
             L_div = ((gram - I) ** 2).mean()
             losses["L_ortho_diversity"] = self.config.orca_ortho_diversity_weight * L_div
+        
+        # Orthogonality between global and local tokens (ensure complementary features)
+        if global_tokens is not None and local_tokens is not None:
+            # Normalize tokens
+            g_norm = F.normalize(global_tokens, dim=-1)  # [B, K_g, H]
+            l_norm = F.normalize(local_tokens, dim=-1)   # [B, K_l, H]
+            
+            # Compute cross-similarity: should be close to 0 for orthogonality
+            # Sample local tokens if too many to reduce computation
+            max_local_samples = 100  # Limit local tokens for efficiency
+            if l_norm.size(1) > max_local_samples:
+                # Uniformly sample local tokens
+                indices = torch.linspace(0, l_norm.size(1) - 1, max_local_samples, dtype=torch.long, device=l_norm.device)
+                l_norm = l_norm[:, indices, :]
+            
+            cross_sim = torch.einsum("bgh,blh->bgl", g_norm, l_norm)  # [B, K_g, K_l]
+            L_ortho_gl = (cross_sim ** 2).mean()  # Minimize squared similarity
+            losses["L_ortho_qformer_local"] = self.config.orca_ortho_weight_qformer_local * L_ortho_gl
         
         # Layer-wise alignment loss: aggregated from cross-attention modules
         # Each layer computes alignment between audio and text at that layer's representation

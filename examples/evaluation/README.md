@@ -9,6 +9,7 @@ The evaluation scripts (`mmau_eval.py` and `sakura_eval.py`) automatically load 
 When evaluating models trained with the current ORCA architecture, ensure your checkpoint includes:
 
 ### **Model Components**
+
 ```yaml
 encoder:
   model_id: openai/whisper-large-v3  # Standard version, not turbo
@@ -23,6 +24,7 @@ connector:
 ```
 
 ### **ORCA Settings**
+
 ```yaml
 orca:
   enabled: true
@@ -34,22 +36,24 @@ orca:
   
   # Local Branch
   local_enabled: true
-  local_downsample: 2                # 2x downsample (not 4x)
+  local_downsample: 4                # 4x downsample for efficiency
   local_kernel_size: 5
   
   # Deep Injection
   deep_injection_enabled: true
   gate_init: 0.1
-  audio_position_scale: 5.0          # Adjusted for 2x downsample
+  audio_position_scale: 2.5          # Adjusted for 4x downsample
   
-  # Simplified Losses
+  # Losses (with Global-Local orthogonality)
   ortho_diversity_weight: 0.05       # L_ortho_diversity
+  ortho_weight_qformer_local: 0.05   # L_ortho_qformer_local (new!)
   align_weight_local: 0.05           # L_align_layerwise
 ```
 
 ## Usage
 
 ### **MMAU Evaluation**
+
 ```bash
 cd examples/evaluation
 
@@ -64,6 +68,7 @@ python mmau_eval.py --model_id voidful/DeSTA2.5-Qwen3-0.6B-ORCA --max_samples 10
 ```
 
 ### **Sakura Evaluation**
+
 ```bash
 cd examples/evaluation
 
@@ -86,6 +91,7 @@ DESTA_MODEL_ID = "voidful/DeSTA2.5-Qwen3-0.6B-ORCA"
 ```
 
 Or specify via command line:
+
 ```bash
 python mmau_eval.py --model_id /path/to/your/checkpoint
 ```
@@ -96,15 +102,17 @@ Based on Sakura benchmark analysis with current ORCA configuration:
 
 | Metric | Expected | Notes |
 |--------|----------|-------|
-| Multi-speaker | 42~43 | +2~3 from 2x downsample |
-| Language-Single | 68~70 | +3~5 from simplified losses |
+| Multi-speaker | 42~43 | Improved with 4x downsample |
+| Language-Single | 68~70 | +3~5 from losses |
 | Language-Multi | 42~44 | +3~6 improvement |
 | Overall Hmean | 49~50 | +2~3 overall |
 
 ## Troubleshooting
 
 ### Configuration Mismatch
+
 If you see unexpected results, verify the loaded configuration:
+
 ```python
 from desta import DeSTA25AudioModel
 
@@ -115,7 +123,9 @@ print(f"Target layers: {model.connector.target_layer_ids}")
 ```
 
 ### OOM Issues
+
 If evaluation runs out of memory:
+
 - Reduce batch size in the evaluation script
 - Use gradient checkpointing (already enabled in model)
 - Evaluate on smaller splits first

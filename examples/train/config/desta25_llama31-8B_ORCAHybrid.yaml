@@ -52,10 +52,10 @@ model:
     global_cross_attn: true  # Global tokens also use cross-attention instead of concat
     deep_injection_enabled: true  # Gated cross-attention in LLM layers
     global_num_tokens: 8
-    local_downsample: 2
+    local_downsample: 4
     local_kernel_size: 5
     gate_init: 0.1
-    audio_position_scale: 5.0  # RoPE position interpolation (adjusted for 2x downsample)
+    audio_position_scale: 2.5  # RoPE position interpolation (adjusted for 4x downsample)
     ortho_weight_global: 0.05
     ortho_diversity_weight: 0.05
     ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens
