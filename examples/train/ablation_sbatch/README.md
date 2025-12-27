@@ -1,41 +1,49 @@
-# ORCA Ablation Study v2
+# Minimal ORCA Ablation Study
 
 ## 實驗總覽
 
-基於當前 ORCA 架構（新增 Global-Local 正交性損失、使用所有 32 層、4x downsample）的系統性 ablation study。
+精簡的 4 實驗設計,清晰展示 ORCA-DeSTA 相對於 DeSTA2.5 的核心改進:
+
+1. **架構創新**: 雙分支 (Global + Local) + 深度注入
+2. **正交性約束**: 3 個正交性損失確保互補特徵
+
+**優勢**:
+
+- ⏱️ 節省 50% 時間 (8 天 vs 16 天)
+- 📊 清晰故事線
+- 🎯 符合論文 "Orthogonal Residual Complementary Acoustics"
 
 ---
 
 ## 實驗列表
 
-| Exp | 名稱 | Global (32L) | Local (4x) | Deep Inj | Diversity | GL-Ortho | Alignment | 腳本 |
-|-----|------|-------------|-----------|----------|-----------|----------|-----------|------|
-| 0 | Baseline | ❌ (Q-Former) | ❌ | ❌ | ❌ | ❌ | ❌ | `exp0_baseline.sbatch` |
-| 1 | Global 32L | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | `exp1_global32.sbatch` |
-| 2 | + Local | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | `exp2_add_local.sbatch` |
-| 3 | + Deep Inj | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | `exp3_add_deep_inj.sbatch` |
-| 4 | + Diversity | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | `exp4_add_diversity.sbatch` |
-| 5 | + GL-Ortho | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | `exp5_add_gl_ortho.sbatch` |
-| 6 | + Alignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `exp6_add_alignment.sbatch` |
-| 7 | Full ORCA | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `exp7_full_orca.sbatch` |
+| Exp | 名稱 | Dual-Branch | Deep Inj | Ortho Losses | 預期 Hmean | 腳本 |
+|-----|------|------------|----------|--------------|-----------|------|
+| **0** | DeSTA2.5 Baseline | ❌ | ❌ | ❌ | 48-49 | `exp0_baseline.sbatch` |
+| **1** | ORCA Architecture | ✅ | ✅ | ❌ | 50-51 | `exp1_orca_architecture.sbatch` |
+| **2** | + Orthogonality | ✅ | ✅ | ✅ | 51-52 | `exp2_add_orthogonality.sbatch` |
+| **3** | Full ORCA | ✅ | ✅ | ✅ | 51-52 | `exp3_full_orca.sbatch` |
+
+**組件說明**:
+
+- **Dual-Branch**: Global (Q-Former, 8 tokens) + Local (Conv1d 4x downsample)
+- **Deep Inj**: Gated cross-attention in all LLM decoder layers
+- **Ortho Losses**: L_ortho_diversity + L_ortho_qformer_local + L_align_layerwise
 
 ---
 
 ## 快速開始
 
-### 提交單個實驗
-
-```bash
-cd /work/voidful2nlp/DeSTA2.5-Audio/examples/train/ablation_sbatch
-sbatch exp0_baseline.sbatch
-```
-
 ### 提交所有實驗
 
 ```bash
-for i in {0..6}; do
-    sbatch exp${i}_*.sbatch
-done
+cd /work/voidful2nlp/DeSTA2.5-Audio/examples/train/ablation_sbatch
+
+# 提交 4 個實驗
+sbatch exp0_baseline.sbatch
+sbatch exp1_orca_architecture.sbatch
+sbatch exp2_add_orthogonality.sbatch
+sbatch exp3_full_orca.sbatch
 ```
 
 ### 檢查實驗狀態
@@ -44,124 +52,267 @@ done
 squeue -u $USER
 ```
 
+### 查看日誌
+
+```bash
+tail -f slurm-report/ablation_exp0_baseline_*.out
+tail -f slurm-report/ablation_exp1_architecture_*.out
+tail -f slurm-report/ablation_exp2_orthogonality_*.out
+tail -f slurm-report/ablation_exp3_full_orca_*.out
+```
+
 ---
 
-## 實驗配置
+## 實驗詳細配置
 
 ### Exp 0: DeSTA2.5 Baseline
 
-- **目的**: 建立基準線
-- **配置**: Q-Former only, no ORCA
-- **預期**: Hmean ~48.38
+**目的**: 建立基準線
 
-### Exp 1: ORCA Base (Global 32 Layers)
+**配置**:
 
-- **目的**: 評估 32 層 global branch
-- **配置**: Global only, 32 layers, no local/deep injection/losses
-- **預期**: Hmean ~49-50
+```yaml
+connector:
+  mode: qformer_1
+  num_hidden_layers: 6
+  prompt_size: 64
 
-### Exp 2: + Local Branch
+orca:
+  enabled: false
+```
 
-- **目的**: 評估 local branch 貢獻
-- **配置**: + Local (4x downsample), no deep injection/losses
-- **預期**: Hmean ~50-51, Multi-speaker 改善
+**預期**: Hmean ~48-49
 
-### Exp 3: + Deep Injection
+---
 
-- **目的**: 評估 deep injection 效果
-- **配置**: + Gated cross-attention, no losses
-- **預期**: Hmean ~51-52
+### Exp 1: ORCA Architecture
 
-### Exp 4: + Diversity Loss
+**目的**: 評估雙分支架構 + 深度注入的貢獻
 
-- **目的**: 評估 L_ortho_diversity
-- **配置**: + Diversity loss (0.05)
-- **預期**: Hmean ~51.5-52.5
+**配置**:
 
-### Exp 5: + Alignment Loss
+```yaml
+connector:
+  mode: orca_hybrid
 
-- **目的**: 評估 L_align_layerwise
-- **配置**: + Alignment loss (0.05)
-- **預期**: Hmean ~52-53, Language 改善
+orca:
+  enabled: true
+  # Architecture
+  global_cross_attn: true
+  local_enabled: true
+  deep_injection_enabled: true
+  
+  # Disable all losses
+  ortho_diversity_weight: 0.0
+  ortho_weight_qformer_local: 0.0
+  align_weight_local: 0.0
+```
 
-### Exp 6: Full ORCA
+**關鍵特性**:
 
-- **目的**: 完整配置參考
-- **配置**: 使用預設 config
-- **預期**: Hmean ~52-53
+- ✅ Global branch: Q-Former cross-attention (8 tokens)
+- ✅ Local branch: Conv1d 4x downsample (prosody tokens)
+- ✅ Deep injection: Gated cross-attention in all LLM layers
+- ❌ 無正交性約束
+
+**預期**: Hmean ~50-51 (+2-3 from architecture)
+
+**展示**:
+
+- 互補聲學特徵 (global style + local prosody)
+- 深度跨模態融合的效果
+
+---
+
+### Exp 2: + Orthogonality Losses
+
+**目的**: 評估正交性約束的貢獻
+
+**配置**:
+
+```yaml
+orca:
+  # Architecture (same as Exp 1)
+  enabled: true
+  global_cross_attn: true
+  local_enabled: true
+  deep_injection_enabled: true
+  
+  # Enable all 3 orthogonality losses
+  ortho_diversity_weight: 0.05      # L_ortho_diversity
+  ortho_weight_qformer_local: 0.05  # L_ortho_qformer_local
+  align_weight_local: 0.05          # L_align_layerwise
+```
+
+**關鍵特性**:
+
+- ✅ 所有架構組件
+- ✅ L_ortho_diversity: Global tokens 內部多樣性
+- ✅ L_ortho_qformer_local: Global-Local 正交性 (新!)
+- ✅ L_align_layerwise: 逐層音頻-文本對齊
+
+**預期**: Hmean ~51-52 (+1-2 from orthogonality)
+
+**展示**:
+
+- 正交性確保真正互補的特徵
+- 對齊損失改善跨模態理解
+
+---
+
+### Exp 3: Full ORCA (Validation)
+
+**目的**: 驗證完整系統的一致性和可重現性
+
+**配置**: 使用默認 ORCA config (與 Exp 2 相同)
+
+**預期**: Hmean ~51-52 (與 Exp 2 一致)
+
+**展示**: 系統穩定性和可重現性
+
+---
+
+## 預期結果
+
+### 組件貢獻分析
+
+| 改進 | Δ Hmean | 貢獻比例 | 關鍵發現 |
+|------|---------|---------|---------|
+| **Architecture** (Exp 0→1) | +2-3 | ~60% | 雙分支 + 深度注入是主要貢獻 |
+| **Orthogonality** (Exp 1→2) | +1-2 | ~40% | 正交性確保互補特徵 |
+| **Total** | +3-4 | 100% | ORCA-DeSTA 總改善 |
+
+### 細分指標預期
+
+| Metric | Exp 0 | Exp 1 | Exp 2 | Exp 3 | 主要改善來源 |
+|--------|-------|-------|-------|-------|------------|
+| Multi-speaker | 39-40 | 41-42 | 42-43 | 42-43 | Local branch (韻律) |
+| Language-Single | 65-66 | 67-68 | 68-70 | 68-70 | Alignment loss |
+| Language-Multi | 39-40 | 40-41 | 42-44 | 42-44 | Deep injection + Alignment |
+| **Overall Hmean** | **48-49** | **50-51** | **51-52** | **51-52** | 架構 + 正交性 |
 
 ---
 
 ## 輸出目錄結構
 
 ```
-/work/voidful2nlp/desta/outputs/ablation_v2/
+/work/voidful2nlp/desta/outputs/ablation_minimal/
 ├── YYMMDD-HHMM_exp0_baseline/
 │   ├── checkpoint-latest/
 │   ├── checkpoint-1000/
 │   └── ...
-├── YYMMDD-HHMM_exp1_global32/
-├── YYMMDD-HHMM_exp2_add_local/
-├── YYMMDD-HHMM_exp3_add_deep_inj/
-├── YYMMDD-HHMM_exp4_add_diversity/
-├── YYMMDD-HHMM_exp5_add_alignment/
-└── YYMMDD-HHMM_exp6_full_orca/
-```
-
----
-
-## 日誌位置
-
-```
-/work/voidful2nlp/DeSTA2.5-Audio/examples/train/slurm-report/
-├── ablation_exp0_baseline_<job_id>.out
-├── ablation_exp1_global32_<job_id>.out
-├── ...
+├── YYMMDD-HHMM_exp1_architecture/
+├── YYMMDD-HHMM_exp2_orthogonality/
+└── YYMMDD-HHMM_exp3_full_orca/
 ```
 
 ---
 
 ## 評估
 
-訓練完成後，在 Sakura benchmark 上評估所有實驗：
+訓練完成後,在 Sakura benchmark 上評估:
 
 ```bash
-# 需要用戶提供評估腳本
-for exp_dir in /work/voidful2nlp/desta/outputs/ablation_v2/*; do
-    python evaluate_sakura.py --checkpoint ${exp_dir}/checkpoint-latest
+cd /work/voidful2nlp/DeSTA2.5-Audio/examples/evaluation
+
+# 評估所有實驗
+for exp_dir in /work/voidful2nlp/desta/outputs/ablation_minimal/*; do
+    exp_name=$(basename $exp_dir)
+    echo "Evaluating: $exp_name"
+    python sakura_eval.py --model_id ${exp_dir}/checkpoint-latest
 done
 ```
 
 ---
 
-## 預期結果
+## 訓練日誌監控
 
-### 組件貢獻排序（預測）
+### 關鍵指標
 
-1. **Local Branch**: +1~2 Hmean
-2. **Deep Injection**: +1~2 Hmean
-3. **Alignment Loss**: +0.5~1 Hmean
-4. **32 Layers**: +0.5~1 Hmean
-5. **Diversity Loss**: +0.3~0.5 Hmean
+**Exp 0 (Baseline)**:
 
-### 關鍵發現（預期）
+- 只有 `loss` (LLM loss)
 
-- Local branch 對 multi-speaker 最重要
-- Deep injection 提升整體性能
-- Alignment loss 改善 language 識別
-- 32 層比 4 層略好但成本高
+**Exp 1 (Architecture)**:
+
+- 只有 `loss` (無 ORCA losses)
+- 應該比 Exp 0 收斂更快
+
+**Exp 2 & 3 (Orthogonality)**:
+
+- `loss` + `L_ortho_diversity` + `L_ortho_qformer_local` + `L_align_layerwise`
+- 正交性損失應該逐漸降低
+
+### 監控命令
+
+```bash
+# 實時監控損失
+grep "loss" slurm-report/ablation_exp2_orthogonality_*.out | tail -20
+
+# 檢查正交性損失趨勢
+grep "L_ortho" slurm-report/ablation_exp2_orthogonality_*.out | tail -20
+```
 
 ---
 
-## 注意事項
+## 資源需求
 
-1. **Resume 功能**: 所有腳本支持自動 resume
-2. **實驗命名**: 使用時間戳避免衝突
-3. **資源需求**: 每個實驗需要 4 GPUs, 200GB RAM
-4. **訓練時間**: 約 2 天/實驗 (5 epochs)
+- **GPU**: 4 × A100 (40GB) per experiment
+- **RAM**: 200GB per experiment
+- **Time**: ~48 hours per experiment (5 epochs)
+- **Total**: 8 days for all 4 experiments (可並行)
+
+---
+
+## 舊版實驗 (已歸檔)
+
+舊的 8 實驗設計已移至 `archive/` 目錄:
+
+- `exp1_global32.sbatch`
+- `exp2_add_local.sbatch`
+- `exp3_add_deep_inj.sbatch`
+- `exp4_add_diversity.sbatch`
+- `exp5_add_alignment.sbatch`
+- `exp6_full_orca.sbatch`
+
+如需參考舊設計,請查看 `archive/` 目錄。
+
+---
+
+## 論文對應
+
+這個精簡設計完美對應論文題目:
+
+**"ORCA-DeSTA: Orthogonal Residual Complementary Acoustics for Audio-Language Models"**
+
+| 論文概念 | 對應實驗 | 展示內容 |
+|---------|---------|---------|
+| **Complementary Acoustics** | Exp 1 | Dual-branch (Global + Local) |
+| **Residual** | Exp 1 | Deep injection (gated residual) |
+| **Orthogonal** | Exp 2 | 3 orthogonality losses |
+
+---
+
+## 常見問題
+
+**Q: 為什麼從 8 個實驗減少到 4 個?**
+A: 舊設計過於細緻,新設計聚焦於兩大創新 (架構 + 正交性),故事更清晰。
+
+**Q: Exp 2 和 Exp 3 有什麼區別?**
+A: Exp 3 是驗證實驗,確保完整配置與 Exp 2 一致且可重現。
+
+**Q: 可以跳過某些實驗嗎?**
+A: 建議全部運行。如果時間緊迫,最低要求是 Exp 0, 1, 2。
+
+**Q: 如何解讀結果?**
+A:
+
+- Exp 0→1 的改善 = 架構貢獻
+- Exp 1→2 的改善 = 正交性貢獻
+- Exp 2≈3 = 驗證系統穩定性
 
 ---
 
 ## 聯絡
 
-如有問題請參考 `implementation_plan.md` 或聯絡實驗負責人。
+如有問題請參考 `implementation_plan.md` 或查看代碼註釋。

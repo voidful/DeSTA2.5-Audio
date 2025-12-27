@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=ablation_exp0_baseline
+#SBATCH --job-name=ablation_exp2_orthogonality
 #SBATCH --partition=normal
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
-#SBATCH --output=./slurm-report/ablation_exp0_baseline_%j.out
-#SBATCH --error=./slurm-report/ablation_exp0_baseline_%j.out
+#SBATCH --output=./slurm-report/ablation_exp2_orthogonality_%j.out
+#SBATCH --error=./slurm-report/ablation_exp2_orthogonality_%j.out
 
 # ===== 環境設定 =====
 module load anaconda 2>/dev/null || module load miniconda 2>/dev/null || true
@@ -21,15 +21,16 @@ cd /work/voidful2nlp/DeSTA2.5-Audio
 export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 export HF_HOME=/work/voidful2nlp/.cache/huggingface
 export TRANSFORMERS_CACHE=$HF_HOME
+export TOKENIZERS_PARALLELISM=false
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-0.6b_ORCAHybrid
 dataset_config=DestaAQA-5M_0.6b_orca
-project=desta25_ablation_v2
+project=desta25_ablation_minimal
 
-exp_suffix="exp0_baseline"
-output_root="/work/voidful2nlp/desta/outputs/ablation_v2"
+exp_suffix="exp2_orthogonality"
+output_root="/work/voidful2nlp/desta/outputs/ablation_minimal"
 
 # Default to new experiment
 exp_name_dated=$(date +%y%m%d-%H%M)_${exp_suffix}
@@ -54,7 +55,8 @@ mkdir -p ./slurm-report
 NUM_GPUS=4
 MASTER_PORT=$((29500 + RANDOM % 1000))
 
-# Exp 0: DeSTA2.5 Baseline (Q-Former only, no ORCA)
+# Exp 2: + Orthogonality Losses (All 3 losses enabled)
+# This demonstrates the contribution of orthogonality constraints
 torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ${ROOT_DIR}/examples/train/train_desta.py \
     --config-path=config \
@@ -62,7 +64,12 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     +dataset=${dataset_config} \
     ++exp_dir=${exp_dir} \
     project=${project} \
-    name=exp0_baseline \
-    connector_mode=qformer_1 \
-    model.orca.enabled=false \
+    name=exp2_orthogonality \
+    model.orca.enabled=true \
+    model.orca.global_cross_attn=true \
+    model.orca.local_enabled=true \
+    model.orca.deep_injection_enabled=true \
+    model.orca.ortho_diversity_weight=0.05 \
+    model.orca.ortho_weight_qformer_local=0.05 \
+    model.orca.align_weight_local=0.05 \
     ${resume_args}
