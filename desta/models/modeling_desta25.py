@@ -840,15 +840,102 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             return outputs
         else:
-            # Standard non-ORCA path
+            # Standard non-ORCA path (Q-Former mode)
             inputs_embeds = prepare_result
             
-            outputs = self.llm_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
+            # Check if we should compute losses even in Q-Former mode
+            # This allows testing orthogonality losses without ORCA architecture
+            compute_qformer_losses = (
+                self.config.connector_mode == "qformer_1" and
+                getattr(self.config, 'orca_enabled', False) and
+                (getattr(self.config, 'orca_ortho_diversity_weight', 0.0) > 0 or
+                 getattr(self.config, 'orca_align_weight_local', 0.0) > 0)
             )
-            return outputs 
+            
+            if compute_qformer_losses:
+                # Call LLM with output_hidden_states for loss computation
+                outputs = self.llm_model(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    output_hidden_states=True,
+                )
+                
+                # Extract Q-Former tokens from inputs_embeds
+                # Q-Former tokens are embedded at audio positions
+                qformer_tokens = None
+                if len(batch_start_positions) > 0:
+                    # Collect Q-Former tokens from all audio positions
+                    qformer_token_list = []
+                    for start_pos in batch_start_positions:
+                        # Extract prompt_size tokens starting from start_pos
+                        end_pos = start_pos + self.config.prompt_size
+                        if end_pos <= inputs_embeds.size(1):
+                            qformer_token_list.append(inputs_embeds[:, start_pos:end_pos, :])
+                    
+                    if qformer_token_list:
+                        # Average across all audio instances in batch
+                        qformer_tokens = torch.stack(qformer_token_list, dim=0).mean(dim=0)
+                
+                # Compute losses using Q-Former tokens
+                text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
+                
+                # Extract transcription and target embeddings for contrastive alignment
+                transcription_embeds = None
+                target_embeds = None
+                
+                if len(batch_transcription_ids) > 0:
+                    # Get transcription embeddings
+                    with torch.no_grad():
+                        transcription_embeds_list = []
+                        for trans_ids in batch_transcription_ids:
+                            trans_ids = trans_ids.squeeze(0)
+                            if trans_ids.device != inputs_embeds.device:
+                                trans_ids = trans_ids.to(inputs_embeds.device)
+                            trans_emb = self.llm_model.model.embed_tokens(trans_ids)
+                            transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
+                        transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [B, H]
+                
+                # Extract target embeddings from labels
+                if labels is not None:
+                    with torch.no_grad():
+                        # Get target positions (where labels != -100)
+                        target_mask = labels != -100  # [B, T]
+                        if target_mask.any():
+                            # Get embeddings for target tokens
+                            target_ids = labels.clone()
+                            target_ids[~target_mask] = 0  # Mask out non-target positions
+                            target_emb_full = self.llm_model.model.embed_tokens(target_ids)  # [B, T, H]
+                            
+                            # Pool only target positions
+                            target_embeds_list = []
+                            for b in range(target_mask.size(0)):
+                                if target_mask[b].any():
+                                    target_emb = target_emb_full[b, target_mask[b], :]  # [num_targets, H]
+                                    target_embeds_list.append(target_emb.mean(dim=0))  # Pool
+                                else:
+                                    target_embeds_list.append(torch.zeros(target_emb_full.size(-1), device=target_emb_full.device))
+                            target_embeds = torch.stack(target_embeds_list, dim=0)  # [B, H]
+                
+                qformer_losses = self.compute_qformer_losses(
+                    qformer_tokens=qformer_tokens,
+                    text_hidden=text_hidden,
+                    transcription_embeds=transcription_embeds,
+                    target_embeds=target_embeds,
+                )
+                
+                # Attach losses to outputs
+                outputs.orca_losses = qformer_losses
+                
+                return outputs
+            else:
+                # Standard path without losses
+                outputs = self.llm_model(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+                return outputs 
 
     def _prepare_inputs_for_llm(self, 
                                input_ids,
@@ -1115,6 +1202,82 @@ class DeSTA25AudioModel(PreTrainedModel):
         if layer_align_losses is not None and len(layer_align_losses) > 0:
             L_align_layerwise = torch.stack(layer_align_losses).mean()
             losses["L_align_layerwise"] = self.config.orca_align_weight_local * L_align_layerwise
+        
+        return losses
+    
+    def compute_qformer_losses(
+        self,
+        qformer_tokens: Optional[torch.Tensor],
+        text_hidden: Optional[torch.Tensor],
+        transcription_embeds: Optional[torch.Tensor] = None,
+        target_embeds: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute orthogonality losses for Q-Former tokens (without ORCA architecture).
+        This allows testing loss contributions using DeSTA2.5 baseline architecture.
+        
+        Args:
+            qformer_tokens: Q-Former output tokens [B, K, H]
+            text_hidden: LLM final hidden states [B, T, H]
+            transcription_embeds: Transcription embeddings [B, H] (negative samples)
+            target_embeds: Target sequence embeddings [B, H] (positive samples)
+            
+        Returns:
+            Dictionary of losses
+        """
+        losses = {}
+        
+        # L_ortho_diversity: Diversity between Q-Former tokens
+        if qformer_tokens is not None and getattr(self.config, 'orca_ortho_diversity_weight', 0.0) > 0:
+            g = F.normalize(qformer_tokens, dim=-1)  # [B, K, H]
+            gram = torch.einsum("bkh,bqh->bkq", g, g)  # [B, K, K]
+            I = torch.eye(gram.size(-1), device=gram.device)
+            L_div = ((gram - I) ** 2).mean()
+            losses["L_ortho_diversity"] = self.config.orca_ortho_diversity_weight * L_div
+        
+        # L_align: Contrastive alignment loss
+        # Push audio away from transcription, pull toward target
+        if qformer_tokens is not None and getattr(self.config, 'orca_align_weight_local', 0.0) > 0:
+            # Pool Q-Former tokens
+            audio_pooled = F.normalize(qformer_tokens.mean(dim=1), dim=-1)  # [B, H]
+            
+            # Contrastive loss: push away from transcription, pull toward target
+            if transcription_embeds is not None and target_embeds is not None:
+                # Normalize
+                trans_pooled = F.normalize(transcription_embeds, dim=-1)  # [B, H]
+                target_pooled = F.normalize(target_embeds, dim=-1)  # [B, H]
+                
+                # Similarity to transcription (should be LOW)
+                sim_trans = F.cosine_similarity(audio_pooled, trans_pooled, dim=-1)  # [B]
+                
+                # Similarity to target (should be HIGH)
+                sim_target = F.cosine_similarity(audio_pooled, target_pooled, dim=-1)  # [B]
+                
+                # Contrastive loss with margin
+                # Loss = max(0, margin + sim_trans - sim_target)
+                # Encourages: sim_target > sim_trans + margin
+                margin = 0.5
+                contrastive_loss = torch.clamp(margin + sim_trans - sim_target, min=0.0).mean()
+                
+                # Also add direct target alignment term
+                target_align_loss = (1 - sim_target).mean()
+                
+                # Combined loss
+                L_align = contrastive_loss + 0.5 * target_align_loss
+                losses["L_align"] = self.config.orca_align_weight_local * L_align
+                
+                # Add individual components for monitoring
+                losses["L_align_contrastive"] = contrastive_loss
+                losses["L_align_target"] = target_align_loss
+                losses["sim_trans"] = sim_trans.mean()  # For monitoring
+                losses["sim_target"] = sim_target.mean()  # For monitoring
+                
+            elif text_hidden is not None:
+                # Fallback: simple alignment to text hidden states
+                text_pooled = F.normalize(text_hidden.mean(dim=1), dim=-1)  # [B, H]
+                cos_sim = F.cosine_similarity(audio_pooled, text_pooled, dim=-1)  # [B]
+                L_align = (1 - cos_sim).mean()
+                losses["L_align"] = self.config.orca_align_weight_local * L_align
         
         return losses
         

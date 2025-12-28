@@ -26,10 +26,10 @@ export TRANSFORMERS_CACHE=$HF_HOME
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-0.6b_ORCAHybrid
 dataset_config=DestaAQA-5M_0.6b_orca
-project=desta25_ablation_v2
+project=desta25_ablation_loss_only
 
 exp_suffix="exp0_baseline"
-output_root="/work/voidful2nlp/desta/outputs/ablation_v2"
+output_root="/work/voidful2nlp/desta/outputs/ablation_loss_only"
 
 # Default to new experiment
 exp_name_dated=$(date +%y%m%d-%H%M)_${exp_suffix}

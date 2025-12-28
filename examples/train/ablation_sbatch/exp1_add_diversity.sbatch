@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=ablation_exp2_add_local
+#SBATCH --job-name=ablation_exp1_diversity
 #SBATCH --partition=normal
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
-#SBATCH --output=./slurm-report/ablation_exp2_add_local_%j.out
-#SBATCH --error=./slurm-report/ablation_exp2_add_local_%j.out
+#SBATCH --output=./slurm-report/ablation_exp1_diversity_%j.out
+#SBATCH --error=./slurm-report/ablation_exp1_diversity_%j.out
 
 # ===== 環境設定 =====
 module load anaconda 2>/dev/null || module load miniconda 2>/dev/null || true
@@ -21,27 +21,31 @@ cd /work/voidful2nlp/DeSTA2.5-Audio
 export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 export HF_HOME=/work/voidful2nlp/.cache/huggingface
 export TRANSFORMERS_CACHE=$HF_HOME
+export TOKENIZERS_PARALLELISM=false
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-0.6b_ORCAHybrid
 dataset_config=DestaAQA-5M_0.6b_orca
-project=desta25_ablation_v2
+project=desta25_ablation_loss_only
 
-# Disable tokenizers parallelism warning
-export TOKENIZERS_PARALLELISM=false
+exp_suffix="exp1_diversity"
+output_root="/work/voidful2nlp/desta/outputs/ablation_loss_only"
 
-exp_suffix="exp2_add_local"
-output_root="/work/voidful2nlp/desta/outputs/ablation_v2"
-
+# Default to new experiment
 exp_name_dated=$(date +%y%m%d-%H%M)_${exp_suffix}
 exp_dir="${output_root}/${exp_name_dated}"
 resume_args=""
 
+# Check for existing runs to resume
 latest_dir=$(ls -td ${output_root}/*_${exp_suffix} 2>/dev/null | head -n 1)
 if [ -d "$latest_dir" ] && [ -d "$latest_dir/checkpoint-latest" ]; then
+    echo "Found existing run: $latest_dir"
+    echo "Resuming from checkpoint..."
     exp_dir="$latest_dir"
     resume_args="resume_from_checkpoint=$latest_dir/checkpoint-latest"
+else
+    echo "Starting new experiment: $exp_name_dated"
 fi
 
 mkdir -p ${exp_dir}
@@ -51,7 +55,8 @@ mkdir -p ./slurm-report
 NUM_GPUS=4
 MASTER_PORT=$((29500 + RANDOM % 1000))
 
-# Exp 2: + Local Branch (2x downsample), no deep injection, no losses
+# Exp 1: DeSTA2.5 + Diversity Loss
+# Same Q-Former architecture, only add L_ortho_diversity
 torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ${ROOT_DIR}/examples/train/train_desta.py \
     --config-path=config \
@@ -59,13 +64,13 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     +dataset=${dataset_config} \
     ++exp_dir=${exp_dir} \
     project=${project} \
-    name=exp2_add_local \
+    name=exp1_diversity \
+    model.connector.mode=qformer_1 \
     model.orca.enabled=true \
-    model.orca.local_enabled=true \
-    model.orca.global_cross_attn=true \
+    model.orca.local_enabled=false \
     model.orca.deep_injection_enabled=false \
-    model.orca.local_downsample=2 \
-    model.orca.local_kernel_size=5 \
-    model.orca.ortho_diversity_weight=0 \
-    model.orca.align_weight_local=0 \
+    model.orca.global_cross_attn=false \
+    model.orca.ortho_diversity_weight=0.05 \
+    model.orca.ortho_weight_qformer_local=0.0 \
+    model.orca.align_weight_local=0.0 \
     ${resume_args}
