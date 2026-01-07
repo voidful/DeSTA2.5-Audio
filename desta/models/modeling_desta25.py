@@ -648,6 +648,7 @@ class DeSTA25Config(PretrainedConfig):
                  orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
                  orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
                  orca_deep_injection_enabled=True, # If False, disable gated cross-attention in all LLM layers
+                 orca_deep_injection_stride=1,  # Stride for injection: inject every N layers
                  orca_audio_position_scale=2.5,  # Position interpolation scale for audio tokens (adjusted for 4x downsample)
                  orca_global_num_tokens=4,
                  orca_local_downsample=4,
@@ -680,7 +681,9 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_use_all_layers = orca_use_all_layers
         self.orca_local_enabled = orca_local_enabled
         self.orca_global_cross_attn = orca_global_cross_attn
+        self.orca_global_cross_attn = orca_global_cross_attn
         self.orca_deep_injection_enabled = orca_deep_injection_enabled
+        self.orca_deep_injection_stride = orca_deep_injection_stride
         self.orca_audio_position_scale = orca_audio_position_scale
         self.orca_global_num_tokens = orca_global_num_tokens
         self.orca_local_downsample = orca_local_downsample
@@ -825,12 +828,51 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Compute ORCA auxiliary losses
             text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
             
+            # Extract transcription and target embeddings for contrastive alignment
+            transcription_embeds = None
+            target_embeds = None
+            
+            if len(batch_transcription_ids) > 0:
+                # Get transcription embeddings
+                with torch.no_grad():
+                    transcription_embeds_list = []
+                    for trans_ids in batch_transcription_ids:
+                        trans_ids = trans_ids.squeeze(0)
+                        if trans_ids.device != inputs_embeds.device:
+                            trans_ids = trans_ids.to(inputs_embeds.device)
+                        trans_emb = self.llm_model.model.embed_tokens(trans_ids)
+                        transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
+                    transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [B, H]
+            
+            # Extract target embeddings from labels
+            if labels is not None:
+                with torch.no_grad():
+                    # Get target positions (where labels != -100)
+                    target_mask = labels != -100  # [B, T]
+                    if target_mask.any():
+                        # Get embeddings for target tokens
+                        target_ids = labels.clone()
+                        target_ids[~target_mask] = 0  # Mask out non-target positions
+                        target_emb_full = self.llm_model.model.embed_tokens(target_ids)  # [B, T, H]
+                        
+                        # Pool only target positions
+                        target_embeds_list = []
+                        for b in range(target_mask.size(0)):
+                            if target_mask[b].any():
+                                target_emb = target_emb_full[b, target_mask[b], :]  # [num_targets, H]
+                                target_embeds_list.append(target_emb.mean(dim=0))  # Pool
+                            else:
+                                target_embeds_list.append(torch.zeros(target_emb_full.size(-1), device=target_emb_full.device))
+                        target_embeds = torch.stack(target_embeds_list, dim=0)  # [B, H]
+
             # Compute ORCA losses
             orca_losses = self.compute_orca_losses(
                 global_tokens=global_audio_tokens,
                 local_tokens=local_audio_tokens,
                 text_hidden=text_hidden,
                 layer_align_losses=layer_align_losses,
+                transcription_embeds=transcription_embeds,
+                target_embeds=target_embeds,
             )
             
             # Attach losses to outputs
@@ -1098,7 +1140,13 @@ class DeSTA25AudioModel(PreTrainedModel):
             self.orca_cross_attns.append(cross_attn)
         
         # Wrap each layer's forward method
+        injection_stride = getattr(self.config, 'orca_deep_injection_stride', 1)
+        
         for layer_idx, layer in enumerate(layers):
+            # Only inject if stride condition is met
+            if layer_idx % injection_stride != 0:
+                continue
+
             cross_attn = self.orca_cross_attns[layer_idx]
             
             # Store reference to parent model for accessing audio_local
@@ -1162,6 +1210,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         local_tokens: Optional[torch.Tensor],
         text_hidden: Optional[torch.Tensor],
         layer_align_losses: Optional[List[torch.Tensor]] = None,
+        transcription_embeds: Optional[torch.Tensor] = None,
+        target_embeds: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Compute ORCA auxiliary losses:
@@ -1202,6 +1252,41 @@ class DeSTA25AudioModel(PreTrainedModel):
         if layer_align_losses is not None and len(layer_align_losses) > 0:
             L_align_layerwise = torch.stack(layer_align_losses).mean()
             losses["L_align_layerwise"] = self.config.orca_align_weight_local * L_align_layerwise
+
+        # L_align_global: Contrastive alignment loss for GLOBAL tokens
+        # Push audio away from transcription, pull toward target
+        if global_tokens is not None and getattr(self.config, 'orca_align_weight_local', 0.0) > 0:
+            # Only compute if we have transcription/target embeddings (Contrastive)
+            if transcription_embeds is not None and target_embeds is not None:
+                # Pool Global tokens
+                audio_pooled = F.normalize(global_tokens.mean(dim=1), dim=-1)  # [B, H]
+                
+                # Normalize
+                trans_pooled = F.normalize(transcription_embeds, dim=-1)  # [B, H]
+                target_pooled = F.normalize(target_embeds, dim=-1)  # [B, H]
+                
+                # Similarity to transcription (should be LOW)
+                sim_trans = F.cosine_similarity(audio_pooled, trans_pooled, dim=-1)  # [B]
+                
+                # Similarity to target (should be HIGH)
+                sim_target = F.cosine_similarity(audio_pooled, target_pooled, dim=-1)  # [B]
+                
+                # Contrastive loss with margin
+                # Loss = max(0, margin + sim_trans - sim_target)
+                margin = 0.5
+                contrastive_loss = torch.clamp(margin + sim_trans - sim_target, min=0.0).mean()
+                
+                # Also add direct target alignment term
+                target_align_loss = (1 - sim_target).mean()
+                
+                # Combined loss
+                L_align = contrastive_loss + 0.5 * target_align_loss
+                losses["L_align_global"] = self.config.orca_align_weight_local * L_align
+                
+                # Add individual components for monitoring
+                losses["L_align_contrastive"] = contrastive_loss
+                losses["sim_trans"] = sim_trans.mean()
+                losses["sim_target"] = sim_target.mean()
         
         return losses
     
