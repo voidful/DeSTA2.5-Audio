@@ -51,6 +51,7 @@ model:
     local_enabled: true  # Set to false to disable local downsample features
     global_cross_attn: true  # Global tokens also use cross-attention instead of concat
     deep_injection_enabled: true  # Gated cross-attention in LLM layers
+    deep_injection_stride: 1  # Inject audio tokens every N layers (1 = all layers)
     global_num_tokens: 64
     local_downsample: 4
     local_kernel_size: 5
