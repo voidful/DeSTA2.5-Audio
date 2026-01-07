@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 # - Audio position scale: 5.0
 # - Losses: L_ortho_diversity + L_align_layerwise (simplified)
 
-DEFAULT_MODEL_ID = "voidful/DeSTA2.5-Qwen3-0.6B-ORCA"  # Update to your trained model
+DEFAULT_MODEL_ID = "voidful/QAQ_0.6b_orca_all"  # Update to your trained model
 DATASET_ID = "lmms-lab/mmau"
 DEFAULT_SPLIT = "test_mini"
 TMP_WAV_PATH = "tmp_mmau_audio.wav"
