@@ -907,18 +907,28 @@ class DeSTA25AudioModel(PreTrainedModel):
                 # Q-Former tokens are embedded at audio positions
                 qformer_tokens = None
                 if len(batch_start_positions) > 0:
-                    # Collect Q-Former tokens from all audio positions
-                    qformer_token_list = []
+                    # Collect Q-Former tokens per sample to maintain [B, K, H] shape
+                    batch_qformer_tokens = []
                     for b, start_positions_sample in enumerate(batch_start_positions):
+                        sample_tokens_list = []
                         for start_pos in start_positions_sample:
-                            # Extract prompt_size tokens starting from start_pos
                             end_pos = start_pos + self.config.prompt_size
                             if end_pos <= inputs_embeds.size(1):
-                                qformer_token_list.append(inputs_embeds[b, start_pos:end_pos, :])
+                                sample_tokens_list.append(inputs_embeds[b, start_pos:end_pos, :])
+                        
+                        if sample_tokens_list:
+                            # Average multiple audios in this sample: [M, K, H] -> [K, H]
+                            sample_avg = torch.stack(sample_tokens_list, dim=0).mean(dim=0)
+                            batch_qformer_tokens.append(sample_avg)
+                        else:
+                            # Fallback for samples without audio (should ideally not happen in training)
+                            batch_qformer_tokens.append(
+                                torch.zeros(self.config.prompt_size, inputs_embeds.size(-1), 
+                                          device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                            )
                     
-                    if qformer_token_list:
-                        # Average across all audio instances in batch
-                        qformer_tokens = torch.stack(qformer_token_list, dim=0).mean(dim=0)
+                    if batch_qformer_tokens:
+                        qformer_tokens = torch.stack(batch_qformer_tokens, dim=0)  # [B, K, H]
                 
                 # Compute losses using Q-Former tokens
                 text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
