@@ -24,8 +24,8 @@ export TRANSFORMERS_CACHE=$HF_HOME
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-0.6b_ORCAHybrid
-dataset_config=DestaAQA-5M_0.6b_orca
+config=desta25_qwen3-4b_ORCAHybrid
+dataset_config=DestaAQA-5M_4b_orca
 project=desta25_ablation_loss_only
 
 exp_suffix="exp0_baseline"
