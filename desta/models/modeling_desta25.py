@@ -1405,47 +1405,48 @@ class DeSTA25AudioModel(PreTrainedModel):
                 new_state_dict[key] = value
         
         # Auto-detect layer configuration from checkpoint
-        if 'perception.connector.global_layer_weights' in new_state_dict:
-            checkpoint_shape = new_state_dict['perception.connector.global_layer_weights'].shape
-            checkpoint_num_layers = checkpoint_shape[1]  # [K, L] -> L is number of layers
+        # DISABLED to prevent DDP desync issues with sharded loading
+        # if 'perception.connector.global_layer_weights' in new_state_dict:
+        #     checkpoint_shape = new_state_dict['perception.connector.global_layer_weights'].shape
+        #     checkpoint_num_layers = checkpoint_shape[1]  # [K, L] -> L is number of layers
             
-            # Get current model configuration
-            if hasattr(self.perception, 'connector') and hasattr(self.perception.connector, 'target_layer_ids'):
-                current_num_layers = len(self.perception.connector.target_layer_ids)
+        #     # Get current model configuration
+        #     if hasattr(self.perception, 'connector') and hasattr(self.perception.connector, 'target_layer_ids'):
+        #         current_num_layers = len(self.perception.connector.target_layer_ids)
                 
-                if checkpoint_num_layers != current_num_layers:
-                    logging.warning(
-                        f"Layer count mismatch detected: checkpoint has {checkpoint_num_layers} layers, "
-                        f"current model has {current_num_layers} layers. "
-                        f"Automatically adjusting model configuration to match checkpoint."
-                    )
+        #         if checkpoint_num_layers != current_num_layers:
+        #             logging.warning(
+        #                 f"Layer count mismatch detected: checkpoint has {checkpoint_num_layers} layers, "
+        #                 f"current model has {current_num_layers} layers. "
+        #                 f"Automatically adjusting model configuration to match checkpoint."
+        #             )
                     
-                    # Determine if checkpoint used all layers
-                    num_encoder_layers = self.config.encoder_config.num_hidden_layers
-                    if checkpoint_num_layers == num_encoder_layers:
-                        # Checkpoint used all layers
-                        logging.info(f"Checkpoint uses all {num_encoder_layers} encoder layers. Reconfiguring model...")
-                        self.config.orca_use_all_layers = True
-                    else:
-                        # Checkpoint used selected layers - we can't automatically determine which ones
-                        # So we'll just update the target_layer_ids to match the checkpoint size
-                        logging.info(f"Checkpoint uses {checkpoint_num_layers} selected layers. Reconfiguring model...")
-                        self.config.orca_use_all_layers = False
-                        # Use first N layers as a fallback
-                        self.perception.connector.target_layer_ids = list(range(checkpoint_num_layers))
+        #             # Determine if checkpoint used all layers
+        #             num_encoder_layers = self.config.encoder_config.num_hidden_layers
+        #             if checkpoint_num_layers == num_encoder_layers:
+        #                 # Checkpoint used all layers
+        #                 logging.info(f"Checkpoint uses all {num_encoder_layers} encoder layers. Reconfiguring model...")
+        #                 self.config.orca_use_all_layers = True
+        #             else:
+        #                 # Checkpoint used selected layers - we can't automatically determine which ones
+        #                 # So we'll just update the target_layer_ids to match the checkpoint size
+        #                 logging.info(f"Checkpoint uses {checkpoint_num_layers} selected layers. Reconfiguring model...")
+        #                 self.config.orca_use_all_layers = False
+        #                 # Use first N layers as a fallback
+        #                 self.perception.connector.target_layer_ids = list(range(checkpoint_num_layers))
                     
-                    # Reinitialize connector with new configuration
-                    from desta.models.modeling_desta25 import ORCAHybridConnector
-                    old_connector = self.perception.connector
-                    self.perception.connector = ORCAHybridConnector(self.config)
+        #             # Reinitialize connector with new configuration
+        #             from desta.models.modeling_desta25 import ORCAHybridConnector
+        #             old_connector = self.perception.connector
+        #             self.perception.connector = ORCAHybridConnector(self.config)
                     
-                    # Move to same device and dtype as old connector
-                    self.perception.connector.to(
-                        device=old_connector.global_proj[1].weight.device,
-                        dtype=old_connector.global_proj[1].weight.dtype
-                    )
+        #             # Move to same device and dtype as old connector
+        #             self.perception.connector.to(
+        #                 device=old_connector.global_proj[1].weight.device,
+        #                 dtype=old_connector.global_proj[1].weight.dtype
+        #             )
                     
-                    logging.info(f"Model reconfigured to use {len(self.perception.connector.target_layer_ids)} layers")
+        #             logging.info(f"Model reconfigured to use {len(self.perception.connector.target_layer_ids)} layers")
         
         return super().load_state_dict(new_state_dict, strict=strict, assign=assign)
 
