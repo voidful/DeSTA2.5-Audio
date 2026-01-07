@@ -909,11 +909,12 @@ class DeSTA25AudioModel(PreTrainedModel):
                 if len(batch_start_positions) > 0:
                     # Collect Q-Former tokens from all audio positions
                     qformer_token_list = []
-                    for start_pos in batch_start_positions:
-                        # Extract prompt_size tokens starting from start_pos
-                        end_pos = start_pos + self.config.prompt_size
-                        if end_pos <= inputs_embeds.size(1):
-                            qformer_token_list.append(inputs_embeds[:, start_pos:end_pos, :])
+                    for b, start_positions_sample in enumerate(batch_start_positions):
+                        for start_pos in start_positions_sample:
+                            # Extract prompt_size tokens starting from start_pos
+                            end_pos = start_pos + self.config.prompt_size
+                            if end_pos <= inputs_embeds.size(1):
+                                qformer_token_list.append(inputs_embeds[b, start_pos:end_pos, :])
                     
                     if qformer_token_list:
                         # Average across all audio instances in batch
