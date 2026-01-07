@@ -17,7 +17,7 @@ validation_ds:
   batch_sampler: null
   data_root: "/work/voidful2nlp/desta"
   manifest_filepaths:
-    - "/work/voidful2nlp/desta/qwen3_4b_val.jsonl"
+    - "/work/voidful2nlp/desta/qwen3_4b_val_sampled.jsonl"
   max_seq_length: 512
   batch_size: 2
   shuffle: False
