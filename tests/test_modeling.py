@@ -87,7 +87,6 @@ def test_orca_hybrid_connector_initialization(orca_config):
     assert isinstance(connector, torch.nn.Module)
     assert len(connector.global_queries) == 4  # tiny has 4 target layers
     assert connector.global_qformer is not None
-    assert connector.local_conv is not None
 
 
 def test_orca_hybrid_connector_forward(orca_config):
@@ -102,16 +101,10 @@ def test_orca_hybrid_connector_forward(orca_config):
     # Create mock hidden states for all layers (tiny has 4 layers)
     encoder_hidden_states = [torch.randn(batch_size, seq_len, d_encoder) for _ in range(4)]
     
-    global_tokens, local_tokens = connector(encoder_hidden_states)
+    global_tokens = connector(encoder_hidden_states)
     
     # Check global tokens shape: [B, K_global, d_llm]
     assert global_tokens.shape == (batch_size, orca_config.orca_global_num_tokens, orca_config.llm_config.hidden_size)
-    
-    # Check local tokens shape: [B, T_local, d_llm]
-    # T_local = ceil((seq_len + padding) / stride)
-    assert local_tokens.shape[0] == batch_size
-    assert local_tokens.shape[2] == orca_config.llm_config.hidden_size
-    assert local_tokens.shape[1] > 0  # Some temporal reduction happened
 
 
 def test_orca_gated_cross_attention():
@@ -175,9 +168,8 @@ def test_orca_mixed_precision(orca_config):
     
     # This should not raise RuntimeError: expected mat1 and mat2 to have the same dtype
     try:
-        global_tokens, local_tokens = connector(encoder_hidden_states)
+        global_tokens = connector(encoder_hidden_states)
     except RuntimeError as e:
         pytest.fail(f"ORCAHybridConnector failed with mixed precision: {e}")
     
     assert global_tokens.dtype == torch.bfloat16
-    assert local_tokens.dtype == torch.bfloat16

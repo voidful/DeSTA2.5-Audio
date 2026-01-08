@@ -3,8 +3,8 @@ hydra:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_4b_orca
-name: desta25_qwen3_4b_orca
+project: desta25_qwen3_0.6b_struct_orca
+name: desta25_qwen3_0.6b_struct_orca
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,7 +13,7 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_4b_orca
+  project: desta25_qwen3_0.6b_struct_orca
   log_model: all
 
 trainer:
@@ -33,7 +33,7 @@ trainer:
 
 model:
   llm:
-    model_id: Qwen/Qwen3-4B-Instruct-2507
+    model_id: Qwen/Qwen3-0.6B
     freeze: True
 
   encoder:
@@ -41,26 +41,25 @@ model:
     freeze: True
 
   connector:
-    mode: orca_hybrid
-    prompt_size: 64  # Not used in ORCA mode, but kept for compatibility
+    mode: struct_orca  # Use Struct-ORCA connector
+    prompt_size: 64    # Not used in struct_orca mode, kept for compatibility
     num_hidden_layers: 6
 
-  # ORCA-DeSTA specific configuration
-  orca:
-    enabled: true
-    local_enabled: true  # Set to false to disable local downsample features
-    global_cross_attn: true  # Global tokens also use cross-attention instead of concat
-    deep_injection_enabled: true  # Gated cross-attention in LLM layers
-    deep_injection_stride: 1  # Inject audio tokens every N layers (1 = all layers)
-    global_num_tokens: 64
-    local_downsample: 4
-    local_kernel_size: 5
-    gate_init: 0.1
-    audio_position_scale: 2.5  # RoPE position interpolation (adjusted for 4x downsample)
-    ortho_weight_global: 0.05
-    ortho_diversity_weight: 0.05
-    ortho_weight_qformer_local: 0.05  # Orthogonality between global and local tokens
-    align_weight_local: 0.05  # Alignment loss to bring local tokens closer to text
+  # Struct-ORCA specific configuration
+  struct_orca:
+    # Group-wise Orthogonal Q-Former settings
+    num_groups: 8  # Number of semantic groups (emotion, speaker, prosody, etc.)
+    queries_per_group: 8  # Queries per group (total = 64 tokens)
+    
+    # Loss weights for Phase 1
+    inter_group_weight: 0.1  # Push group centroids apart (orthogonality)
+    intra_group_weight: 0.01  # Light diversity within groups
+    
+    # IV-Guided Disentanglement (Phase 2)
+    iv_weight: 0.1  # Adversarial discriminator loss weight
+    
+    # Acoustic-Contrastive Decoding (Phase 3 - inference)
+    acd_alpha: 0.5  # Contrast strength: logits = full + alpha * (full - blind)
 
   # Qwen3 使用 <|video_pad|> 作为 placeholder token (已在词表中)
   placeholder_token: "<|video_pad|>"

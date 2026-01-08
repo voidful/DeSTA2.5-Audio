@@ -46,15 +46,13 @@ def test_checkpoint_loading():
         
         # Verify shapes
         global_weights_shape = desta_model.perception.connector.global_layer_weights.shape
-        local_weights_shape = desta_model.perception.connector.local_layer_weights.shape
         
         print(f"\n3. Parameter Shapes:")
         print(f"   - global_layer_weights: {global_weights_shape}")
-        print(f"   - local_layer_weights: {local_weights_shape}")
         
         # Check if shapes match expected
         expected_num_layers = 32  # For whisper-large-v3
-        if global_weights_shape[1] == expected_num_layers and local_weights_shape[0] == expected_num_layers:
+        if global_weights_shape[1] == expected_num_layers:
             print("\n✓ All checks passed! Model is correctly configured.")
             return True
         else:

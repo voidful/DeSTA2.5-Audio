@@ -32,8 +32,6 @@ export HF_HOME=/work/voidful2nlp/.cache/huggingface
 export TRANSFORMERS_CACHE=$HF_HOME
 export PYTHONNOUSERSITE=1
 
-# 如果需要存取 gated model，取消下行註解並填入 token
-# export HF_TOKEN=your_huggingface_token_here
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"

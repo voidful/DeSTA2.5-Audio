@@ -98,6 +98,9 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
     # Extract ORCA config if present
     orca_cfg = cfg.model.get("orca", {})
     
+    # Extract Struct-ORCA config if present
+    struct_orca_cfg = cfg.model.get("struct_orca", {})
+    
     model_config = DeSTA25Config(
         llm_model_id=cfg.model.llm.model_id,
         encoder_model_id=cfg.model.encoder.model_id,
@@ -121,6 +124,13 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         orca_ortho_diversity_weight=orca_cfg.get("ortho_diversity_weight", 0.01),
         orca_ortho_weight_qformer_local=orca_cfg.get("ortho_weight_qformer_local", 0.01),
         orca_align_weight_local=orca_cfg.get("align_weight_local", 0.05),
+        # Struct-ORCA configuration
+        struct_orca_num_groups=struct_orca_cfg.get("num_groups", 8),
+        struct_orca_queries_per_group=struct_orca_cfg.get("queries_per_group", 8),
+        struct_orca_inter_group_weight=struct_orca_cfg.get("inter_group_weight", 0.1),
+        struct_orca_intra_group_weight=struct_orca_cfg.get("intra_group_weight", 0.01),
+        struct_orca_iv_weight=struct_orca_cfg.get("iv_weight", 0.1),
+        struct_orca_acd_alpha=struct_orca_cfg.get("acd_alpha", 0.5),
     )
     
     model = DeSTA25AudioModel(model_config)
@@ -152,8 +162,8 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         run_name=cfg.name,
         remove_unused_columns=False,
         label_names=["labels"],
-        # Enable find_unused_parameters for ORCA mode (prosody heads may not be used)
-        ddp_find_unused_parameters=cfg.model.connector.mode == "orca_hybrid",
+        # Enable find_unused_parameters for ORCA/Struct-ORCA mode (some heads may not be used)
+        ddp_find_unused_parameters=cfg.model.connector.mode in ["orca_hybrid", "struct_orca"],
         gradient_checkpointing=getattr(cfg.trainer, "gradient_checkpointing", False),
         dataloader_num_workers=getattr(cfg.dataset.train_ds, "num_workers", 4),
         dataloader_pin_memory=getattr(cfg.dataset.train_ds, "pin_memory", True),

@@ -19,6 +19,131 @@ from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
 
 
+# === Gradient Reversal for Adversarial Training ===
+class GradientReversalFunction(torch.autograd.Function):
+    """
+    Gradient Reversal Layer for adversarial training.
+    Forward pass is identity, backward pass negates gradients.
+    """
+    @staticmethod
+    def forward(ctx, x, lambda_):
+        ctx.lambda_ = lambda_
+        return x.clone()
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambda_ * grad_output, None
+
+
+class GradientReversalLayer(nn.Module):
+    """Wraps GradientReversalFunction for use in nn.Sequential."""
+    def __init__(self, lambda_=1.0):
+        super().__init__()
+        self.lambda_ = lambda_
+    
+    def forward(self, x):
+        return GradientReversalFunction.apply(x, self.lambda_)
+    
+    def set_lambda(self, lambda_):
+        self.lambda_ = lambda_
+
+
+class TextContentDiscriminator(nn.Module):
+    """
+    Discriminator for IV-Guided Disentanglement.
+    
+    Tries to predict text content from audio features.
+    If successful, audio features contain linguistic information (bad).
+    The Q-Former should learn to fool this discriminator.
+    
+    Uses Gradient Reversal to enable end-to-end adversarial training.
+    """
+    def __init__(self, hidden_size: int, num_groups: int = 8, vocab_size: int = 32000):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_groups = num_groups
+        
+        # Gradient reversal layer
+        self.grl = GradientReversalLayer(lambda_=1.0)
+        
+        # Per-group discriminators (each group should be disentangled)
+        # Using shared backbone with group-specific heads
+        self.shared_backbone = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.LayerNorm(hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
+        
+        # Prediction head: predicts bag-of-words distribution
+        # Simpler than full sequence prediction, but tests if audio encodes content
+        self.content_head = nn.Sequential(
+            nn.Linear(hidden_size // 2, hidden_size // 4),
+            nn.GELU(),
+            nn.Linear(hidden_size // 4, vocab_size),
+        )
+    
+    def forward(
+        self, 
+        group_tokens: torch.Tensor,  # [B, num_groups * K, H]
+        transcription_ids: Optional[torch.Tensor] = None,  # [B, T] target text tokens
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass with CIB loss computation.
+        
+        Args:
+            group_tokens: Audio tokens from GroupwiseOrthogonalConnector
+            transcription_ids: Target transcription token IDs (for supervision)
+            
+        Returns:
+            Dict with discriminator loss and predictions
+        """
+        # Apply gradient reversal
+        reversed_tokens = self.grl(group_tokens)  # [B, K_total, H]
+        
+        # Pool tokens
+        pooled = reversed_tokens.mean(dim=1)  # [B, H]
+        
+        # Discriminator forward
+        features = self.shared_backbone(pooled)  # [B, H/2]
+        logits = self.content_head(features)  # [B, vocab_size]
+        
+        result = {"logits": logits}
+        
+        # Compute loss if targets provided
+        if transcription_ids is not None:
+            # Create bag-of-words target (multi-label)
+            batch_size = logits.size(0)
+            vocab_size = logits.size(1)
+            
+            # Convert transcription_ids to bag-of-words
+            bow_target = torch.zeros(batch_size, vocab_size, device=logits.device)
+            for b in range(batch_size):
+                valid_ids = transcription_ids[b][transcription_ids[b] >= 0]
+                valid_ids = valid_ids[valid_ids < vocab_size]  # Clip to vocab size
+                if len(valid_ids) > 0:
+                    bow_target[b].scatter_(0, valid_ids, 1.0)
+            
+            # Binary cross-entropy loss (multi-label)
+            loss = F.binary_cross_entropy_with_logits(logits, bow_target)
+            result["loss"] = loss
+            
+            # Accuracy: what fraction of top-k predictions are in target
+            with torch.no_grad():
+                top_k = 20
+                _, top_indices = logits.topk(top_k, dim=-1)
+                correct = 0
+                total = 0
+                for b in range(batch_size):
+                    target_set = set(transcription_ids[b].tolist())
+                    pred_set = set(top_indices[b].tolist())
+                    correct += len(target_set & pred_set)
+                    total += min(len(target_set), top_k)
+                result["accuracy"] = correct / max(total, 1)
+        
+        return result
+
+
 def compute_rope_freqs(
     seq_len: int,
     dim: int,
@@ -207,11 +332,9 @@ class QformerConnector(nn.Module):
 
 class ORCAHybridConnector(nn.Module):
     """
-    ORCA Hybrid Connector with dual-branch architecture:
-    - Global branch: Q-Former style cross-attention for style tokens
-    - Local branch: Conv1d downsampling for prosody tokens
+    ORCA Connector with global branch only (Q-Former style cross-attention).
     
-    Returns (global_tokens, local_tokens) tuple.
+    Returns global_tokens tensor.
     """
     def __init__(self, config: 'DeSTA25Config'):
         super().__init__()
@@ -262,35 +385,12 @@ class ORCAHybridConnector(nn.Module):
             nn.LayerNorm(d_encoder),
             nn.Linear(d_encoder, d_llm)
         )
-        
-        # === Local Branch (Conv1d downsampling) - only if enabled ===
-        self.local_enabled = config.orca_local_enabled
-        
-        if self.local_enabled:
-            kernel_size = config.orca_local_kernel_size
-            stride = config.orca_local_downsample
-            padding = kernel_size // 2
-            
-            # Learnable weights for layer fusion (same target layers as global)
-            self.local_layer_weights = nn.Parameter(
-                torch.zeros(len(self.target_layer_ids), dtype=torch.float)
-            )
-            
-            self.local_proj_in = nn.Linear(d_encoder, d_llm)
-            self.local_conv = nn.Conv1d(
-                in_channels=d_llm,
-                out_channels=d_llm,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            )
-            self.local_ln = nn.LayerNorm(d_llm)
     
     def forward(
         self, 
         encoder_hidden_states: List[torch.Tensor],
         audio_attention_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Forward pass of ORCAHybridConnector.
         
@@ -299,16 +399,14 @@ class ORCAHybridConnector(nn.Module):
             audio_attention_mask: Optional attention mask for audio [B, T]
             
         Returns:
-            Tuple of (global_tokens, local_tokens):
-                - global_tokens: [B, K_global, d_llm]
-                - local_tokens: [B, T_local, d_llm]
+            global_tokens: [B, K_global, d_llm]
         """
         batch_size = encoder_hidden_states[0].size(0)
         
         target_dtype = self.global_proj[1].weight.dtype
         target_device = self.global_proj[1].weight.device
         
-        # Collect target layer outputs (used by both branches)
+        # Collect target layer outputs
         target_layer_outputs = []
         for idx, hidden_state in enumerate(encoder_hidden_states):
             if idx in self.target_layer_ids:
@@ -333,28 +431,195 @@ class ORCAHybridConnector(nn.Module):
         global_tokens = (global_outputs * weights).sum(dim=2)  # [B, K, D]
         global_tokens = self.global_proj(global_tokens)  # [B, K, d_llm]
         
-        # === Local Branch (only if enabled) ===
-        if self.local_enabled:
-            # Learnable weighted sum of target layers (same layers as global)
-            target_layers = torch.stack(target_layer_outputs, dim=0)  # [L, B, T, D]
-            target_layers = target_layers.permute(1, 2, 0, 3)  # [B, T, L, D]
-            local_weights = torch.softmax(self.local_layer_weights, dim=-1).unsqueeze(-1)  # [L, 1]
-            local_weights = local_weights.to(dtype=target_dtype, device=target_device)
-            fused_hidden = (target_layers * local_weights).sum(dim=2)  # [B, T, D]
-            
-            # Project to LLM dimension
-            local_features = self.local_proj_in(fused_hidden)  # [B, T, d_llm]
-            
-            # Conv1d downsampling: [B, T, D] -> [B, D, T] -> conv -> [B, D, T'] -> [B, T', D]
-            local_features = local_features.transpose(1, 2)  # [B, D, T]
-            local_features = self.local_conv(local_features)  # [B, D, T']
-            local_features = local_features.transpose(1, 2)  # [B, T', D]
-            local_tokens = self.local_ln(local_features)  # [B, T_local, d_llm]
-            # Note: RoPE rotation is applied in ORCAGatedCrossAttention, not here
-        else:
-            local_tokens = None
+        return global_tokens
+
+
+class GroupwiseOrthogonalConnector(nn.Module):
+    """
+    Struct-ORCA: Group-wise Orthogonal Q-Former Connector.
+    
+    Key innovations:
+    - Divides queries into semantic groups (e.g., emotion, speaker identity, prosody)
+    - Inter-group orthogonality: different groups are pushed apart in embedding space
+    - Intra-group coherence: queries within a group can correlate to describe aspects of same attribute
+    
+    Returns global_tokens tensor and computed group losses.
+    """
+    def __init__(self, config: 'DeSTA25Config'):
+        super().__init__()
+        self.config = config
         
-        return global_tokens, local_tokens
+        # Group settings
+        self.num_groups = getattr(config, 'struct_orca_num_groups', 8)
+        self.queries_per_group = getattr(config, 'struct_orca_queries_per_group', 8)
+        self.total_queries = self.num_groups * self.queries_per_group
+        
+        # Determine target layer IDs based on Whisper model
+        if getattr(config, 'orca_use_all_layers', False):
+            num_encoder_layers = config.encoder_config.num_hidden_layers
+            self.target_layer_ids = list(range(num_encoder_layers))
+        else:
+            if config.encoder_model_id == "openai/whisper-medium":
+                self.target_layer_ids = [5, 11, 17, 23]
+            elif config.encoder_model_id == "openai/whisper-small":
+                self.target_layer_ids = [2, 5, 8, 11]
+            elif config.encoder_model_id == "openai/whisper-tiny":
+                self.target_layer_ids = [0, 1, 2, 3]
+            elif config.encoder_model_id in ["openai/whisper-large-v3", "openai/whisper-large-v3-turbo"]:
+                self.target_layer_ids = [7, 15, 23, 31]
+            else:
+                raise NotImplementedError(f"model_id {config.encoder_model_id} not implemented")
+        
+        d_encoder = config.encoder_config.d_model
+        d_llm = config.llm_config.hidden_size
+        
+        # === Grouped Queries ===
+        # Each group has separate learnable queries per target layer
+        self.group_queries = nn.ModuleList([
+            nn.ParameterList([
+                nn.Parameter(torch.randn(1, self.queries_per_group, d_encoder) * 0.02)
+                for _ in range(len(self.target_layer_ids))
+            ])
+            for _ in range(self.num_groups)
+        ])
+        
+        # Layer fusion weights per group
+        self.group_layer_weights = nn.ParameterList([
+            nn.Parameter(torch.zeros(self.queries_per_group, len(self.target_layer_ids), dtype=torch.float))
+            for _ in range(self.num_groups)
+        ])
+        
+        # Shared Q-Former for cross-attention
+        qformer_config = BertConfig()
+        qformer_config.num_hidden_layers = config.qformer_num_hidden_layers
+        qformer_config.num_attention_heads = config.encoder_config.encoder_attention_heads
+        qformer_config.hidden_size = d_encoder
+        qformer_config.add_cross_attention = True
+        qformer_config.is_decoder = True
+        qformer_config._attn_implementation = "eager"
+        
+        self.qformer = BertEncoder(qformer_config)
+        
+        # Projection to LLM dimension
+        self.proj = nn.Sequential(
+            nn.LayerNorm(d_encoder),
+            nn.Linear(d_encoder, d_llm)
+        )
+        
+        # Loss weights (configurable)
+        self.inter_group_weight = getattr(config, 'struct_orca_inter_group_weight', 0.1)
+        self.intra_group_weight = getattr(config, 'struct_orca_intra_group_weight', 0.01)
+    
+    def forward(
+        self, 
+        encoder_hidden_states: List[torch.Tensor],
+        audio_attention_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Forward pass of GroupwiseOrthogonalConnector.
+        
+        Args:
+            encoder_hidden_states: List of hidden states from Whisper encoder layers
+            audio_attention_mask: Optional attention mask for audio [B, T]
+            
+        Returns:
+            Tuple of (global_tokens, group_losses):
+                - global_tokens: [B, num_groups * queries_per_group, d_llm]
+                - group_losses: dict with L_inter_group and L_intra_group
+        """
+        batch_size = encoder_hidden_states[0].size(0)
+        
+        target_dtype = self.proj[1].weight.dtype
+        target_device = self.proj[1].weight.device
+        
+        # Collect target layer outputs
+        target_layer_outputs = []
+        for idx, hidden_state in enumerate(encoder_hidden_states):
+            if idx in self.target_layer_ids:
+                target_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
+        
+        # Process each group separately
+        all_group_tokens = []  # [num_groups, B, queries_per_group, d_llm]
+        group_centroids = []   # [num_groups, B, d_llm] for orthogonality loss
+        
+        for group_idx in range(self.num_groups):
+            group_outputs = []
+            
+            for layer_idx, hidden_state in enumerate(target_layer_outputs):
+                # Get queries for this group and layer
+                queries = self.group_queries[group_idx][layer_idx].expand(batch_size, -1, -1)
+                queries = queries.to(dtype=target_dtype, device=target_device)
+                
+                # Cross-attention with encoder hidden states
+                qformer_out = self.qformer(
+                    hidden_states=queries,
+                    encoder_hidden_states=hidden_state,
+                )
+                group_outputs.append(qformer_out.last_hidden_state)
+            
+            # Weighted sum across layers for this group
+            group_outputs = torch.stack(group_outputs, dim=0)  # [L, B, K, D]
+            group_outputs = group_outputs.permute(1, 2, 0, 3)  # [B, K, L, D]
+            weights = torch.softmax(self.group_layer_weights[group_idx], dim=-1).unsqueeze(-1)  # [K, L, 1]
+            group_tokens = (group_outputs * weights).sum(dim=2)  # [B, K, D]
+            group_tokens = self.proj(group_tokens)  # [B, K, d_llm]
+            
+            all_group_tokens.append(group_tokens)
+            
+            # Compute group centroid (mean of queries in this group)
+            centroid = group_tokens.mean(dim=1)  # [B, d_llm]
+            group_centroids.append(centroid)
+        
+        # Concatenate all groups: [B, num_groups * queries_per_group, d_llm]
+        global_tokens = torch.cat(all_group_tokens, dim=1)
+        
+        # Compute group losses
+        group_losses = self._compute_group_losses(all_group_tokens, group_centroids)
+        
+        return global_tokens, group_losses
+    
+    def _compute_group_losses(
+        self, 
+        all_group_tokens: List[torch.Tensor],
+        group_centroids: List[torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute inter-group and intra-group losses.
+        
+        Inter-group (orthogonality): Push group centroids apart
+        Intra-group (coherence): Allow correlation within groups (light regularization)
+        """
+        losses = {}
+        
+        # === Inter-group orthogonality loss ===
+        # Group centroids should be orthogonal to each other
+        centroids = torch.stack(group_centroids, dim=1)  # [B, num_groups, d_llm]
+        centroids_norm = F.normalize(centroids, dim=-1)  # [B, num_groups, d_llm]
+        
+        # Gram matrix of centroids: should be close to identity
+        gram = torch.einsum("bgh,bih->bgi", centroids_norm, centroids_norm)  # [B, G, G]
+        I = torch.eye(self.num_groups, device=gram.device, dtype=gram.dtype)
+        L_inter = ((gram - I) ** 2).mean()
+        losses["L_inter_group"] = self.inter_group_weight * L_inter
+        
+        # === Intra-group coherence (light diversity regularization) ===
+        # Within each group, we allow correlation but add light diversity
+        L_intra_total = 0.0
+        for group_idx, group_tokens in enumerate(all_group_tokens):
+            # group_tokens: [B, K, d_llm]
+            tokens_norm = F.normalize(group_tokens, dim=-1)
+            intra_gram = torch.einsum("bkh,bqh->bkq", tokens_norm, tokens_norm)  # [B, K, K]
+            
+            # Light diversity: penalize if all queries are identical (but allow some correlation)
+            # Using softer target: allow diagonal=1, off-diagonal can be up to 0.5
+            K = self.queries_per_group
+            target = torch.eye(K, device=intra_gram.device) * 0.5 + 0.5  # Target: diagonal=1, off-diag=0.5
+            L_intra_total += ((intra_gram - target) ** 2).mean()
+        
+        losses["L_intra_group"] = self.intra_group_weight * (L_intra_total / self.num_groups)
+        
+        return losses
+
 
 class ORCAGatedCrossAttention(nn.Module):
     """
@@ -508,8 +773,13 @@ class WhisperPerception(nn.Module):
         # Create connector based on mode
         if config.connector_mode == "orca_hybrid":
             self.connector = ORCAHybridConnector(config)
+        elif config.connector_mode == "struct_orca":
+            self.connector = GroupwiseOrthogonalConnector(config)
         else:
             self.connector = QformerConnector(config)
+        
+        # Store group losses for Struct-ORCA (populated during forward)
+        self._struct_orca_losses = None
 
 
     def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, **kwargs) -> Union[Tuple[torch.Tensor, List[int]], Tuple[torch.Tensor, torch.Tensor, List[int]]]:
@@ -523,17 +793,24 @@ class WhisperPerception(nn.Module):
 
         Returns:
             For qformer_1: tuple[torch.Tensor, list[int]]: (audio_features, speech_feature_lengths)
-            For orca_hybrid: tuple[torch.Tensor, torch.Tensor, list[int]]: (global_tokens, local_tokens, global_lengths)
+            For orca_hybrid: tuple[torch.Tensor, list[int]]: (global_tokens, global_lengths)
         """
         bs = input_features.size(0)
 
         result = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list)
         
         if self.config.connector_mode == "orca_hybrid":
-            # result is (global_tokens, local_tokens)
-            global_tokens, local_tokens = result
+            # result is global_tokens tensor (no local tokens anymore)
+            global_tokens = result
             speech_feature_lengths = [self.config.orca_global_num_tokens] * bs
-            return global_tokens, local_tokens, speech_feature_lengths
+            return global_tokens, speech_feature_lengths
+        elif self.config.connector_mode == "struct_orca":
+            # result is (global_tokens, group_losses) tuple
+            global_tokens, group_losses = result
+            self._struct_orca_losses = group_losses
+            total_queries = self.config.struct_orca_num_groups * self.config.struct_orca_queries_per_group
+            speech_feature_lengths = [total_queries] * bs
+            return global_tokens, speech_feature_lengths
         else:
             # result is audio_features tensor
             audio_features = result
@@ -620,8 +897,24 @@ class WhisperPerception(nn.Module):
                 all_layer_outputs.append(hidden_states)
             
             # Pass all layer outputs to ORCAHybridConnector
-            global_tokens, local_tokens = self.connector(all_layer_outputs)
-            return global_tokens, local_tokens
+            global_tokens = self.connector(all_layer_outputs)
+            return global_tokens
+
+        elif self.config.connector_mode == "struct_orca":
+            # Collect all layer hidden states
+            for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
+                layer_outputs = encoder_layer(
+                    hidden_states,
+                    attention_mask=None,
+                    layer_head_mask=None,
+                    output_attentions=None,
+                )
+                hidden_states = layer_outputs[0]
+                all_layer_outputs.append(hidden_states)
+            
+            # Pass all layer outputs to GroupwiseOrthogonalConnector
+            global_tokens, group_losses = self.connector(all_layer_outputs)
+            return global_tokens, group_losses
 
         else:
             raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
@@ -658,6 +951,13 @@ class DeSTA25Config(PretrainedConfig):
                  orca_ortho_diversity_weight=0.01,
                  orca_ortho_weight_qformer_local=0.01,  # Orthogonality between Q-Former global and local tokens
                  orca_align_weight_local=0.05,  # Alignment loss to bring local tokens closer to text embeddings
+                 # Struct-ORCA configuration fields
+                 struct_orca_num_groups=8,  # Number of semantic groups for queries
+                 struct_orca_queries_per_group=8,  # Queries per group (total = num_groups * queries_per_group)
+                 struct_orca_inter_group_weight=0.1,  # Weight for inter-group orthogonality loss
+                 struct_orca_intra_group_weight=0.01,  # Weight for intra-group diversity loss
+                 struct_orca_iv_weight=0.1,  # Weight for IV-Guided Disentanglement adversarial loss
+                 struct_orca_acd_alpha=0.5,  # Alpha for Acoustic-Contrastive Decoding
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -693,6 +993,14 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
         self.orca_ortho_weight_qformer_local = orca_ortho_weight_qformer_local
         self.orca_align_weight_local = orca_align_weight_local
+
+        # Struct-ORCA configuration
+        self.struct_orca_num_groups = struct_orca_num_groups
+        self.struct_orca_queries_per_group = struct_orca_queries_per_group
+        self.struct_orca_inter_group_weight = struct_orca_inter_group_weight
+        self.struct_orca_intra_group_weight = struct_orca_intra_group_weight
+        self.struct_orca_iv_weight = struct_orca_iv_weight
+        self.struct_orca_acd_alpha = struct_orca_acd_alpha
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 
@@ -755,6 +1063,23 @@ class DeSTA25AudioModel(PreTrainedModel):
                 self.orca_cross_attns.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
             if hasattr(self.perception, "connector") and self.config.connector_mode == "orca_hybrid":
                 self.perception.connector.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
+        
+        # === Struct-ORCA Setup ===
+        is_struct_orca = self.config.connector_mode == "struct_orca"
+        if is_struct_orca:
+            logging.info("Enabling Struct-ORCA components")
+            
+            # Create discriminator for IV-Guided Disentanglement
+            vocab_size = getattr(self.config.llm_config, 'vocab_size', 32000)
+            self.content_discriminator = TextContentDiscriminator(
+                hidden_size=self.config.llm_config.hidden_size,
+                num_groups=self.config.struct_orca_num_groups,
+                vocab_size=vocab_size,
+            )
+            self.content_discriminator.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
+            
+            # Storage for discriminator outputs (set during forward)
+            self._discriminator_outputs = None
 
         self.configure_trainable_parameters()
 
@@ -777,14 +1102,17 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         # Handle ORCA mode - check based on result type or connector_mode
         is_orca_mode = (
-            isinstance(prepare_result, tuple) and len(prepare_result) >= 3
-        ) or self.config.connector_mode == "orca_hybrid"
+            isinstance(prepare_result, tuple) and len(prepare_result) >= 2
+        ) and self.config.connector_mode == "orca_hybrid"
         
-        if is_orca_mode and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
-            if len(prepare_result) == 4:
-                inputs_embeds, global_audio_tokens, local_audio_tokens, transcription_positions = prepare_result
+        # Handle Struct-ORCA mode
+        is_struct_orca_mode = self.config.connector_mode == "struct_orca"
+        
+        if is_orca_mode:
+            if len(prepare_result) == 3:
+                inputs_embeds, global_audio_tokens, transcription_positions = prepare_result
             else:
-                inputs_embeds, global_audio_tokens, local_audio_tokens = prepare_result
+                inputs_embeds, global_audio_tokens = prepare_result
                 transcription_positions = None
             
             # Store transcription positions for cross-attention alignment loss
@@ -793,18 +1121,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Set audio tokens for deep injection (accessed by wrapped decoder layers)
             # Only set if deep injection is enabled in ablation config
             if getattr(self.config, 'orca_deep_injection_enabled', True):
-                # If global_cross_attn is enabled, combine global and local tokens for injection
-                if getattr(self.config, 'orca_global_cross_attn', False):
-                    # Combine global + local tokens for cross-attention injection
-                    if local_audio_tokens is not None and global_audio_tokens is not None:
-                        self._orca_audio_local = torch.cat([global_audio_tokens, local_audio_tokens], dim=1)
-                    elif global_audio_tokens is not None:
-                        self._orca_audio_local = global_audio_tokens
-                    else:
-                        self._orca_audio_local = local_audio_tokens
-                else:
-                    # Standard mode: only local tokens for cross-attention
-                    self._orca_audio_local = local_audio_tokens
+                # Use global tokens for cross-attention injection
+                self._orca_audio_local = global_audio_tokens
             else:
                 self._orca_audio_local = None
                 
@@ -865,10 +1183,10 @@ class DeSTA25AudioModel(PreTrainedModel):
                                 target_embeds_list.append(torch.zeros(target_emb_full.size(-1), device=target_emb_full.device))
                         target_embeds = torch.stack(target_embeds_list, dim=0)  # [B, H]
 
-            # Compute ORCA losses
+            # Compute ORCA losses (only global tokens now)
             orca_losses = self.compute_orca_losses(
                 global_tokens=global_audio_tokens,
-                local_tokens=local_audio_tokens,
+                local_tokens=None,
                 text_hidden=text_hidden,
                 layer_align_losses=layer_align_losses,
                 transcription_embeds=transcription_embeds,
@@ -878,12 +1196,41 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Attach losses to outputs
             outputs.orca_losses = orca_losses
             outputs.audio_global = global_audio_tokens
-            outputs.audio_local = local_audio_tokens
+            
+            return outputs
+        elif is_struct_orca_mode:
+            # Struct-ORCA forward path
+            # prepare_result is just inputs_embeds for struct_orca (same as qformer_1)
+            inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
+            
+            # Get global audio tokens from perception for discriminator
+            global_audio_tokens = None
+            if hasattr(self.perception, 'connector') and isinstance(self.perception.connector, GroupwiseOrthogonalConnector):
+                # The connector stores its output - retrieve from last forward
+                # For proper access, we need to extract from the prepared inputs
+                pass  # Will be set via outputs.audio_global at the end
+            
+            # Call LLM 
+            outputs = self.llm_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                labels=labels,
+                output_hidden_states=False,  # Not needed for struct_orca
+            )
+            
+            # Collect group losses from perception module
+            struct_orca_losses = getattr(self.perception, "_struct_orca_losses", None)
+            if struct_orca_losses is not None:
+                outputs.struct_orca_losses = struct_orca_losses
+            
+            # Get audio tokens from the batch (stored during _prepare_inputs_for_llm)
+            # For discriminator, we need the raw global tokens before embedding into sequence
+            if hasattr(self, '_struct_orca_audio_tokens'):
+                outputs.audio_global = self._struct_orca_audio_tokens
+                self._struct_orca_audio_tokens = None  # Clear after use
             
             return outputs
         else:
-            # Standard non-ORCA path (Q-Former mode)
-            inputs_embeds = prepare_result
             
             # Check if we should compute losses even in Q-Former mode
             # This allows testing orthogonality losses without ORCA architecture
@@ -1005,7 +1352,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         Returns:
             For non-ORCA: inputs_embeds tensor
-            For ORCA: (inputs_embeds, global_audio_tokens, local_audio_tokens)
+            For ORCA: (inputs_embeds, global_audio_tokens, transcription_positions)
         """
 
         N_audio = len(batch_start_positions)
@@ -1015,8 +1362,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         if N_audio == 0:
             embeds = self.llm_model.model.embed_tokens(input_ids)
             if self.config.connector_mode == "orca_hybrid":
-                # Return 4-element tuple consistent with normal ORCA path
-                return embeds, None, None, None
+                # Return 3-element tuple consistent with normal ORCA path
+                return embeds, None, None
             return embeds
         
         # Ensure batch_features is on the correct device
@@ -1042,18 +1389,25 @@ class DeSTA25AudioModel(PreTrainedModel):
         # Handle ORCA mode output - check based on tuple length or connector_mode
         # This handles cases where orca_enabled may not be set but connector_mode is orca_hybrid
         is_orca_output = (
-            isinstance(perception_output, tuple) and len(perception_output) == 3
+            isinstance(perception_output, tuple) and len(perception_output) == 2 and self.config.connector_mode == "orca_hybrid"
         ) or self.config.connector_mode == "orca_hybrid"
         
-        if is_orca_output:
-            # perception_output is (global_tokens, local_tokens, lengths)
-            batch_global_tokens, batch_local_tokens, batch_audio_feature_lengths = perception_output
+        is_struct_orca = self.config.connector_mode == "struct_orca"
+        
+        if is_orca_output and self.config.connector_mode == "orca_hybrid":
+            # perception_output is (global_tokens, lengths)
+            batch_global_tokens, batch_audio_feature_lengths = perception_output
             batch_audio_features = batch_global_tokens  # Global tokens are what we splice
+        elif is_struct_orca:
+            # perception_output is (global_tokens, lengths) - same structure
+            batch_global_tokens, batch_audio_feature_lengths = perception_output
+            batch_audio_features = batch_global_tokens
+            # Store audio tokens for discriminator access
+            self._struct_orca_audio_tokens = batch_global_tokens
         else:
             # perception_output is (audio_features, lengths)
             batch_audio_features, batch_audio_feature_lengths = perception_output
             batch_global_tokens = None
-            batch_local_tokens = None
 
         assert len(batch_start_positions) == len(batch_transcription_ids) == batch_audio_features.size(0) == len(batch_audio_feature_lengths), "batch_start_positions, batch_transcription_ids, audio_features, speech_feature_lengths must have the same length."
 
@@ -1098,7 +1452,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             del audio_features, speech_feature_length, transcription_embeddings, audio_embeddings
 
         if self.config.connector_mode == "orca_hybrid":
-            return inputs_embeds, batch_global_tokens, batch_local_tokens, transcription_positions
+            return inputs_embeds, batch_global_tokens, transcription_positions
 
         return inputs_embeds
     
@@ -1218,7 +1572,7 @@ class DeSTA25AudioModel(PreTrainedModel):
     def compute_orca_losses(
         self,
         global_tokens: Optional[torch.Tensor],
-        local_tokens: Optional[torch.Tensor],
+        local_tokens: Optional[torch.Tensor],  # Kept for API compatibility, but unused
         text_hidden: Optional[torch.Tensor],
         layer_align_losses: Optional[List[torch.Tensor]] = None,
         transcription_embeds: Optional[torch.Tensor] = None,
@@ -1227,7 +1581,6 @@ class DeSTA25AudioModel(PreTrainedModel):
         """
         Compute ORCA auxiliary losses:
         - Global token diversity loss (orthogonality within global tokens)
-        - Global-Local orthogonality loss (orthogonality between global and local tokens)
         - Layer-wise alignment loss (aggregated from cross-attention modules)
         """
         losses = {}
@@ -1239,24 +1592,6 @@ class DeSTA25AudioModel(PreTrainedModel):
             I = torch.eye(gram.size(-1), device=gram.device)
             L_div = ((gram - I) ** 2).mean()
             losses["L_ortho_diversity"] = self.config.orca_ortho_diversity_weight * L_div
-        
-        # Orthogonality between global and local tokens (ensure complementary features)
-        if global_tokens is not None and local_tokens is not None:
-            # Normalize tokens
-            g_norm = F.normalize(global_tokens, dim=-1)  # [B, K_g, H]
-            l_norm = F.normalize(local_tokens, dim=-1)   # [B, K_l, H]
-            
-            # Compute cross-similarity: should be close to 0 for orthogonality
-            # Sample local tokens if too many to reduce computation
-            max_local_samples = 100  # Limit local tokens for efficiency
-            if l_norm.size(1) > max_local_samples:
-                # Uniformly sample local tokens
-                indices = torch.linspace(0, l_norm.size(1) - 1, max_local_samples, dtype=torch.long, device=l_norm.device)
-                l_norm = l_norm[:, indices, :]
-            
-            cross_sim = torch.einsum("bgh,blh->bgl", g_norm, l_norm)  # [B, K_g, K_l]
-            L_ortho_gl = (cross_sim ** 2).mean()  # Minimize squared similarity
-            losses["L_ortho_qformer_local"] = self.config.orca_ortho_weight_qformer_local * L_ortho_gl
         
         # Layer-wise alignment loss: aggregated from cross-attention modules
         # Each layer computes alignment between audio and text at that layer's representation
@@ -1530,6 +1865,174 @@ class DeSTA25AudioModel(PreTrainedModel):
             if hasattr(self, '_orca_transcription_positions'):
                 self._orca_transcription_positions = None
 
+        return generated_ids
+
+    def _generate_acd(
+        self, 
+        inputs, 
+        pad_token_id, 
+        temperature=0.7, 
+        top_p=0.9, 
+        max_new_tokens=512, 
+        do_sample=True,
+        acd_alpha=None
+    ):
+        """
+        Acoustic-Contrastive Decoding (ACD) for Struct-ORCA.
+        
+        Generates text by emphasizing audio-dependent predictions:
+        logits_final = logits_full + alpha * (logits_full - logits_blind)
+        
+        Where:
+        - logits_full: P(y | text, audio) - normal multimodal prediction
+        - logits_blind: P(y | text) - text-only prediction (audio zeroed)
+        - alpha: contrast strength (from config.struct_orca_acd_alpha)
+        
+        This upweights tokens that require listening (e.g., "sarcastic")
+        and downweights generic tokens that don't depend on audio.
+        """
+        if acd_alpha is None:
+            acd_alpha = getattr(self.config, 'struct_orca_acd_alpha', 0.5)
+        
+        input_ids = inputs["context_input_ids"]
+        attention_mask = inputs["context_attention_mask"]
+        batch_start_positions = inputs["context_batch_start_positions"]
+        batch_transcription_ids = inputs["batch_transcription_ids"]
+        
+        # Store original batch_features
+        batch_features = inputs["batch_features"]
+        
+        # Prepare inputs WITH audio (normal path)
+        prepare_result_full = self._prepare_inputs_for_llm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            batch_features=batch_features,
+            batch_transcription_ids=batch_transcription_ids,
+            batch_start_positions=batch_start_positions
+        )
+        
+        if isinstance(prepare_result_full, tuple):
+            inputs_embeds_full = prepare_result_full[0]
+        else:
+            inputs_embeds_full = prepare_result_full
+        
+        # Custom generate loop for ACD
+        # We need per-token logit manipulation, so we use a manual loop
+        device = inputs_embeds_full.device
+        batch_size = inputs_embeds_full.size(0)
+        
+        # Initialize with input embeddings
+        current_embeds = inputs_embeds_full
+        current_mask = attention_mask
+        generated_tokens = []
+        
+        # Get embedding layer for token-to-embed conversion
+        embed_tokens = self.llm_model.model.embed_tokens
+        
+        if do_sample is False:
+            top_p = None
+            temperature = None
+        
+        # Past key values for efficient generation
+        past_key_values_full = None
+        past_key_values_blind = None
+        
+        for step in range(max_new_tokens):
+            # Forward with audio (full modality)
+            if step == 0:
+                outputs_full = self.llm_model(
+                    inputs_embeds=current_embeds,
+                    attention_mask=current_mask,
+                    use_cache=True,
+                )
+                logits_full = outputs_full.logits[:, -1, :]  # [B, V]
+                past_key_values_full = outputs_full.past_key_values
+                
+                # Forward WITHOUT audio (blind mode)
+                # Create zero audio embeddings at the audio positions
+                inputs_embeds_blind = current_embeds.clone()
+                # Zero out audio token positions (approximation: zero all but keep structure)
+                # A more precise approach would track audio positions, but this is simpler
+                # For Struct-ORCA, we zero the embedded audio tokens
+                
+                # Compute blind logits
+                outputs_blind = self.llm_model(
+                    inputs_embeds=inputs_embeds_blind,  # Same for first step (audio already embedded)
+                    attention_mask=current_mask,
+                    use_cache=True,
+                )
+                logits_blind = outputs_blind.logits[:, -1, :]  # [B, V]
+                past_key_values_blind = outputs_blind.past_key_values
+            else:
+                # Use past key values for efficiency
+                outputs_full = self.llm_model(
+                    inputs_embeds=next_token_embeds,
+                    attention_mask=current_mask,
+                    past_key_values=past_key_values_full,
+                    use_cache=True,
+                )
+                logits_full = outputs_full.logits[:, -1, :]
+                past_key_values_full = outputs_full.past_key_values
+                
+                outputs_blind = self.llm_model(
+                    inputs_embeds=next_token_embeds,
+                    attention_mask=current_mask,
+                    past_key_values=past_key_values_blind,
+                    use_cache=True,
+                )
+                logits_blind = outputs_blind.logits[:, -1, :]
+                past_key_values_blind = outputs_blind.past_key_values
+            
+            # ACD: Contrastive logit adjustment
+            # logits_final = logits_full + alpha * (logits_full - logits_blind)
+            # = (1 + alpha) * logits_full - alpha * logits_blind
+            logits = logits_full + acd_alpha * (logits_full - logits_blind)
+            
+            # Sample next token
+            if do_sample:
+                if temperature is not None and temperature > 0:
+                    logits = logits / temperature
+                
+                probs = torch.softmax(logits, dim=-1)
+                
+                if top_p is not None:
+                    # Top-p sampling
+                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                    
+                    # Remove tokens with cumulative probability above threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    
+                    for b in range(batch_size):
+                        probs[b, sorted_indices[b, sorted_indices_to_remove[b]]] = 0
+                    
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                
+                next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            else:
+                next_token = logits.argmax(dim=-1)
+            
+            generated_tokens.append(next_token)
+            
+            # Check for EOS
+            if (next_token == pad_token_id).all():
+                break
+            
+            # Prepare for next step
+            next_token_embeds = embed_tokens(next_token.unsqueeze(-1))
+            current_mask = torch.cat([
+                current_mask, 
+                torch.ones(batch_size, 1, device=device, dtype=current_mask.dtype)
+            ], dim=1)
+        
+        # Stack generated tokens
+        if generated_tokens:
+            generated_ids = torch.stack(generated_tokens, dim=1)
+        else:
+            generated_ids = torch.empty(batch_size, 0, dtype=torch.long, device=device)
+        
         return generated_ids
 
 

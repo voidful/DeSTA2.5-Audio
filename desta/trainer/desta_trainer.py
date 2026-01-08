@@ -70,8 +70,11 @@ class DeSTA25Trainer(Trainer):
         
         orca_total = 0.0
         if config is not None:
-            # Check for ORCA mode using connector_mode (more reliable than orca_enabled)
-            is_orca = getattr(config, "connector_mode", "") == "orca_hybrid"
+            # Check for ORCA mode using connector_mode
+            connector_mode = getattr(config, "connector_mode", "")
+            is_orca = connector_mode == "orca_hybrid"
+            is_struct_orca = connector_mode == "struct_orca"
+            
             if is_orca:
                 orca_losses = getattr(outputs, "orca_losses", None)
                 if orca_losses is not None:
@@ -85,6 +88,43 @@ class DeSTA25Trainer(Trainer):
                     # Log total ORCA loss
                     if orca_total > 0:
                         log_dict["train/orca_total"] = orca_total
+            
+            elif is_struct_orca:
+                # Struct-ORCA: collect group losses from perception module
+                struct_orca_losses = getattr(actual_model.perception, "_struct_orca_losses", None)
+                if struct_orca_losses is not None:
+                    for name, l in struct_orca_losses.items():
+                        if l is not None and isinstance(l, torch.Tensor):
+                            total_loss = total_loss + l
+                            orca_total += l.item()
+                            log_dict[f"train/{name}"] = l.item()
+                
+                # Compute discriminator loss for IV-Guided Disentanglement
+                discriminator = getattr(actual_model, "content_discriminator", None)
+                if discriminator is not None and hasattr(outputs, "audio_global"):
+                    audio_tokens = outputs.audio_global
+                    # Get transcription IDs from inputs
+                    trans_ids = inputs.get("batch_transcription_ids", None)
+                    if audio_tokens is not None and trans_ids is not None and len(trans_ids) > 0:
+                        # Stack transcription IDs (pad to same length)
+                        max_len = max(t.size(-1) for t in trans_ids)
+                        padded_trans = torch.full((len(trans_ids), max_len), -1, device=audio_tokens.device)
+                        for i, t in enumerate(trans_ids):
+                            t_squeezed = t.squeeze(0) if t.dim() > 1 else t
+                            padded_trans[i, :t_squeezed.size(0)] = t_squeezed
+                        
+                        # Discriminator forward with gradient reversal
+                        disc_output = discriminator(audio_tokens, padded_trans)
+                        if "loss" in disc_output:
+                            iv_weight = getattr(config, "struct_orca_iv_weight", 0.1)
+                            disc_loss = iv_weight * disc_output["loss"]
+                            total_loss = total_loss + disc_loss
+                            orca_total += disc_loss.item()
+                            log_dict["train/L_iv_discriminator"] = disc_output["loss"].item()
+                            log_dict["train/disc_accuracy"] = disc_output.get("accuracy", 0)
+                    
+                    if orca_total > 0:
+                        log_dict["train/struct_orca_total"] = orca_total
         
         # Log total loss and loss breakdown
         log_dict["train/loss"] = total_loss.item()
