@@ -25,6 +25,7 @@ from datetime import datetime
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 from datasets import load_dataset
 
@@ -465,13 +466,223 @@ def run_observation3_entanglement(audio_tokens, labels, label_mappings, output_d
         else:
             print("  ✓ GOOD SEPARATION: Audio tokens cluster by task type")
     
+def run_single_model_analysis(model, model_name, dataset, args, device):
+    """Run all observations for a single model."""
+    # Extract representations
+    data = extract_representations_from_mmau(
+        model, dataset, max_samples=args.max_samples, device=device
+    )
+    
+    print(f"\nExtracted {len(data['audio_tokens'])} samples")
+    print(f"Audio token shape: {data['audio_tokens'].shape}")
+    
+    results = {
+        "model_id": model_name,
+        "num_samples": len(data['audio_tokens']),
+    }
+    
+    # Observation 1
+    results["observation1_feature_collapse"] = run_observation1_feature_collapse(
+        data['audio_tokens'], args.output_dir
+    )
+    
+    # Observation 2
+    results["observation2_content_redundancy"] = run_observation2_content_redundancy(
+        data['audio_tokens'], 
+        data['question_embeddings'], 
+        data['answer_embeddings'],
+        args.output_dir, 
+        device
+    )
+    
+    # Observation 3
+    results["observation3_entanglement"] = run_observation3_entanglement(
+        data['audio_tokens'], data['labels'], data['label_mappings'], args.output_dir
+    )
+    
+    return results, data
+
+
+def run_comparison_analysis(model1, model2, name1, name2, dataset, args, device):
+    """Run comparison analysis for two models with side-by-side visualizations."""
+    from visualizations import plot_tsne_comparison, plot_pca_variance_curve, plot_metrics_comparison_table
+    
+    figures_dir = os.path.join(args.output_dir, "figures")
+    os.makedirs(figures_dir, exist_ok=True)
+    
+    # Extract representations for both models
+    print(f"\n{'='*60}")
+    print(f"Extracting representations for: {name1}")
+    print(f"{'='*60}")
+    data1 = extract_representations_from_mmau(model1, dataset, args.max_samples, device)
+    
+    print(f"\n{'='*60}")
+    print(f"Extracting representations for: {name2}")
+    print(f"{'='*60}")
+    data2 = extract_representations_from_mmau(model2, dataset, args.max_samples, device)
+    
+    results = {
+        "comparison_mode": True,
+        "models": [name1, name2],
+        "dataset": DATASET_ID,
+        "split": args.split,
+        "num_samples": len(data1['audio_tokens']),
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # ========== Observation 1: PCA Comparison ==========
+    print("\n" + "="*60)
+    print("OBSERVATION 1: Feature Collapse Comparison")
+    print("="*60)
+    
+    from feature_analysis import compute_pca_explained_variance, compute_effective_dimensionality
+    
+    audio1_flat = data1['audio_tokens'].reshape(data1['audio_tokens'].shape[0], -1)
+    audio2_flat = data2['audio_tokens'].reshape(data2['audio_tokens'].shape[0], -1)
+    
+    var1, cumvar1 = compute_pca_explained_variance(audio1_flat)
+    var2, cumvar2 = compute_pca_explained_variance(audio2_flat)
+    
+    eff_dim1 = compute_effective_dimensionality(audio1_flat)
+    eff_dim2 = compute_effective_dimensionality(audio2_flat)
+    
+    results["observation1"] = {
+        name1: {
+            "effective_dim": float(eff_dim1),
+            "pc1": float(var1[0]),
+            "cumulative_3": float(cumvar1[2]),
+            "cumulative_variance": cumvar1[:20].tolist()
+        },
+        name2: {
+            "effective_dim": float(eff_dim2),
+            "pc1": float(var2[0]),
+            "cumulative_3": float(cumvar2[2]),
+            "cumulative_variance": cumvar2[:20].tolist()
+        }
+    }
+    
+    print(f"\n{name1}:")
+    print(f"  Effective Dim: {eff_dim1:.2f}, PC1: {var1[0]:.2%}, PC1-3: {cumvar1[2]:.2%}")
+    print(f"\n{name2}:")
+    print(f"  Effective Dim: {eff_dim2:.2f}, PC1: {var2[0]:.2%}, PC1-3: {cumvar2[2]:.2%}")
+    
+    # Plot comparison PCA
+    plot_pca_variance_curve(
+        {name1: cumvar1[:20], name2: cumvar2[:20]},
+        save_path=os.path.join(figures_dir, "comparison_pca_variance.png")
+    )
+    
+    # ========== Observation 2: Token Orthogonality Comparison ==========
+    print("\n" + "="*60)
+    print("OBSERVATION 2: Token Orthogonality Comparison")
+    print("="*60)
+    
+    def compute_token_stats(audio_tokens):
+        n_samples, n_tokens = audio_tokens.shape[:2]
+        avg_sims = []
+        for i in range(min(n_samples, 500)):
+            tokens = audio_tokens[i]
+            norms = np.linalg.norm(tokens, axis=1, keepdims=True) + 1e-8
+            tokens_norm = tokens / norms
+            sim = tokens_norm @ tokens_norm.T
+            upper = sim[np.triu_indices(n_tokens, k=1)]
+            avg_sims.append(np.mean(np.abs(upper)))
+        return float(np.mean(avg_sims))
+    
+    sim1 = compute_token_stats(data1['audio_tokens'])
+    sim2 = compute_token_stats(data2['audio_tokens'])
+    
+    results["observation2"] = {
+        name1: {"avg_token_cosine_sim": sim1},
+        name2: {"avg_token_cosine_sim": sim2}
+    }
+    
+    print(f"\n{name1}: Avg Token Cosine Sim = {sim1:.4f}")
+    print(f"{name2}: Avg Token Cosine Sim = {sim2:.4f}")
+    
+    if sim2 < sim1:
+        print(f"\n✓ {name2} shows {(1 - sim2/sim1)*100:.1f}% reduction in token correlation")
+    
+    # ========== Observation 3: t-SNE Comparison ==========
+    print("\n" + "="*60)
+    print("OBSERVATION 3: Entanglement Comparison (t-SNE)")
+    print("="*60)
+    
+    from sklearn.metrics import silhouette_score
+    from sklearn.manifold import TSNE
+    
+    # Use same subset for fair comparison
+    n = min(len(data1['audio_tokens']), len(data2['audio_tokens']), 1000)
+    labels = data1['labels']['task'][:n]
+    label_names = {v: k for k, v in data1['label_mappings']['task'].items()}
+    
+    # t-SNE for both
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+    
+    emb1 = tsne.fit_transform(audio1_flat[:n])
+    sil1 = silhouette_score(emb1, labels)
+    
+    emb2 = tsne.fit_transform(audio2_flat[:n])
+    sil2 = silhouette_score(emb2, labels)
+    
+    results["observation3"] = {
+        name1: {"task_silhouette": float(sil1)},
+        name2: {"task_silhouette": float(sil2)}
+    }
+    
+    print(f"\n{name1}: Task Silhouette = {sil1:.4f}")
+    print(f"{name2}: Task Silhouette = {sil2:.4f}")
+    
+    if sil2 > sil1:
+        print(f"\n✓ {name2} shows {(sil2 - sil1):.3f} improvement in task separation")
+    
+    # Create side-by-side t-SNE figure
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    unique_labels = np.unique(labels)
+    colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
+    
+    for ax, emb, name, sil in [(axes[0], emb1, name1, sil1), (axes[1], emb2, name2, sil2)]:
+        for i, label in enumerate(unique_labels):
+            mask = labels == label
+            display_name = label_names.get(label, str(label))
+            ax.scatter(emb[mask, 0], emb[mask, 1], c=[colors[i]], label=display_name,
+                      alpha=0.7, s=25, edgecolors='white', linewidth=0.3)
+        
+        ax.set_title(f"{name}\nSilhouette: {sil:.3f}", fontsize=12, fontweight='bold')
+        ax.set_xlabel("t-SNE Dim 1")
+        ax.set_ylabel("t-SNE Dim 2")
+        ax.legend(title="Task Type", loc='upper right', fontsize=9)
+    
+    plt.suptitle("Audio Representation t-SNE by Task Type: Model Comparison", fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(figures_dir, "comparison_tsne_task.png"), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # ========== Summary Metrics Table ==========
+    print("\n" + "="*60)
+    print("COMPARISON SUMMARY")
+    print("="*60)
+    
+    summary_table = f"""
+    | Metric                    | {name1:<20} | {name2:<20} | Better |
+    |---------------------------|{'-'*22}|{'-'*22}|--------|
+    | Effective Dim             | {eff_dim1:<20.2f} | {eff_dim2:<20.2f} | {'→' if eff_dim2 > eff_dim1 else '←'} |
+    | PC1 Variance              | {var1[0]*100:<19.2f}% | {var2[0]*100:<19.2f}% | {'→' if var2[0] < var1[0] else '←'} |
+    | Token Cosine Sim          | {sim1:<20.4f} | {sim2:<20.4f} | {'→' if sim2 < sim1 else '←'} |
+    | Task Silhouette           | {sil1:<20.4f} | {sil2:<20.4f} | {'→' if sil2 > sil1 else '←'} |
+    """
+    print(summary_table)
+    
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run Observations on MMAU Dataset")
-    parser.add_argument("--model_id", type=str, default="voidful/QAQ_4b",
-                        help="Model ID or checkpoint path")
+    parser.add_argument("--model_id", type=str, nargs='+', default=["voidful/QAQ_4b"],
+                        help="Model ID(s). Provide two for comparison mode.")
+    parser.add_argument("--model_names", type=str, nargs='+', default=None,
+                        help="Display names for models (optional, defaults to model IDs)")
     parser.add_argument("--split", type=str, default=DEFAULT_SPLIT,
                         help="Dataset split (test_mini, test)")
     parser.add_argument("--max_samples", type=int, default=1000,
@@ -489,99 +700,99 @@ def main():
         device = args.device
     
     print(f"Using device: {device}")
-    
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Load model
-    print(f"\n{'='*60}")
-    print(f"Loading model: {args.model_id}")
-    print(f"{'='*60}")
-    
-    from desta import DeSTA25AudioModel
-    model = DeSTA25AudioModel.from_pretrained(args.model_id)
-    model.to(device)
-    model.eval()
-    
-    # Print model config info
-    print(f"\nModel Configuration:")
-    print(f"  Connector mode: {model.config.connector_mode}")
-    if model.config.connector_mode == "struct_orca":
-        print(f"  Num groups: {model.config.struct_orca_num_groups}")
-        print(f"  Queries per group: {model.config.struct_orca_queries_per_group}")
-    
-    # Load dataset
+    # Load dataset once
     print(f"\n{'='*60}")
     print(f"Loading MMAU dataset: {DATASET_ID} [{args.split}]")
     print(f"{'='*60}")
-    
     dataset = load_dataset(DATASET_ID, split=args.split)
     print(f"Dataset size: {len(dataset)}")
     
-    # Extract representations
-    data = extract_representations_from_mmau(
-        model, dataset, max_samples=args.max_samples, device=device
-    )
+    from desta import DeSTA25AudioModel
     
-    print(f"\nExtracted {len(data['audio_tokens'])} samples")
-    print(f"Audio token shape: {data['audio_tokens'].shape}")
-    print(f"Text embedding shape: {data['text_embeddings'].shape}")
-    
-    # Run all three observations
-    results = {
-        "model_id": args.model_id,
-        "dataset": DATASET_ID,
-        "split": args.split,
-        "num_samples": len(data['audio_tokens']),
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # Observation 1: Feature Collapse
-    results["observation1_feature_collapse"] = run_observation1_feature_collapse(
-        data['audio_tokens'], args.output_dir
-    )
-    
-    # Observation 2: Content Redundancy & Token Orthogonality
-    results["observation2_content_redundancy"] = run_observation2_content_redundancy(
-        data['audio_tokens'], 
-        data['question_embeddings'], 
-        data['answer_embeddings'],
-        args.output_dir, 
-        device
-    )
-    
-    # Observation 3: Entanglement
-    results["observation3_entanglement"] = run_observation3_entanglement(
-        data['audio_tokens'], data['labels'], data['label_mappings'], args.output_dir
-    )
+    # Comparison mode: two models
+    if len(args.model_id) == 2:
+        print("\n" + "="*60)
+        print("COMPARISON MODE: Analyzing two models")
+        print("="*60)
+        
+        model1_id, model2_id = args.model_id
+        if args.model_names and len(args.model_names) == 2:
+            name1, name2 = args.model_names
+        else:
+            name1 = model1_id.split('/')[-1]
+            name2 = model2_id.split('/')[-1]
+        
+        print(f"\nModel 1: {model1_id} ({name1})")
+        print(f"Model 2: {model2_id} ({name2})")
+        
+        # Load models
+        model1 = DeSTA25AudioModel.from_pretrained(model1_id)
+        model1.to(device).eval()
+        
+        model2 = DeSTA25AudioModel.from_pretrained(model2_id)
+        model2.to(device).eval()
+        
+        results = run_comparison_analysis(model1, model2, name1, name2, dataset, args, device)
+        
+        # Clean up
+        del model1, model2
+        torch.cuda.empty_cache()
+        
+    else:
+        # Single model mode
+        model_id = args.model_id[0]
+        model_name = args.model_names[0] if args.model_names else model_id.split('/')[-1]
+        
+        print(f"\n{'='*60}")
+        print(f"Loading model: {model_id}")
+        print(f"{'='*60}")
+        
+        model = DeSTA25AudioModel.from_pretrained(model_id)
+        model.to(device).eval()
+        
+        print(f"\nModel Configuration:")
+        print(f"  Connector mode: {model.config.connector_mode}")
+        if model.config.connector_mode == "struct_orca":
+            print(f"  Num groups: {model.config.struct_orca_num_groups}")
+            print(f"  Queries per group: {model.config.struct_orca_queries_per_group}")
+        
+        results, _ = run_single_model_analysis(model, model_name, dataset, args, device)
+        results["dataset"] = DATASET_ID
+        results["split"] = args.split
+        results["timestamp"] = datetime.now().isoformat()
+        
+        del model
+        torch.cuda.empty_cache()
+        
+        # Summary for single model
+        print("\n" + "="*60)
+        print("OBSERVATION ANALYSIS COMPLETE")
+        print("="*60)
+        
+        obs1 = results['observation1_feature_collapse']
+        obs2 = results['observation2_content_redundancy']
+        obs3 = results['observation3_entanglement']
+        
+        print(f"\nSUMMARY for {model_name}:")
+        print(f"  Effective Dim: {obs1['effective_dimensionality']:.2f}")
+        print(f"  PC1-3 Cumulative: {obs1['pca_variance']['cumulative_3']:.2%}")
+        print(f"  Token Avg Cosine Sim: {obs2['token_orthogonality']['avg_pairwise_cosine_sim']:.4f}")
+        print(f"  Task Silhouette: {obs3.get('task_silhouette_score', 'N/A')}")
     
     # Save results
     results_path = os.path.join(args.output_dir, "observation_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
     
-    print("\n" + "="*60)
-    print("OBSERVATION ANALYSIS COMPLETE")
-    print("="*60)
     print(f"\nResults saved to: {results_path}")
     print(f"Figures saved to: {os.path.join(args.output_dir, 'figures')}")
-    
-    # Summary
-    print("\n" + "-"*60)
-    print("SUMMARY")
-    print("-"*60)
-    obs1 = results['observation1_feature_collapse']
-    obs2 = results['observation2_content_redundancy']
-    
-    print(f"Observation 1 - Effective Dimensionality: {obs1['effective_dimensionality']:.2f}")
-    print(f"Observation 1 - PCA-3 Cumulative: {obs1['pca_variance']['cumulative_3']:.2%}")
-    print(f"Observation 2 - Token Avg Cosine Sim: {obs2['token_orthogonality']['avg_pairwise_cosine_sim']:.4f}")
-    print(f"Observation 2 - CKA(Audio,Answer): {obs2['answer']['cka']:.4f}")
-    print(f"Observation 3 - t-SNE plots saved for visual inspection")
     
     return results
 
 
 if __name__ == "__main__":
     main()
+
 
