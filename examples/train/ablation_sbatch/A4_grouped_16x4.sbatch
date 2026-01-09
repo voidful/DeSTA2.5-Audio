@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=A2_grp8x8
+#SBATCH --job-name=A4_grp16x4
 #SBATCH --partition=normal
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
@@ -8,11 +8,11 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
-#SBATCH --output=./slurm-report/A2_grp8x8_%j.out
-#SBATCH --error=./slurm-report/A2_grp8x8_%j.out
+#SBATCH --output=./slurm-report/A4_grp16x4_%j.out
+#SBATCH --error=./slurm-report/A4_grp16x4_%j.out
 
 # ==========================================
-# A2: Grouped 8×8 (Default grouping, no losses)
+# A4: Grouped 16×4 (Finer grouping)
 # ==========================================
 
 # ===== 環境設定 =====
@@ -34,7 +34,7 @@ config=desta25_qwen3-0.6b_ORCA
 dataset_config=DestaAQA-5M_local
 
 project=struct_orca_ablation
-name="A2_grouped_8x8"
+name="A4_grouped_16x4"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -55,8 +55,8 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     name=${name} \
     ++dataset.train_ds.data_root=/work/voidful2nlp/desta \
     ++dataset.validation_ds.data_root=/work/voidful2nlp/desta \
-    ++model.struct_orca.num_groups=8 \
-    ++model.struct_orca.queries_per_group=8 \
+    ++model.struct_orca.num_groups=16 \
+    ++model.struct_orca.queries_per_group=4 \
     ++model.struct_orca.inter_group_weight=0 \
     ++model.struct_orca.intra_group_weight=0 \
     ++model.struct_orca.iv_weight=0

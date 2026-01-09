@@ -14,30 +14,47 @@
 # ==========================================
 # A0: Baseline QFormer (No ORCA Components)
 # ==========================================
-# This is the DeSTA2.5 baseline with standard QFormer connector.
-# No grouping, no orthogonality losses, no discriminator.
 
-set -e
-cd /path/to/DeSTA2.5-Audio
+# ===== 環境設定 =====
+module load anaconda 2>/dev/null || module load miniconda 2>/dev/null || true
+source activate desta25 2>/dev/null || conda activate desta25 2>/dev/null || true
+conda activate desta25-qwen3
 
-# Activate environment
-source ~/.bashrc
-conda activate desta
+cd /work/voidful2nlp/DeSTA2.5-Audio
+pip install "numpy<2.0" -q 2>/dev/null || true
 
-# Export environment
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-export HF_HOME=/path/to/hf_cache
-export WANDB_PROJECT="struct_orca_ablation"
+export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
+export HF_HOME=/work/voidful2nlp/.cache/huggingface
+export TRANSFORMERS_CACHE=$HF_HOME
+export PYTHONNOUSERSITE=1
 
-# Create output directory
-EXP_DIR="outputs/ablation/A0_baseline_qformer"
-mkdir -p $EXP_DIR/logs
+# ===== 實驗設定 =====
+ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
+config=desta25_qwen3-0.6b_Qformer6L
+dataset_config=DestaAQA-5M_local
 
-# Run training with baseline QFormer config
-torchrun --nproc_per_node=4 \
-    examples/train/train_desta.py \
-    --config-name desta25_qwen3-0.6b_Qformer6L \
-    dataset=DestaAQA-5M_0.6b \
-    exp_dir=$EXP_DIR \
-    name=A0_baseline_qformer \
-    wandb.project=struct_orca_ablation
+project=struct_orca_ablation
+name="A0_baseline_qformer"
+exp_name=$(date +%y%m%d-%H%M)_${name}
+exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
+
+mkdir -p ${exp_dir}
+mkdir -p ./slurm-report
+
+git diff > ${exp_dir}/git-diff.txt 2>/dev/null || true
+nvidia-smi > ${exp_dir}/nvidia-smi.txt 2>/dev/null || true
+
+# ===== 啟動訓練 =====
+NUM_GPUS=4
+MASTER_PORT=$((29500 + RANDOM % 1000))
+
+torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
+    ${ROOT_DIR}/examples/train/train_desta.py \
+    --config-path=config \
+    --config-name=${config} \
+    +dataset=${dataset_config} \
+    ++exp_dir=${exp_dir} \
+    project=${project} \
+    name=${name} \
+    ++dataset.train_ds.data_root=/work/voidful2nlp/desta \
+    ++dataset.validation_ds.data_root=/work/voidful2nlp/desta
