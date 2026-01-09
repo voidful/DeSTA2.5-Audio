@@ -17,6 +17,7 @@ from transformers import PretrainedConfig, PreTrainedModel, AutoModelForCausalLM
 from transformers.models.bert.modeling_bert import BertEncoder
 from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
+import torch.distributed as dist
 
 
 # === Gradient Reversal for Adversarial Training ===
@@ -1107,6 +1108,11 @@ class DeSTA25AudioModel(PreTrainedModel):
         self._discriminator_outputs = None
 
         self.configure_trainable_parameters()
+        
+        # Ensure all DDP ranks are synchronized after model initialization
+        if dist.is_initialized():
+            dist.barrier()
+            logging.info(f"DDP barrier passed for rank {dist.get_rank()}")
 
     def forward(self, input_ids,
                 attention_mask, 
