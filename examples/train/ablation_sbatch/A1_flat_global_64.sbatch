@@ -57,7 +57,7 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.struct_orca.num_groups=1 \
     ++model.struct_orca.queries_per_group=64 \
     ++model.struct_orca.inter_group_weight=0 \
-    ++model.struct_orca.intra_group_weight=0 \
+    ++model.struct_orca.intra_group_weight=0.05 \
     ++model.struct_orca.iv_weight=0
 
 # ===== 上傳到 HuggingFace =====

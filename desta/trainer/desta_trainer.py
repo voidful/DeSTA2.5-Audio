@@ -101,6 +101,15 @@ class DeSTA25Trainer(Trainer):
                 
                 # Compute discriminator loss for IV-Guided Disentanglement
                 discriminator = getattr(actual_model, "content_discriminator", None)
+                
+                # DEBUG: Track why discriminator might not fire
+                _has_disc = discriminator is not None
+                _has_audio_global = hasattr(outputs, "audio_global")
+                _audio_global_val = getattr(outputs, "audio_global", None)
+                if not _has_disc or not _has_audio_global:
+                    if self.state.global_step % 100 == 0:  # Log every 100 steps to avoid spam
+                        logging.warning(f"[IV DEBUG] Step {self.state.global_step}: discriminator={_has_disc}, has_audio_global={_has_audio_global}, audio_global={_audio_global_val is not None}")
+                
                 if discriminator is not None and hasattr(outputs, "audio_global"):
                     audio_tokens = outputs.audio_global
                     # Get transcription IDs from inputs
