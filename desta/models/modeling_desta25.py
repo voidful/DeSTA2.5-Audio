@@ -284,7 +284,7 @@ class QformerConnector(nn.Module):
             qformer_config.hidden_size = self.config.encoder_config.d_model
             qformer_config.add_cross_attention = True
             qformer_config.is_decoder = True
-            qformer_config._attn_implementation = "eager"
+            qformer_config._attn_implementation = "sdpa" if getattr(self.config, 'use_flash_attention', False) else "eager"
 
             self.qformer = BertEncoder(qformer_config)
             self.proj = nn.Sequential(
@@ -378,7 +378,7 @@ class ORCAHybridConnector(nn.Module):
         qformer_config.hidden_size = d_encoder
         qformer_config.add_cross_attention = True
         qformer_config.is_decoder = True
-        qformer_config._attn_implementation = "eager"
+        qformer_config._attn_implementation = "sdpa" if getattr(config, 'use_flash_attention', False) else "eager"
         
         self.global_qformer = BertEncoder(qformer_config)
         self.global_proj = nn.Sequential(
@@ -496,7 +496,9 @@ class GroupwiseOrthogonalConnector(nn.Module):
         qformer_config.hidden_size = d_encoder
         qformer_config.add_cross_attention = True
         qformer_config.is_decoder = True
-        qformer_config._attn_implementation = "eager"
+        # Use SDPA (Flash Attention) if enabled for faster attention
+        use_flash = getattr(config, 'use_flash_attention', False)
+        qformer_config._attn_implementation = "sdpa" if use_flash else "eager"
         
         self.qformer = BertEncoder(qformer_config)
         

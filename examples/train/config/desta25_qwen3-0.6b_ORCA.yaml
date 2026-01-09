@@ -44,6 +44,7 @@ model:
     mode: struct_orca  # Use Struct-ORCA connector
     prompt_size: 64    # Not used in struct_orca mode, kept for compatibility
     num_hidden_layers: 6
+    use_flash_attention: true  # Use SDPA for faster attention
 
   # Struct-ORCA specific configuration
   struct_orca:
@@ -72,9 +73,11 @@ model:
     top_p: 1
 
 optim:
+  name: adafactor  # Memory-efficient optimizer
   lr: 1e-4
-  betas: [0.9, 0.98]
-  weight_decay: 0.01
+  scale_parameter: false
+  relative_step: false
+  warmup_init: false
 
   sched:
     warmup_steps: 5000
