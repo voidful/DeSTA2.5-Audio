@@ -23,7 +23,9 @@ def plot_tsne_by_attribute(
     n_iter: int = 1000,
     figsize: tuple = (10, 8),
     title: Optional[str] = None,
-    colormap: str = "tab10"
+    colormap: str = "tab10",
+    label_names: Optional[Dict[int, str]] = None,
+    add_metrics: bool = True
 ) -> plt.Figure:
     """
     Create t-SNE visualization colored by attribute.
@@ -38,10 +40,14 @@ def plot_tsne_by_attribute(
         figsize: Figure size
         title: Custom title (default: auto-generated)
         colormap: Matplotlib colormap name
+        label_names: Dict mapping numeric labels to display names
+        add_metrics: If True, add silhouette score to plot
         
     Returns:
         Matplotlib figure
     """
+    from sklearn.metrics import silhouette_score
+    
     # Flatten features if needed
     if len(features.shape) > 2:
         features = features.reshape(features.shape[0], -1)
@@ -50,29 +56,53 @@ def plot_tsne_by_attribute(
     tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, random_state=42)
     embedded = tsne.fit_transform(features)
     
-    # Create figure
+    # Compute silhouette score
+    sil_score = None
+    if add_metrics and len(np.unique(labels)) > 1:
+        try:
+            sil_score = silhouette_score(embedded, labels)
+        except:
+            pass
+    
+    # Create figure with better styling
+    plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax = plt.subplots(figsize=figsize)
     
     # Get unique labels and colors
     unique_labels = np.unique(labels)
     cmap = plt.get_cmap(colormap)
-    colors = [cmap(i / len(unique_labels)) for i in range(len(unique_labels))]
+    colors = [cmap(i / max(len(unique_labels), 1)) for i in range(len(unique_labels))]
     
     # Plot each class
     for i, label in enumerate(unique_labels):
         mask = labels == label
+        display_name = label_names.get(label, str(label)) if label_names else str(label)
         ax.scatter(
             embedded[mask, 0], embedded[mask, 1],
-            c=[colors[i]], label=str(label),
-            alpha=0.6, s=20
+            c=[colors[i]], label=display_name,
+            alpha=0.7, s=30, edgecolors='white', linewidths=0.3
         )
     
     if title is None:
-        title = f"t-SNE Visualization by {attribute_name}"
-    ax.set_title(title, fontsize=14)
-    ax.set_xlabel("t-SNE Dimension 1")
-    ax.set_ylabel("t-SNE Dimension 2")
-    ax.legend(title=attribute_name, bbox_to_anchor=(1.05, 1), loc='upper left')
+        title = f"Audio Representation t-SNE by {attribute_name}"
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel("t-SNE Dimension 1", fontsize=11)
+    ax.set_ylabel("t-SNE Dimension 2", fontsize=11)
+    
+    # Legend with better positioning
+    legend = ax.legend(title=attribute_name, title_fontsize=11,
+                       bbox_to_anchor=(1.02, 1), loc='upper left',
+                       framealpha=0.9, fancybox=True)
+    legend.get_title().set_fontweight('bold')
+    
+    # Add silhouette score annotation
+    if sil_score is not None:
+        score_text = f"Silhouette Score: {sil_score:.3f}"
+        interpretation = "Mixed" if sil_score < 0.25 else "Moderate" if sil_score < 0.5 else "Well-separated"
+        ax.text(0.02, 0.98, f"{score_text}\n({interpretation})",
+                transform=ax.transAxes, fontsize=10,
+                verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     
     plt.tight_layout()
     
@@ -81,7 +111,7 @@ def plot_tsne_by_attribute(
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Saved t-SNE plot to {save_path}")
     
-    return fig
+    return fig, sil_score if add_metrics else fig
 
 
 def plot_tsne_comparison(

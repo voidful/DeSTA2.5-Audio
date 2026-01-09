@@ -70,7 +70,7 @@ def extract_representations_from_mmau(
     Extract audio token representations from MMAU dataset samples.
     
     Returns:
-        Dict with audio_tokens, text_embeddings, and labels (task, difficulty)
+        Dict with audio_tokens, text_embeddings, transcription_embeddings, and labels
     """
     from transformers import AutoProcessor
     
@@ -84,7 +84,8 @@ def extract_representations_from_mmau(
         model._setup_generation()
     
     all_audio_tokens = []
-    all_text_embeddings = []
+    all_question_embeddings = []
+    all_answer_embeddings = []  # Use answer as proxy for "expected content"
     labels = {
         "task": [],
         "difficulty": [],
@@ -129,12 +130,19 @@ def extract_representations_from_mmau(
                 
                 all_audio_tokens.append(audio_tokens[0])
                 
-                # Get text embedding for question
+                # Get text embedding for question (for context comparison)
                 question = item.get("question", "")
-                text_ids = model.tokenizer(question, return_tensors="pt").input_ids.to(device)
+                question_ids = model.tokenizer(question, return_tensors="pt").input_ids.to(device)
                 with torch.no_grad():
-                    text_emb = model.llm_model.model.embed_tokens(text_ids).float().mean(dim=1).cpu().numpy()
-                all_text_embeddings.append(text_emb[0])
+                    question_emb = model.llm_model.model.embed_tokens(question_ids).float().mean(dim=1).cpu().numpy()
+                all_question_embeddings.append(question_emb[0])
+                
+                # Get answer embedding (as proxy for audio content)
+                answer = item.get("answer", "")
+                answer_ids = model.tokenizer(answer, return_tensors="pt").input_ids.to(device)
+                with torch.no_grad():
+                    answer_emb = model.llm_model.model.embed_tokens(answer_ids).float().mean(dim=1).cpu().numpy()
+                all_answer_embeddings.append(answer_emb[0])
                 
                 # Collect labels
                 labels["task"].append(item.get("task", "unknown"))
@@ -148,7 +156,8 @@ def extract_representations_from_mmau(
     
     # Stack arrays
     audio_tokens = np.stack(all_audio_tokens)
-    text_embeddings = np.stack(all_text_embeddings)
+    question_embeddings = np.stack(all_question_embeddings)
+    answer_embeddings = np.stack(all_answer_embeddings)
     
     # Convert labels to numeric
     label_mappings = {}
@@ -159,7 +168,9 @@ def extract_representations_from_mmau(
     
     return {
         "audio_tokens": audio_tokens,
-        "text_embeddings": text_embeddings,
+        "text_embeddings": question_embeddings,  # Keep for backward compat
+        "question_embeddings": question_embeddings,
+        "answer_embeddings": answer_embeddings,
         "labels": labels,
         "label_mappings": label_mappings
     }
@@ -230,69 +241,150 @@ def run_observation1_feature_collapse(audio_tokens, output_dir):
     return results
 
 
-def run_observation2_content_redundancy(audio_tokens, text_embeddings, output_dir, device="cuda"):
+def run_observation2_content_redundancy(audio_tokens, question_embeddings, answer_embeddings, output_dir, device="cuda"):
     """
-    Observation 2: Content Redundancy Analysis
+    Observation 2: Content Redundancy & Token Orthogonality Analysis
     
-    Measures how much text/linguistic information is encoded in audio representations.
-    High MI = high redundancy (bad - audio tokens leak text content).
+    Measures:
+    1. How much text/linguistic information is encoded in audio representations (MI, CKA)
+    2. Token-level orthogonality (how decorrelated are the audio tokens)
+    
+    High MI with answer = audio captures content (good for this task)
+    Low token orthogonality = tokens are redundant (bad - feature collapse)
     """
     print("\n" + "="*60)
-    print("OBSERVATION 2: Content Redundancy (Text Information Leakage)")
+    print("OBSERVATION 2: Content Redundancy & Token Orthogonality")
     print("="*60)
     
-    # Flatten
+    from sklearn.decomposition import PCA
+    
+    # Flatten audio tokens for MI/CKA
     audio_flat = audio_tokens.reshape(audio_tokens.shape[0], -1)
     
     # Limit dimensions for computational efficiency
     max_dim = 256
     if audio_flat.shape[1] > max_dim:
-        # Use PCA to reduce dimensions
-        from sklearn.decomposition import PCA
         pca_audio = PCA(n_components=max_dim)
         audio_reduced = pca_audio.fit_transform(audio_flat)
     else:
         audio_reduced = audio_flat
     
-    if text_embeddings.shape[1] > max_dim:
-        from sklearn.decomposition import PCA
-        pca_text = PCA(n_components=max_dim)
-        text_reduced = pca_text.fit_transform(text_embeddings)
+    # Reduce question embeddings
+    if question_embeddings.shape[1] > max_dim:
+        pca_q = PCA(n_components=max_dim)
+        question_reduced = pca_q.fit_transform(question_embeddings)
     else:
-        text_reduced = text_embeddings
+        question_reduced = question_embeddings
     
-    # Estimate MI
-    print("\nEstimating Mutual Information (this may take a few minutes)...")
-    mi_estimate = estimate_mutual_information(
-        audio_reduced, 
-        text_reduced,
-        num_epochs=50,
-        batch_size=128,
-        device=device,
-        verbose=True
+    # Reduce answer embeddings
+    if answer_embeddings.shape[1] > max_dim:
+        pca_a = PCA(n_components=max_dim)
+        answer_reduced = pca_a.fit_transform(answer_embeddings)
+    else:
+        answer_reduced = answer_embeddings
+    
+    results = {}
+    
+    # ====== Part A: MI and CKA with Question (context) ======
+    print("\n[A] Audio vs Question (Context) Analysis:")
+    mi_question = estimate_mutual_information(
+        audio_reduced, question_reduced,
+        num_epochs=50, batch_size=128, device=device, verbose=False
     )
+    cka_question = compute_linear_cka(audio_reduced, question_reduced)
     
-    # Compute CKA
-    cka = compute_linear_cka(audio_reduced, text_reduced)
+    results["question"] = {
+        "mi_nats": float(mi_question),
+        "mi_bits": float(mi_question / np.log(2)),
+        "cka": float(cka_question)
+    }
+    print(f"  MI(Audio, Question): {mi_question:.4f} nats")
+    print(f"  CKA(Audio, Question): {cka_question:.4f}")
     
-    results = {
-        "mutual_information_nats": float(mi_estimate),
-        "mutual_information_bits": float(mi_estimate / np.log(2)),
-        "cka_similarity": float(cka)
+    # ====== Part B: MI and CKA with Answer (expected content) ======
+    print("\n[B] Audio vs Answer (Expected Content) Analysis:")
+    mi_answer = estimate_mutual_information(
+        audio_reduced, answer_reduced,
+        num_epochs=50, batch_size=128, device=device, verbose=False
+    )
+    cka_answer = compute_linear_cka(audio_reduced, answer_reduced)
+    
+    results["answer"] = {
+        "mi_nats": float(mi_answer),
+        "mi_bits": float(mi_answer / np.log(2)),
+        "cka": float(cka_answer)
+    }
+    print(f"  MI(Audio, Answer): {mi_answer:.4f} nats")
+    print(f"  CKA(Audio, Answer): {cka_answer:.4f}")
+    
+    # ====== Part C: Token-Level Orthogonality Analysis ======
+    print("\n[C] Token-Level Orthogonality Analysis:")
+    
+    # For each sample, compute average pairwise cosine similarity between tokens
+    n_samples = audio_tokens.shape[0]
+    n_tokens = audio_tokens.shape[1]
+    
+    avg_cosine_sims = []
+    for i in range(min(n_samples, 500)):  # Limit for speed
+        tokens = audio_tokens[i]  # [n_tokens, hidden_dim]
+        # Normalize tokens
+        norms = np.linalg.norm(tokens, axis=1, keepdims=True) + 1e-8
+        tokens_normalized = tokens / norms
+        # Compute pairwise cosine similarity
+        sim_matrix = tokens_normalized @ tokens_normalized.T
+        # Get upper triangle (excluding diagonal)
+        upper_tri = sim_matrix[np.triu_indices(n_tokens, k=1)]
+        avg_cosine_sims.append(np.mean(np.abs(upper_tri)))
+    
+    avg_token_sim = float(np.mean(avg_cosine_sims))
+    std_token_sim = float(np.std(avg_cosine_sims))
+    
+    # Also compute correlation matrix eigenvalue analysis
+    # Stack all tokens and compute correlation
+    all_tokens_flat = audio_tokens.reshape(-1, audio_tokens.shape[-1])
+    # Sample for efficiency
+    sample_idx = np.random.choice(len(all_tokens_flat), min(5000, len(all_tokens_flat)), replace=False)
+    tokens_sample = all_tokens_flat[sample_idx]
+    
+    # Compute covariance eigenvalues
+    tokens_centered = tokens_sample - tokens_sample.mean(axis=0)
+    cov = tokens_centered.T @ tokens_centered / len(tokens_sample)
+    eigenvalues = np.linalg.eigvalsh(cov)
+    eigenvalues = np.sort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues / eigenvalues.sum()  # Normalize
+    
+    # Effective rank (using entropy-based measure)
+    eigenvalues_pos = eigenvalues[eigenvalues > 1e-10]
+    effective_rank = float(np.exp(-np.sum(eigenvalues_pos * np.log(eigenvalues_pos))))
+    
+    results["token_orthogonality"] = {
+        "avg_pairwise_cosine_sim": avg_token_sim,
+        "std_pairwise_cosine_sim": std_token_sim,
+        "effective_rank": effective_rank,
+        "top1_eigenvalue_ratio": float(eigenvalues[0]),
+        "top3_eigenvalue_ratio": float(eigenvalues[:3].sum()),
+        "top10_eigenvalue_ratio": float(eigenvalues[:10].sum())
     }
     
-    print(f"\nMutual Information Estimate:")
-    print(f"  MI(Audio, Text): {results['mutual_information_nats']:.4f} nats")
-    print(f"                   {results['mutual_information_bits']:.4f} bits")
-    print(f"\nCentered Kernel Alignment (CKA):")
-    print(f"  CKA(Audio, Text): {results['cka_similarity']:.4f}")
-    print(f"\nInterpretation:")
-    if results['cka_similarity'] > 0.5:
-        print("  ⚠️  HIGH REDUNDANCY: Audio strongly resembles text embeddings")
-    elif results['cka_similarity'] > 0.3:
-        print("  ⚡ MODERATE REDUNDANCY: Some text information in audio")
+    print(f"  Avg pairwise token cosine sim: {avg_token_sim:.4f} (±{std_token_sim:.4f})")
+    print(f"  Token effective rank: {effective_rank:.2f}")
+    print(f"  Top-1 eigenvalue ratio: {eigenvalues[0]:.2%}")
+    print(f"  Top-3 eigenvalue ratio: {eigenvalues[:3].sum():.2%}")
+    
+    # ====== Interpretation ======
+    print("\n[Interpretation]")
+    
+    if avg_token_sim > 0.7:
+        print("  ⚠️  HIGH TOKEN REDUNDANCY: Tokens are highly correlated (collapse)")
+    elif avg_token_sim > 0.4:
+        print("  ⚡ MODERATE TOKEN DIVERSITY: Some redundancy in tokens")
     else:
-        print("  ✓ LOW REDUNDANCY: Audio representations are distinct from text")
+        print("  ✓ GOOD TOKEN DIVERSITY: Tokens capture different aspects")
+    
+    if cka_answer > 0.3:
+        print("  ✓ Audio captures answer-relevant information")
+    else:
+        print("  ⚠️ Audio may not capture task-relevant content")
     
     return results
 
@@ -302,7 +394,8 @@ def run_observation3_entanglement(audio_tokens, labels, label_mappings, output_d
     Observation 3: Content-Style Entanglement Analysis
     
     Uses t-SNE to visualize whether different task types cluster separately.
-    Well-disentangled = clear clusters by task type.
+    Well-disentangled = clear clusters by task type (high silhouette score).
+    Entangled = mixed clusters (low silhouette score).
     """
     print("\n" + "="*60)
     print("OBSERVATION 3: Content-Style Entanglement (t-SNE)")
@@ -318,44 +411,59 @@ def run_observation3_entanglement(audio_tokens, labels, label_mappings, output_d
     
     results = {}
     
+    # Create label name mappings (numeric -> string)
+    task_names = {v: k for k, v in label_mappings["task"].items()}
+    diff_names = {v: k for k, v in label_mappings["difficulty"].items()}
+    
     # t-SNE by task type
     print("\nGenerating t-SNE visualization by task type...")
     task_labels = labels["task"][:n_samples]
     
-    fig = plot_tsne_by_attribute(
+    fig, task_sil_score = plot_tsne_by_attribute(
         audio_subset,
         task_labels,
         "Task Type",
         save_path=os.path.join(figures_dir, "obs3_tsne_by_task.png"),
         perplexity=min(30, n_samples // 5),
-        title="Audio Representation t-SNE by Task Type"
+        title="Baseline: Audio Representation t-SNE by Task Type",
+        label_names=task_names,
+        add_metrics=True
     )
     
-    # Reverse mapping for readability
-    task_names = {v: k for k, v in label_mappings["task"].items()}
     results["task_mapping"] = task_names
+    results["task_silhouette_score"] = float(task_sil_score) if task_sil_score else None
+    print(f"  Task Silhouette Score: {task_sil_score:.3f}" if task_sil_score else "  Could not compute silhouette")
     
     # t-SNE by difficulty
-    print("Generating t-SNE visualization by difficulty...")
+    print("\nGenerating t-SNE visualization by difficulty...")
     diff_labels = labels["difficulty"][:n_samples]
     
-    fig = plot_tsne_by_attribute(
+    fig, diff_sil_score = plot_tsne_by_attribute(
         audio_subset,
         diff_labels,
         "Difficulty",
         save_path=os.path.join(figures_dir, "obs3_tsne_by_difficulty.png"),
         perplexity=min(30, n_samples // 5),
-        title="Audio Representation t-SNE by Difficulty"
+        title="Baseline: Audio Representation t-SNE by Difficulty",
+        label_names=diff_names,
+        add_metrics=True
     )
     
-    diff_names = {v: k for k, v in label_mappings["difficulty"].items()}
     results["difficulty_mapping"] = diff_names
+    results["difficulty_silhouette_score"] = float(diff_sil_score) if diff_sil_score else None
+    print(f"  Difficulty Silhouette Score: {diff_sil_score:.3f}" if diff_sil_score else "  Could not compute silhouette")
     
     print(f"\nVisualization saved to: {figures_dir}")
-    print("\nInterpretation:")
-    print("  - Clear clusters by task = good disentanglement of task-specific features")
-    print("  - Mixed/overlapping clusters = entangled representations")
-    print("  - Check the saved figures to evaluate visually")
+    print("\n[Interpretation]")
+    
+    # Interpret silhouette scores
+    if task_sil_score is not None:
+        if task_sil_score < 0.1:
+            print("  ⚠️ HIGHLY ENTANGLED: Audio tokens do not separate by task type")
+        elif task_sil_score < 0.25:
+            print("  ⚡ PARTIALLY ENTANGLED: Weak task-type separation")
+        else:
+            print("  ✓ GOOD SEPARATION: Audio tokens cluster by task type")
     
     return results
 
@@ -433,9 +541,13 @@ def main():
         data['audio_tokens'], args.output_dir
     )
     
-    # Observation 2: Content Redundancy
+    # Observation 2: Content Redundancy & Token Orthogonality
     results["observation2_content_redundancy"] = run_observation2_content_redundancy(
-        data['audio_tokens'], data['text_embeddings'], args.output_dir, device
+        data['audio_tokens'], 
+        data['question_embeddings'], 
+        data['answer_embeddings'],
+        args.output_dir, 
+        device
     )
     
     # Observation 3: Entanglement
@@ -458,10 +570,13 @@ def main():
     print("\n" + "-"*60)
     print("SUMMARY")
     print("-"*60)
-    print(f"Observation 1 - Effective Dimensionality: {results['observation1_feature_collapse']['effective_dimensionality']:.2f}")
-    print(f"Observation 1 - PCA-3 Cumulative: {results['observation1_feature_collapse']['pca_variance']['cumulative_3']:.2%}")
-    print(f"Observation 2 - MI(Audio,Text): {results['observation2_content_redundancy']['mutual_information_nats']:.4f} nats")
-    print(f"Observation 2 - CKA: {results['observation2_content_redundancy']['cka_similarity']:.4f}")
+    obs1 = results['observation1_feature_collapse']
+    obs2 = results['observation2_content_redundancy']
+    
+    print(f"Observation 1 - Effective Dimensionality: {obs1['effective_dimensionality']:.2f}")
+    print(f"Observation 1 - PCA-3 Cumulative: {obs1['pca_variance']['cumulative_3']:.2%}")
+    print(f"Observation 2 - Token Avg Cosine Sim: {obs2['token_orthogonality']['avg_pairwise_cosine_sim']:.4f}")
+    print(f"Observation 2 - CKA(Audio,Answer): {obs2['answer']['cka']:.4f}")
     print(f"Observation 3 - t-SNE plots saved for visual inspection")
     
     return results
@@ -469,3 +584,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
