@@ -518,6 +518,9 @@ class GroupwiseOrthogonalConnector(nn.Module):
         """
         Forward pass of GroupwiseOrthogonalConnector.
         
+        OPTIMIZED: Batches all group queries together for Q-Former forward pass,
+        reducing forward calls from (num_groups × num_layers) to just num_layers.
+        
         Args:
             encoder_hidden_states: List of hidden states from Whisper encoder layers
             audio_attention_mask: Optional attention mask for audio [B, T]
@@ -538,30 +541,49 @@ class GroupwiseOrthogonalConnector(nn.Module):
             if idx in self.target_layer_ids:
                 target_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
         
-        # Process each group separately
-        all_group_tokens = []  # [num_groups, B, queries_per_group, d_llm]
+        num_layers = len(target_layer_outputs)
+        
+        # === OPTIMIZATION: Batch all group queries together ===
+        # Instead of: for group in groups: for layer in layers: qformer(...)
+        # We do: for layer in layers: qformer(all_group_queries)
+        
+        layer_outputs = []  # [num_layers, B, total_queries, d_encoder]
+        
+        for layer_idx, hidden_state in enumerate(target_layer_outputs):
+            # Concatenate queries from ALL groups for this layer
+            # Shape: [B, num_groups * queries_per_group, d_encoder]
+            all_queries = []
+            for group_idx in range(self.num_groups):
+                queries = self.group_queries[group_idx][layer_idx].expand(batch_size, -1, -1)
+                all_queries.append(queries)
+            
+            combined_queries = torch.cat(all_queries, dim=1)  # [B, total_queries, d_encoder]
+            combined_queries = combined_queries.to(dtype=target_dtype, device=target_device)
+            
+            # Single Q-Former forward pass for all groups at this layer
+            qformer_out = self.qformer(
+                hidden_states=combined_queries,
+                encoder_hidden_states=hidden_state,
+            )
+            layer_outputs.append(qformer_out.last_hidden_state)  # [B, total_queries, d_encoder]
+        
+        # Stack layer outputs: [num_layers, B, total_queries, d_encoder]
+        layer_outputs = torch.stack(layer_outputs, dim=0)
+        layer_outputs = layer_outputs.permute(1, 2, 0, 3)  # [B, total_queries, num_layers, d_encoder]
+        
+        # === Apply layer weights per group and project ===
+        all_group_tokens = []  # Will collect [B, queries_per_group, d_llm] for each group
         group_centroids = []   # [num_groups, B, d_llm] for orthogonality loss
         
         for group_idx in range(self.num_groups):
-            group_outputs = []
+            # Extract this group's outputs from the combined tensor
+            start_idx = group_idx * self.queries_per_group
+            end_idx = start_idx + self.queries_per_group
+            group_layer_outputs = layer_outputs[:, start_idx:end_idx, :, :]  # [B, K, L, D]
             
-            for layer_idx, hidden_state in enumerate(target_layer_outputs):
-                # Get queries for this group and layer
-                queries = self.group_queries[group_idx][layer_idx].expand(batch_size, -1, -1)
-                queries = queries.to(dtype=target_dtype, device=target_device)
-                
-                # Cross-attention with encoder hidden states
-                qformer_out = self.qformer(
-                    hidden_states=queries,
-                    encoder_hidden_states=hidden_state,
-                )
-                group_outputs.append(qformer_out.last_hidden_state)
-            
-            # Weighted sum across layers for this group
-            group_outputs = torch.stack(group_outputs, dim=0)  # [L, B, K, D]
-            group_outputs = group_outputs.permute(1, 2, 0, 3)  # [B, K, L, D]
+            # Apply this group's layer weights
             weights = torch.softmax(self.group_layer_weights[group_idx], dim=-1).unsqueeze(-1)  # [K, L, 1]
-            group_tokens = (group_outputs * weights).sum(dim=2)  # [B, K, D]
+            group_tokens = (group_layer_outputs * weights).sum(dim=2)  # [B, K, D]
             group_tokens = self.proj(group_tokens)  # [B, K, d_llm]
             
             all_group_tokens.append(group_tokens)
