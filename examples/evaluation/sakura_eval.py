@@ -79,6 +79,10 @@ def write_wav_from_dataset_item(item, wav_path):
 # DeSTA 推論
 # =====================
 
+# Global ACD settings (set via command line)
+ACD_ENABLED = False
+ACD_ALPHA = 0.5
+
 def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     """
     對單一樣本跑 DeSTA. 回傳文字答案。
@@ -102,18 +106,30 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     ]
 
     with torch.no_grad():
-        outputs = model.generate(
-            messages=messages,
-            do_sample=False,      # 評測建議關掉 sampling
-            top_p=0.85,
-            temperature=0.0,
-            max_new_tokens=512
-        )
+        if ACD_ENABLED:
+            # Use ACD for paralinguistic tasks
+            outputs = model.generate_with_acd(
+                messages=messages,
+                acd_alpha=ACD_ALPHA,
+                do_sample=False,
+                top_p=0.85,
+                temperature=0.0,
+                max_new_tokens=512
+            )
+        else:
+            outputs = model.generate(
+                messages=messages,
+                do_sample=False,
+                top_p=0.85,
+                temperature=0.0,
+                max_new_tokens=512
+            )
 
     pred = outputs.text
     if isinstance(pred, str):
         pred = pred.strip()
     return pred
+
 
 
 # =====================
@@ -305,8 +321,29 @@ def evaluate_desta_binary_accuracy_on_dataset(
 # =====================
 
 def main():
+    import argparse
+    global ACD_ENABLED, ACD_ALPHA, DESTA_MODEL_ID
+    
+    parser = argparse.ArgumentParser(description="SAKURA Evaluation for DeSTA/ORCA models")
+    parser.add_argument("--model_id", type=str, default=DESTA_MODEL_ID,
+                        help="HuggingFace model ID or local checkpoint path")
+    parser.add_argument("--acd_alpha", type=float, default=None,
+                        help="ACD contrast strength (enables ACD if set). Try 0.3, 0.5, 0.7, 1.0")
+    parser.add_argument("--output_dir", type=str, default=RESULT_DIR,
+                        help="Directory to save results")
+    parser.add_argument("--datasets", type=str, nargs="+", default=None,
+                        help="Specific datasets to evaluate (default: all)")
+    args = parser.parse_args()
+    
+    # Update globals
+    DESTA_MODEL_ID = args.model_id
+    if args.acd_alpha is not None:
+        ACD_ENABLED = True
+        ACD_ALPHA = args.acd_alpha
+        print(f"ACD enabled with alpha={ACD_ALPHA}")
+    
     # 載入 DeSTA
-    print("Loading DeSTA model...")
+    print(f"Loading model from {DESTA_MODEL_ID}...")
     desta_model = DeSTA25AudioModel.from_pretrained(DESTA_MODEL_ID)
     desta_model.to(device)
     desta_model.eval()
@@ -315,10 +352,15 @@ def main():
     print("Loading Qwen judge model...")
     judge_tokenizer, judge_model = load_qwen_judge(JUDGE_MODEL_ID)
 
+    # 選擇 datasets
+    datasets_to_eval = DATASETS
+    if args.datasets:
+        datasets_to_eval = {k: v for k, v in DATASETS.items() if k in args.datasets}
+    
     # 跑所有 dataset × hop 組合
     all_stats = []
 
-    for dataset_name, dataset_id in DATASETS.items():
+    for dataset_name, dataset_id in datasets_to_eval.items():
         for hop_prefix in HOP_SPLITS:
             stats = evaluate_desta_binary_accuracy_on_dataset(
                 desta_model=desta_model,
@@ -328,12 +370,14 @@ def main():
                 dataset_name=dataset_name,
                 hop_prefix=hop_prefix,
                 split=DATA_SPLIT,
-                output_dir=RESULT_DIR,
+                output_dir=args.output_dir,
             )
             all_stats.append(stats)
 
     # 總結表
     print("\n================ Overall summary ================")
+    if ACD_ENABLED:
+        print(f"ACD alpha: {ACD_ALPHA}")
     for s in all_stats:
         hop_tag = s["hop_prefix"].rstrip("_")
         print(
@@ -345,3 +389,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

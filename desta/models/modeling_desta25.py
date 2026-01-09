@@ -2119,7 +2119,208 @@ class DeSTA25AudioModel(PreTrainedModel):
             (self.get_speech_timestamps, _, _, _, _) = utils
 
 
+    def generate_with_acd(
+        self, 
+        messages,
+        acd_alpha: float = 1.0,
+        acd_beta: float = 0.1,
+        temperature=0.7,
+        top_p=0.9,
+        do_sample=True,
+        max_new_tokens=512,
+    ):
+        """
+        Generate with Acoustic-Contrastive Decoding (ACD).
+        
+        ACD amplifies acoustically-grounded predictions by subtracting text-only priors:
+        logits_final = (1 + alpha) * logits_full - alpha * logits_blind
+        
+        This is particularly effective for paralinguistic tasks like sarcasm detection
+        where the acoustic signal conflicts with text semantics.
+        
+        Args:
+            messages: List of message dicts (same format as generate())
+            acd_alpha: Contrast strength (default: 1.0). Higher = more audio emphasis.
+            acd_beta: Plausibility threshold (default: 0.1). Only boost tokens above this prob.
+            temperature: Sampling temperature
+            top_p: Nucleus sampling parameter
+            do_sample: Whether to sample or use greedy decoding
+            max_new_tokens: Maximum tokens to generate
+            
+        Returns:
+            GenerationOutput with text, audios, and generated_ids
+        """
+        if not hasattr(self, "tokenizer"):
+            self._setup_generation()
+
+        if isinstance(messages, list):
+            if isinstance(messages[0], dict):
+                messages_list = [messages]
+            else: 
+                messages_list = messages
+        else:
+            raise ValueError("messages should be a list of dictionaries or a list of lists.")
+
+        all_audios = []
+        all_transcriptions = []
+        for messages in messages_list:
+            for message in messages:
+                content = message["content"]
+                audios = message.get("audios", [])
+                assert len(audios) == content.count(self.audio_locator), "audio count does not match (<|AUDIO|>) count"
+
+                for audio in audios:
+                    all_audios.append(audio["audio"])
+                    all_transcriptions.append(audio.get("text"))
+
+        if len(all_audios) == 0:
+            # No audio, fall back to regular generate
+            return self.generate(
+                messages_list[0] if len(messages_list) == 1 else messages_list,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+                max_new_tokens=max_new_tokens
+            )
+
+        # Process audio features (same as generate())
+        batch_features = []
+        asr_features = []
+        asr_indices = []
+        for i, (audio, trans) in enumerate(zip(all_audios, all_transcriptions)):
+            if not os.path.exists(audio):
+                raise ValueError(f"Audio file {audio} does not exist.")
+
+            feature = AudioSegment.from_file(
+                audio,
+                target_sr=16000,
+                channel_selector="average"
+            ).samples
+
+            batch_features.append(feature)
+
+            self._setup_vad()
+            is_speech = self.get_speech_timestamps(feature, self.vad_model)
+            if is_speech and trans is None:
+                asr_features.append(feature)
+                asr_indices.append(i)
+            if not is_speech:
+                all_transcriptions[i] = " "
+        
+        batch_features = self.processor(batch_features, sampling_rate=16000, return_tensors="pt").input_features
+        batch_features = batch_features.to(self.device)
+        
+        if self.config.connector_mode == "orca_hybrid":
+            audio_token_size = getattr(self.config, 'orca_global_num_tokens', 64)
+        elif self.config.connector_mode == "struct_orca":
+            num_groups = getattr(self.config, 'struct_orca_num_groups', 8)
+            queries_per_group = getattr(self.config, 'struct_orca_queries_per_group', 8)
+            audio_token_size = num_groups * queries_per_group
+        else:
+            audio_token_size = self.config.prompt_size
+        audio_size_list = [audio_token_size] * len(batch_features)
+
+        # Run ASR if needed
+        if asr_features:
+            asr_features = self.processor(asr_features, sampling_rate=16000, return_tensors="pt").input_features
+            asr_features = asr_features.to(self.device)
+
+            transcriptions = self.perception.whisper.generate(
+                input_features=asr_features,
+                attention_mask=None,
+                max_new_tokens=128
+            )
+            transcriptions = self.processor.batch_decode(
+                transcriptions,
+                skip_special_tokens=True,
+            )
+        else:
+            transcriptions = []
+
+        for i, transcription in zip(asr_indices, transcriptions):
+            all_transcriptions[i] = transcription.strip()
+                
+        transcription_size_list = [
+            len(self.tokenizer.tokenize(text, add_special_tokens=False)) for text in all_transcriptions
+        ]
+
+        # Prepare context
+        audio_context_list = []
+        start_positions_list = []
+        for messages in messages_list:
+            audio_context = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            audio_context = audio_context.replace(self.audio_locator, f"<start_audio>{self.audio_locator}<end_audio>")
+
+            audio_context, start_positions = _prepare_audio_context_and_start_positions(
+                    token_list=self.tokenizer.tokenize(audio_context), 
+                    audio_locator=self.audio_locator,
+                    audio_size_list=audio_size_list,
+                    transcription_size_list=transcription_size_list,
+                    placeholder_token=self.placeholder_token
+                )
+
+            audio_context = self.tokenizer.convert_tokens_to_string(audio_context)
+            audio_context_list.append(audio_context)
+            start_positions_list.append(start_positions)
+
+        audio_context_inputs = self.tokenizer(
+            audio_context_list,
+            truncation=True,
+            padding="longest",
+            return_tensors="pt",
+            return_length=True,
+            add_special_tokens=False,
+        )
+
+        audio_context_batch_start_positions = []
+        for i in range(audio_context_inputs["length"].size(0)):
+            total_length = audio_context_inputs["length"][i]
+            pad_length = total_length - audio_context_inputs["attention_mask"][i].sum()
+
+            for start_position in start_positions_list[i]:
+                audio_context_batch_start_positions.append((i, start_position + pad_length))
+
+        batch_transcription_ids = []
+        for transcription in all_transcriptions:
+            batch_transcription_ids.append(
+                self.tokenizer.encode(transcription, add_special_tokens=False, return_tensors="pt").long().to(self.device)
+            )
+
+        inputs = {
+            "batch_features": batch_features,
+            "batch_transcription_ids": batch_transcription_ids,
+            "context_input_ids": audio_context_inputs["input_ids"],
+            "context_attention_mask": audio_context_inputs['attention_mask'],
+            "context_batch_start_positions": audio_context_batch_start_positions,
+        }
+        inputs = {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            for k, v in inputs.items()
+        }
+
+        # Use ACD generation instead of standard generation
+        generated_ids = self._generate_acd(
+            inputs, 
+            pad_token_id=self.tokenizer.pad_token_id,
+            temperature=temperature,
+            top_p=top_p,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            acd_alpha=acd_alpha
+        )
+
+        return GenerationOutput(
+            text=self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True),
+            audios=[(a, t) for a,t in zip(all_audios, all_transcriptions)],
+            generated_ids=generated_ids.tolist()
+        )
+
     def generate(self, messages,
+
         # LLM generation args
         temperature=0.7,
         top_p=0.9,

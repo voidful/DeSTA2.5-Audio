@@ -173,3 +173,121 @@ def test_orca_mixed_precision(orca_config):
         pytest.fail(f"ORCAHybridConnector failed with mixed precision: {e}")
     
     assert global_tokens.dtype == torch.bfloat16
+
+
+# === Struct-ORCA Tests ===
+
+@pytest.fixture
+def struct_orca_config():
+    """Config with Struct-ORCA enabled for testing."""
+    return DeSTA25Config(
+        llm_model_id="DeSTA-ntu/Llama-3.1-8B-Instruct",
+        encoder_model_id="openai/whisper-tiny",
+        connector_mode="struct_orca",
+        qformer_num_hidden_layers=2,
+        prompt_size=64,
+        use_lora=False,
+        struct_orca_num_groups=8,
+        struct_orca_queries_per_group=8,
+        struct_orca_inter_group_weight=0.1,
+        struct_orca_intra_group_weight=0.01,
+        struct_orca_iv_weight=0.1,
+        struct_orca_acd_alpha=0.5,
+    )
+
+
+def test_struct_orca_config_fields():
+    """Test that Struct-ORCA config fields are properly initialized."""
+    config = DeSTA25Config(
+        connector_mode="struct_orca",
+        struct_orca_num_groups=8,
+        struct_orca_queries_per_group=8,
+        struct_orca_inter_group_weight=0.1,
+    )
+    assert config.struct_orca_num_groups == 8
+    assert config.struct_orca_queries_per_group == 8
+    assert config.struct_orca_inter_group_weight == 0.1
+    # Check defaults
+    assert config.struct_orca_intra_group_weight == 0.01
+    assert config.struct_orca_iv_weight == 0.1
+
+
+def test_groupwise_orthogonal_connector_initialization(struct_orca_config):
+    """Test GroupwiseOrthogonalConnector initialization."""
+    from desta.models.modeling_desta25 import GroupwiseOrthogonalConnector
+    connector = GroupwiseOrthogonalConnector(struct_orca_config)
+    
+    assert isinstance(connector, torch.nn.Module)
+    assert connector.num_groups == 8
+    assert connector.queries_per_group == 8
+    assert connector.total_queries == 64
+    assert len(connector.group_queries) == 8  # 8 groups
+
+
+def test_groupwise_orthogonal_connector_forward(struct_orca_config):
+    """Test GroupwiseOrthogonalConnector forward pass."""
+    from desta.models.modeling_desta25 import GroupwiseOrthogonalConnector
+    connector = GroupwiseOrthogonalConnector(struct_orca_config)
+    
+    batch_size = 2
+    seq_len = 100
+    d_encoder = 384  # whisper-tiny d_model
+    
+    # Create mock hidden states for all layers (tiny has 4 target layers)
+    encoder_hidden_states = [torch.randn(batch_size, seq_len, d_encoder) for _ in range(4)]
+    
+    global_tokens, group_losses = connector(encoder_hidden_states)
+    
+    # Check output shapes
+    total_tokens = struct_orca_config.struct_orca_num_groups * struct_orca_config.struct_orca_queries_per_group
+    assert global_tokens.shape == (batch_size, total_tokens, struct_orca_config.llm_config.hidden_size)
+    
+    # Check group losses are computed
+    assert "L_inter_group" in group_losses
+    assert "L_intra_group" in group_losses
+
+
+def test_text_content_discriminator():
+    """Test TextContentDiscriminator for IV-GD."""
+    from desta.models.modeling_desta25 import TextContentDiscriminator
+    
+    hidden_size = 128
+    num_groups = 8
+    vocab_size = 1000
+    batch_size = 4
+    
+    discriminator = TextContentDiscriminator(
+        hidden_size=hidden_size,
+        num_groups=num_groups,
+        vocab_size=vocab_size
+    )
+    
+    # Input: group tokens
+    group_tokens = torch.randn(batch_size, num_groups * 8, hidden_size)
+    transcription_ids = torch.randint(0, vocab_size, (batch_size, 20))
+    
+    output = discriminator(group_tokens, transcription_ids)
+    
+    assert "loss" in output
+    assert output["loss"].requires_grad
+
+
+def test_gradient_reversal_layer():
+    """Test GradientReversalLayer for adversarial training."""
+    from desta.models.modeling_desta25 import GradientReversalLayer
+    
+    grl = GradientReversalLayer(lambda_=1.0)
+    
+    x = torch.randn(4, 10, requires_grad=True)
+    y = grl(x)
+    
+    # Forward: identity
+    assert torch.allclose(y, x)
+    
+    # Backward: negated gradients
+    loss = y.sum()
+    loss.backward()
+    
+    # Gradients should be negated
+    assert torch.allclose(x.grad, -torch.ones_like(x))
+
