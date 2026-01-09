@@ -58,3 +58,7 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.struct_orca.inter_group_weight=0.1 \
     ++model.struct_orca.intra_group_weight=0.01 \
     ++model.struct_orca.iv_weight=0.05
+
+# ===== 上傳到 HuggingFace =====
+echo 'Training complete. Uploading to HuggingFace...'
+./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_C1_iv_0.05"

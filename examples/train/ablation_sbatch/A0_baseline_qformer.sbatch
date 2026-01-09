@@ -56,3 +56,7 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++exp_dir=${exp_dir} \
     project=${project} \
     name=${name} \
+
+# ===== 上傳到 HuggingFace =====
+echo 'Training complete. Uploading to HuggingFace...'
+./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_A0_baseline_qformer"
