@@ -1254,15 +1254,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             if struct_orca_losses is not None:
                 outputs.struct_orca_losses = struct_orca_losses
             
-            # Get audio tokens from the batch (stored during _prepare_inputs_for_llm)
-            # For discriminator, we need the raw global tokens before embedding into sequence
-            if hasattr(self, '_struct_orca_audio_tokens') and self._struct_orca_audio_tokens is not None:
-                outputs.audio_global = self._struct_orca_audio_tokens
-                self._struct_orca_audio_tokens = None  # Clear after use
-            else:
-                # DEBUG: Log if audio_global is not set
-                import logging
-                logging.warning(f"[DEBUG] _struct_orca_audio_tokens not set. hasattr={hasattr(self, '_struct_orca_audio_tokens')}, value={getattr(self, '_struct_orca_audio_tokens', 'MISSING')}")
+            # Audio tokens are stored in self._struct_orca_audio_tokens during _prepare_inputs_for_llm
+            # Trainer will access them directly from the model after forward returns
+            # DO NOT clear here - trainer needs to access them in compute_loss
             
             return outputs
         else:

@@ -102,14 +102,13 @@ class DeSTA25Trainer(Trainer):
                 # Compute discriminator loss for IV-Guided Disentanglement
                 discriminator = getattr(actual_model, "content_discriminator", None)
                 
-                # Get audio tokens from outputs or fallback to model attribute
-                audio_tokens = getattr(outputs, "audio_global", None)
-                if audio_tokens is None:
-                    # Fallback: try to get from model directly (may not have been transferred to outputs)
-                    audio_tokens = getattr(actual_model, "_struct_orca_audio_tokens", None)
-                    if audio_tokens is not None:
-                        # Clear after retrieval to prevent reuse
-                        actual_model._struct_orca_audio_tokens = None
+                # Get audio tokens directly from model (stored during _prepare_inputs_for_llm)
+                # Note: outputs.audio_global may not be set due to dataclass limitations
+                audio_tokens = getattr(actual_model, "_struct_orca_audio_tokens", None)
+                
+                # Debug log every 100 steps
+                if self.state.global_step % 100 == 0:
+                    logging.info(f"[IV DEBUG] Step {self.state.global_step}: discriminator={discriminator is not None}, audio_tokens={audio_tokens is not None}, shape={audio_tokens.shape if audio_tokens is not None else 'N/A'}")
                 
                 if discriminator is not None and audio_tokens is not None:
                     # Get transcription IDs from inputs
@@ -131,6 +130,9 @@ class DeSTA25Trainer(Trainer):
                             orca_total += disc_loss.item()
                             log_dict["train/L_iv_discriminator"] = disc_output["loss"].item()
                             log_dict["train/disc_accuracy"] = disc_output.get("accuracy", 0)
+                    
+                    # Clear audio tokens after use to prevent memory accumulation
+                    actual_model._struct_orca_audio_tokens = None
                     
                     if orca_total > 0:
                         log_dict["train/struct_orca_total"] = orca_total
