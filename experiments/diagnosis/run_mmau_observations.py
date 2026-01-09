@@ -122,9 +122,10 @@ def extract_representations_from_mmau(
                     outputs = model.perception(input_features=feature)
                     # perception returns tuple: (audio_tokens, lengths)
                     if isinstance(outputs, tuple):
-                        audio_tokens = outputs[0].cpu().numpy()  # [1, num_tokens, H]
+                        # Convert to float32 before numpy (bfloat16 not supported by numpy)
+                        audio_tokens = outputs[0].float().cpu().numpy()  # [1, num_tokens, H]
                     else:
-                        audio_tokens = outputs.audio_global.cpu().numpy()
+                        audio_tokens = outputs.audio_global.float().cpu().numpy()
                 
                 all_audio_tokens.append(audio_tokens[0])
                 
@@ -132,7 +133,7 @@ def extract_representations_from_mmau(
                 question = item.get("question", "")
                 text_ids = model.tokenizer(question, return_tensors="pt").input_ids.to(device)
                 with torch.no_grad():
-                    text_emb = model.llm_model.model.embed_tokens(text_ids).mean(dim=1).cpu().numpy()
+                    text_emb = model.llm_model.model.embed_tokens(text_ids).float().mean(dim=1).cpu().numpy()
                 all_text_embeddings.append(text_emb[0])
                 
                 # Collect labels
