@@ -1,12 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=A1_flat64
-#SBATCH --output=logs/A1_flat64_%j.out
-#SBATCH --error=logs/A1_flat64_%j.err
+#SBATCH --partition=normal
+#SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=200G
 #SBATCH --time=48:00:00
+#SBATCH --output=./slurm-report/A1_flat64_%j.out
+#SBATCH --error=./slurm-report/A1_flat64_%j.out
 
 # ==========================================
 # A1: Flat Global 64 (ORCA without Grouping)

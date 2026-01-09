@@ -1,12 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=B1_inter05
-#SBATCH --output=logs/B1_inter05_%j.out
-#SBATCH --error=logs/B1_inter05_%j.err
+#SBATCH --partition=normal
+#SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=200G
 #SBATCH --time=48:00:00
+#SBATCH --output=./slurm-report/B1_inter05_%j.out
+#SBATCH --error=./slurm-report/B1_inter05_%j.out
 
 # ==========================================
 # B1: Inter-Group Orthogonality (weight=0.05)

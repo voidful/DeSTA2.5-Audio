@@ -1,12 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=C2_iv10
-#SBATCH --output=logs/C2_iv10_%j.out
-#SBATCH --error=logs/C2_iv10_%j.err
+#SBATCH --partition=normal
+#SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=200G
 #SBATCH --time=48:00:00
+#SBATCH --output=./slurm-report/C2_iv10_%j.out
+#SBATCH --error=./slurm-report/C2_iv10_%j.out
 
 # ==========================================
 # C2: IV-Guided Disentanglement (weight=0.1)

@@ -1,12 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=A2_grouped
-#SBATCH --output=logs/A2_grouped_%j.out
-#SBATCH --error=logs/A2_grouped_%j.err
+#SBATCH --partition=normal
+#SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=200G
 #SBATCH --time=48:00:00
+#SBATCH --output=./slurm-report/A2_grouped_%j.out
+#SBATCH --error=./slurm-report/A2_grouped_%j.out
 
 # ==========================================
 # A2: Grouped 8×8 (ORCA with Grouping, No Losses)

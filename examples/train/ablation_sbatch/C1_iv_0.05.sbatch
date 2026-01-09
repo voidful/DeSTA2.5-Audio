@@ -1,12 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=C1_iv05
-#SBATCH --output=logs/C1_iv05_%j.out
-#SBATCH --error=logs/C1_iv05_%j.err
+#SBATCH --partition=normal
+#SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=200G
 #SBATCH --time=48:00:00
+#SBATCH --output=./slurm-report/C1_iv05_%j.out
+#SBATCH --error=./slurm-report/C1_iv05_%j.out
 
 # ==========================================
 # C1: IV-Guided Disentanglement (weight=0.05)
