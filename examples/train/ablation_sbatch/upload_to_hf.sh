@@ -44,7 +44,7 @@ repo_id = '${HF_USERNAME}/${MODEL_NAME}'
 
 # Create repo if not exists
 try:
-    api.create_repo(repo_id, exist_ok=True, private=False)
+    api.create_repo(repo_id, exist_ok=True, private=True)
 except Exception as e:
     print(f'Repo creation note: {e}')
 
