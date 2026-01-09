@@ -117,9 +117,14 @@ def extract_representations_from_mmau(
                 ).input_features.to(device)
                 
                 # Get audio representations through perception module
+                # Returns (global_tokens, speech_feature_lengths) tuple
                 with torch.no_grad():
                     outputs = model.perception(input_features=feature)
-                    audio_tokens = outputs.audio_global.cpu().numpy()  # [1, num_tokens, H]
+                    # perception returns tuple: (audio_tokens, lengths)
+                    if isinstance(outputs, tuple):
+                        audio_tokens = outputs[0].cpu().numpy()  # [1, num_tokens, H]
+                    else:
+                        audio_tokens = outputs.audio_global.cpu().numpy()
                 
                 all_audio_tokens.append(audio_tokens[0])
                 
