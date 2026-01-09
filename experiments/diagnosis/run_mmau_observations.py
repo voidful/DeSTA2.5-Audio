@@ -132,7 +132,7 @@ def extract_representations_from_mmau(
                 question = item.get("question", "")
                 text_ids = model.tokenizer(question, return_tensors="pt").input_ids.to(device)
                 with torch.no_grad():
-                    text_emb = model.llm.model.embed_tokens(text_ids).mean(dim=1).cpu().numpy()
+                    text_emb = model.llm_model.model.embed_tokens(text_ids).mean(dim=1).cpu().numpy()
                 all_text_embeddings.append(text_emb[0])
                 
                 # Collect labels
