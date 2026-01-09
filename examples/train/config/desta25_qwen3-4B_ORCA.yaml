@@ -66,6 +66,7 @@ model:
 optim:
   name: adafactor  # Memory-efficient optimizer
   lr: 1e-4
+  weight_decay: 0  # Required by training script
   scale_parameter: false
   relative_step: false
   warmup_init: false
