@@ -72,7 +72,16 @@ def extract_representations_from_mmau(
     Returns:
         Dict with audio_tokens, text_embeddings, and labels (task, difficulty)
     """
+    from transformers import AutoProcessor
+    
     model.eval()
+    
+    # Initialize processor (model.processor is lazily loaded, so we load it directly)
+    processor = AutoProcessor.from_pretrained(model.config.encoder_model_id)
+    
+    # Initialize tokenizer if not already done
+    if not hasattr(model, 'tokenizer'):
+        model._setup_generation()
     
     all_audio_tokens = []
     all_text_embeddings = []
@@ -100,8 +109,8 @@ def extract_representations_from_mmau(
                 # Write to temp file
                 write_wav_from_array(audio_array, sample_rate, wav_path)
                 
-                # Process through model's processor
-                feature = model.processor(
+                # Process through processor
+                feature = processor(
                     audio_array, 
                     sampling_rate=16000, 
                     return_tensors="pt"
@@ -129,6 +138,7 @@ def extract_representations_from_mmau(
             except Exception as e:
                 print(f"Error processing sample {i}: {e}")
                 continue
+
     
     # Stack arrays
     audio_tokens = np.stack(all_audio_tokens)
