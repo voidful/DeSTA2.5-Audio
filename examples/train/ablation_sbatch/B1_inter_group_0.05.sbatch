@@ -30,8 +30,8 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-0.6b_ORCA
-dataset_config=DestaAQA-5M_local
+config=desta25_qwen3-4B_ORCA
+dataset_config=DestaAQA-5M_4b_orca
 
 project=struct_orca_ablation
 name="B1_inter_group_0.05"
@@ -53,8 +53,6 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++exp_dir=${exp_dir} \
     project=${project} \
     name=${name} \
-    ++dataset.train_ds.data_root=/work/voidful2nlp/desta \
-    ++dataset.validation_ds.data_root=/work/voidful2nlp/desta \
     ++model.struct_orca.num_groups=8 \
     ++model.struct_orca.queries_per_group=8 \
     ++model.struct_orca.inter_group_weight=0.05 \
