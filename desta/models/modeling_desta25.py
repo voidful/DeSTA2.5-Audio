@@ -1092,18 +1092,19 @@ class DeSTA25AudioModel(PreTrainedModel):
         is_struct_orca = self.config.connector_mode == "struct_orca"
         if is_struct_orca:
             logging.info("Enabling Struct-ORCA components")
-            
-            # Create discriminator for IV-Guided Disentanglement
-            vocab_size = getattr(self.config.llm_config, 'vocab_size', 32000)
-            self.content_discriminator = TextContentDiscriminator(
-                hidden_size=self.config.llm_config.hidden_size,
-                num_groups=self.config.struct_orca_num_groups,
-                vocab_size=vocab_size,
-            )
-            self.content_discriminator.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
-            
-            # Storage for discriminator outputs (set during forward)
-            self._discriminator_outputs = None
+        
+        # Always create discriminator for IV-Guided Disentanglement to ensure 
+        # consistent parameter count across DDP ranks (even if iv_weight=0)
+        vocab_size = getattr(self.config.llm_config, 'vocab_size', 32000)
+        self.content_discriminator = TextContentDiscriminator(
+            hidden_size=self.config.llm_config.hidden_size,
+            num_groups=getattr(self.config, 'struct_orca_num_groups', 8),
+            vocab_size=vocab_size,
+        )
+        self.content_discriminator.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
+        
+        # Storage for discriminator outputs (set during forward)
+        self._discriminator_outputs = None
 
         self.configure_trainable_parameters()
 
