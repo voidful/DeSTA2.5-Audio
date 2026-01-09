@@ -8,6 +8,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
+#SBATCH --exclude=hgpn21
 #SBATCH --output=./slurm-report/A5_grp2x32_%j.out
 #SBATCH --error=./slurm-report/A5_grp2x32_%j.out
 
