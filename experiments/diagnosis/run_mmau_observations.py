@@ -346,11 +346,11 @@ def run_observation3_entanglement(audio_tokens, labels, label_mappings, output_d
 
 def main():
     parser = argparse.ArgumentParser(description="Run Observations on MMAU Dataset")
-    parser.add_argument("--model_id", type=str, default="voidful/DeSTA2.5-Qwen3-0.6B",
+    parser.add_argument("--model_id", type=str, default="voidful/QAQ_4b",
                         help="Model ID or checkpoint path")
     parser.add_argument("--split", type=str, default=DEFAULT_SPLIT,
                         help="Dataset split (test_mini, test)")
-    parser.add_argument("--max_samples", type=int, default=500,
+    parser.add_argument("--max_samples", type=int, default=1000,
                         help="Maximum samples to analyze")
     parser.add_argument("--output_dir", type=str, default="./mmau_observation_results",
                         help="Output directory")
