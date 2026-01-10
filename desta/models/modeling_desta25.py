@@ -1096,12 +1096,15 @@ class DeSTA25AudioModel(PreTrainedModel):
             # prepare_result is just inputs_embeds for struct_orca (same as qformer_1)
             inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
             
+            # Check if we need to compute contrastive alignment loss
+            compute_align_loss = getattr(self.config, 'orca_align_weight_local', 0.0) > 0
+            
             # Call LLM 
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 labels=labels,
-                output_hidden_states=False,  # Not needed for struct_orca
+                output_hidden_states=compute_align_loss,  # Only if needed for alignment loss
             )
             
             # Collect group losses from perception module (for L_inter_group, L_intra_group)
@@ -1118,6 +1121,91 @@ class DeSTA25AudioModel(PreTrainedModel):
                         outputs.loss = outputs.loss + loss
                         orca_total += loss.item()
                         orca_loss_log[name] = loss.item()  # Detached for logging
+            
+            # Compute contrastive alignment loss if enabled
+            if compute_align_loss and labels is not None and len(batch_transcription_ids) > 0:
+                # Get Q-Former tokens from model (stored in _prepare_inputs_for_llm)
+                struct_orca_tokens = getattr(self, "_struct_orca_audio_tokens", None)
+                
+                if struct_orca_tokens is not None:
+                    # Get transcription embeddings (negative samples)
+                    with torch.no_grad():
+                        transcription_embeds_list = []
+                        for trans_ids in batch_transcription_ids:
+                            trans_ids = trans_ids.squeeze(0)
+                            if trans_ids.device != inputs_embeds.device:
+                                trans_ids = trans_ids.to(inputs_embeds.device)
+                            trans_emb = self.llm_model.model.embed_tokens(trans_ids)
+                            transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
+                        transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [N_audio, H]
+                    
+                    # Get target embeddings from labels (positive samples)
+                    with torch.no_grad():
+                        target_mask = labels != -100  # [B, T]
+                        if target_mask.any():
+                            target_ids = labels.clone()
+                            target_ids[~target_mask] = 0
+                            target_emb_full = self.llm_model.model.embed_tokens(target_ids)  # [B, T, H]
+                            
+                            target_embeds_list = []
+                            for b in range(target_mask.size(0)):
+                                if target_mask[b].any():
+                                    target_emb = target_emb_full[b, target_mask[b], :]
+                                    target_embeds_list.append(target_emb.mean(dim=0))
+                                else:
+                                    target_embeds_list.append(torch.zeros(target_emb_full.size(-1), device=target_emb_full.device))
+                            target_embeds = torch.stack(target_embeds_list, dim=0)  # [B, H]
+                        else:
+                            target_embeds = None
+                    
+                    # Compute contrastive alignment loss
+                    if transcription_embeds is not None and target_embeds is not None:
+                        # Pool audio tokens: [N_audio, K, H] -> [N_audio, H]
+                        audio_pooled = F.normalize(struct_orca_tokens.mean(dim=1), dim=-1)
+                        
+                        # Handle batch size mismatch (N_audio may differ from B)
+                        # Use first transcription/target embed for each audio
+                        num_audio = audio_pooled.size(0)
+                        if transcription_embeds.size(0) == num_audio:
+                            trans_pooled = F.normalize(transcription_embeds, dim=-1)
+                        else:
+                            # Repeat to match audio count
+                            trans_pooled = F.normalize(transcription_embeds[:num_audio], dim=-1)
+                        
+                        if target_embeds.size(0) >= num_audio:
+                            target_pooled = F.normalize(target_embeds[:num_audio], dim=-1)
+                        else:
+                            # Repeat last target embed to match
+                            target_pooled = F.normalize(target_embeds.repeat(num_audio, 1)[:num_audio], dim=-1)
+                        
+                        # Similarity to transcription (should be LOW - negative samples)
+                        sim_trans = F.cosine_similarity(audio_pooled, trans_pooled, dim=-1)
+                        
+                        # Similarity to target (should be HIGH - positive samples)
+                        sim_target = F.cosine_similarity(audio_pooled, target_pooled, dim=-1)
+                        
+                        # Contrastive loss with margin
+                        # Loss = max(0, margin + sim_trans - sim_target)
+                        margin = 0.5
+                        contrastive_loss = torch.clamp(margin + sim_trans - sim_target, min=0.0).mean()
+                        
+                        # Also add direct target alignment term
+                        target_align_loss = (1 - sim_target).mean()
+                        
+                        # Combined loss
+                        L_align = contrastive_loss + 0.5 * target_align_loss
+                        L_align_weighted = self.config.orca_align_weight_local * L_align
+                        
+                        # Add to total loss
+                        outputs.loss = outputs.loss + L_align_weighted
+                        orca_total += L_align_weighted.item()
+                        
+                        # Log individual components
+                        orca_loss_log["L_align"] = L_align_weighted.item()
+                        orca_loss_log["L_align_contrastive"] = contrastive_loss.item()
+                        orca_loss_log["L_align_target"] = target_align_loss.item()
+                        orca_loss_log["sim_trans"] = sim_trans.mean().item()
+                        orca_loss_log["sim_target"] = sim_target.mean().item()
             
             # Store detached loss values for trainer logging (not for computation)
             self._struct_orca_loss_log = orca_loss_log
