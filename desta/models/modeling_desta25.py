@@ -18,6 +18,7 @@ from transformers.models.bert.modeling_bert import BertEncoder
 from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
 import torch.distributed as dist
+from desta.models.helper_modules import GradientReversal, TranscriptionDiscriminator
 
 
 
@@ -853,6 +854,9 @@ class DeSTA25Config(PretrainedConfig):
                  orca_ortho_diversity_weight=0.01,
                  orca_ortho_weight_qformer_local=0.01,  # Orthogonality between Q-Former global and local tokens
                  orca_align_weight_local=0.05,  # Alignment loss to bring local tokens closer to text embeddings
+                 orca_orthogonal_projection=False,  # If True, project audio tokens to be orthogonal to transcription
+                 orca_adversarial_erasure=False,  # If True, use adversarial training to erase ASR content
+                 orca_adversarial_weight=0.0,  # Weight for adversarial loss
                  # Struct-ORCA configuration fields
                  struct_orca_num_groups=8,  # Number of semantic groups for queries
                  struct_orca_queries_per_group=8,  # Queries per group (total = num_groups * queries_per_group)
@@ -894,6 +898,9 @@ class DeSTA25Config(PretrainedConfig):
         self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
         self.orca_ortho_weight_qformer_local = orca_ortho_weight_qformer_local
         self.orca_align_weight_local = orca_align_weight_local
+        self.orca_orthogonal_projection = orca_orthogonal_projection
+        self.orca_adversarial_erasure = orca_adversarial_erasure
+        self.orca_adversarial_weight = orca_adversarial_weight
 
         # Struct-ORCA configuration
         self.struct_orca_num_groups = struct_orca_num_groups
@@ -968,6 +975,15 @@ class DeSTA25AudioModel(PreTrainedModel):
         is_struct_orca = self.config.connector_mode == "struct_orca"
         if is_struct_orca:
             logging.info("Enabling Struct-ORCA components")
+
+        # === Adversarial Erasure Setup ===
+        if getattr(self.config, 'orca_adversarial_erasure', False):
+            logging.info("Enabling Adversarial Erasure components")
+            self.discriminator = TranscriptionDiscriminator(
+                hidden_size=self.config.llm_config.hidden_size,
+                output_size=self.config.llm_config.hidden_size  # Predicts transcription embedding
+            )
+            self.discriminator.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
 
         self.configure_trainable_parameters()
         
@@ -1096,8 +1112,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             # prepare_result is just inputs_embeds for struct_orca (same as qformer_1)
             inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
             
-            # Check if we need to compute contrastive alignment loss
+            # Check if we need to compute contrastive alignment loss or adversarial erasure
             compute_align_loss = getattr(self.config, 'orca_align_weight_local', 0.0) > 0
+            compute_adversarial = getattr(self.config, 'orca_adversarial_erasure', False)
             
             # Call LLM 
             outputs = self.llm_model(
@@ -1122,8 +1139,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                         orca_total += loss.item()
                         orca_loss_log[name] = loss.item()  # Detached for logging
             
-            # Compute contrastive alignment loss if enabled
-            if compute_align_loss and labels is not None and len(batch_transcription_ids) > 0:
+            # Compute contrastive alignment/adversarial loss if enabled
+            if (compute_align_loss or compute_adversarial) and labels is not None and len(batch_transcription_ids) > 0:
                 # Get Q-Former tokens from model (stored in _prepare_inputs_for_llm)
                 struct_orca_tokens = getattr(self, "_struct_orca_audio_tokens", None)
                 
@@ -1226,7 +1243,39 @@ class DeSTA25AudioModel(PreTrainedModel):
                             orca_loss_log["L_align_contrastive"] = contrastive_loss.item()
                             orca_loss_log["L_align_target"] = target_align_loss.item()
                             orca_loss_log["sim_trans"] = sim_trans.mean().item()
+                            orca_loss_log["sim_trans"] = sim_trans.mean().item()
                             orca_loss_log["sim_target"] = sim_target.mean().item()
+                        
+                        # Adversarial Erasure (Method 1)
+                        if compute_adversarial and hasattr(self, 'discriminator'):
+                            # Use normalized audio pool (or unnormalized?) - let's use unnormalized for discriminator input usually, 
+                            # but keeping it consistent with projection is good.
+                            # Let's use MEAN pooled token (audio_mean computed above)
+                            
+                            # Gradient Reversal
+                            audio_reversed = GradientReversal.apply(audio_mean, 1.0)
+                            
+                            # Predict transcription
+                            pred_trans = self.discriminator(audio_reversed)
+                            
+                            # Target: trans_pooled (normalized) or transcription_embeds (unnormalized)?
+                            # Let's use Normalized Target (trans_pooled) to focus on direction/content, not magnitude.
+                            # And normalize prediction?
+                            # Usually simple MSE on embeddings is fine.
+                            # Let's use trans_pooled which is matched to audio count.
+                            
+                            target = trans_pooled.detach() # Detach target to be safe (though it's from Frozen LLM)
+                            
+                            # MSE Loss
+                            loss_adv = F.mse_loss(pred_trans, target)
+                            
+                            # Add to total loss
+                            weight_adv = getattr(self.config, 'orca_adversarial_weight', 0.1)
+                            L_adv_weighted = weight_adv * loss_adv
+                            
+                            outputs.loss = outputs.loss + L_adv_weighted
+                            orca_total += L_adv_weighted.item()
+                            orca_loss_log["L_adv"] = loss_adv.item()
             
             # Store detached loss values for trainer logging (not for computation)
             self._struct_orca_loss_log = orca_loss_log
@@ -1432,6 +1481,20 @@ class DeSTA25AudioModel(PreTrainedModel):
 
             # get transcription embeddings
             transcription_embeddings = transcription_embeddings_list[audio_batch_idx] # (length, dim)
+            
+            # Apply Orthogonal Projection (Method 2)
+            if getattr(self.config, 'orca_orthogonal_projection', False) and transcription_embeddings.numel() > 0:
+                # Compute transcription direction
+                trans_mean = transcription_embeddings.mean(dim=0)
+                trans_dir = F.normalize(trans_mean, dim=0, eps=1e-8)
+                
+                # Project audio features onto transcription direction
+                # proj = (v . u) * u
+                dot_prod = torch.matmul(audio_features, trans_dir) # [T_audio]
+                proj = dot_prod.unsqueeze(-1) * trans_dir.unsqueeze(0) # [T_audio, D]
+                
+                # Remove projection to make orthogonal
+                audio_features = audio_features - proj
             trans_len = transcription_embeddings.size(0)
             
             # Compute transcription position in final sequence
