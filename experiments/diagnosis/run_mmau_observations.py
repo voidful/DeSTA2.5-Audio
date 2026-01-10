@@ -712,6 +712,11 @@ def run_comparison_analysis(model1, model2, name1, name2, dataset, args, device)
     | PC1 Variance              | {var1[0]*100:<19.2f}% | {var2[0]*100:<19.2f}% | {'→' if var2[0] < var1[0] else '←'} |
     | Token Cosine Sim          | {sim1:<20.4f} | {sim2:<20.4f} | {'→' if sim2 < sim1 else '←'} |
     | Task Silhouette           | {sil1:<20.4f} | {sil2:<20.4f} | {'→' if sil2 > sil1 else '←'} |
+    |---------------------------|{'-'*22}|{'-'*22}|--------|
+    | Group Indep. Score (GIS)  | {group_metrics1['group_independence_score']:<20.4f} | {group_metrics2['group_independence_score']:<20.4f} | {'→' if group_metrics2['group_independence_score'] > group_metrics1['group_independence_score'] else '←'} |
+    | Intra-Group Div. (IGD)    | {group_metrics1['intra_group_diversity']['mean']:<20.4f} | {group_metrics2['intra_group_diversity']['mean']:<20.4f} | - |
+    | Token Util. Var. (TUV)    | {group_metrics1['token_utilization_variance']:<20.4f} | {group_metrics2['token_utilization_variance']:<20.4f} | {'→' if group_metrics2['token_utilization_variance'] > group_metrics1['token_utilization_variance'] else '←'} |
+    | Centroid Orthogonality    | {group_metrics1['centroid_orthogonality']:<20.4f} | {group_metrics2['centroid_orthogonality']:<20.4f} | {'→' if group_metrics2['centroid_orthogonality'] > group_metrics1['centroid_orthogonality'] else '←'} |
     """
     print(summary_table)
     
