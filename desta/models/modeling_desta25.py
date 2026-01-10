@@ -20,129 +20,6 @@ from safetensors.torch import load_file
 import torch.distributed as dist
 
 
-# === Gradient Reversal for Adversarial Training ===
-class GradientReversalFunction(torch.autograd.Function):
-    """
-    Gradient Reversal Layer for adversarial training.
-    Forward pass is identity, backward pass negates gradients.
-    """
-    @staticmethod
-    def forward(ctx, x, lambda_):
-        ctx.lambda_ = lambda_
-        return x.clone()
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -ctx.lambda_ * grad_output, None
-
-
-class GradientReversalLayer(nn.Module):
-    """Wraps GradientReversalFunction for use in nn.Sequential."""
-    def __init__(self, lambda_=1.0):
-        super().__init__()
-        self.lambda_ = lambda_
-    
-    def forward(self, x):
-        return GradientReversalFunction.apply(x, self.lambda_)
-    
-    def set_lambda(self, lambda_):
-        self.lambda_ = lambda_
-
-
-class TextContentDiscriminator(nn.Module):
-    """
-    Discriminator for IV-Guided Disentanglement.
-    
-    Tries to predict text content from audio features.
-    If successful, audio features contain linguistic information (bad).
-    The Q-Former should learn to fool this discriminator.
-    
-    Uses Gradient Reversal to enable end-to-end adversarial training.
-    """
-    def __init__(self, hidden_size: int, num_groups: int = 8, vocab_size: int = 32000):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_groups = num_groups
-        
-        # Gradient reversal layer
-        self.grl = GradientReversalLayer(lambda_=1.0)
-        
-        # Per-group discriminators (each group should be disentangled)
-        # Using shared backbone with group-specific heads
-        self.shared_backbone = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-        )
-        
-        # Prediction head: predicts bag-of-words distribution
-        # Simpler than full sequence prediction, but tests if audio encodes content
-        self.content_head = nn.Sequential(
-            nn.Linear(hidden_size // 2, hidden_size // 4),
-            nn.GELU(),
-            nn.Linear(hidden_size // 4, vocab_size),
-        )
-    
-    def forward(
-        self, 
-        group_tokens: torch.Tensor,  # [B, num_groups * K, H]
-        transcription_ids: Optional[torch.Tensor] = None,  # [B, T] target text tokens
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass with CIB loss computation.
-        
-        Args:
-            group_tokens: Audio tokens from GroupwiseOrthogonalConnector
-            transcription_ids: Target transcription token IDs (for supervision)
-            
-        Returns:
-            Dict with discriminator loss and predictions
-        """
-        # Apply gradient reversal
-        reversed_tokens = self.grl(group_tokens)  # [B, K_total, H]
-        
-        # Pool tokens
-        pooled = reversed_tokens.mean(dim=1)  # [B, H]
-        
-        # Discriminator forward
-        features = self.shared_backbone(pooled)  # [B, H/2]
-        logits = self.content_head(features)  # [B, vocab_size]
-        
-        result = {"logits": logits}
-        
-        # Compute loss if targets provided
-        if transcription_ids is not None:
-            # Create bag-of-words target (multi-label)
-            batch_size = logits.size(0)
-            vocab_size = logits.size(1)
-            
-            # Convert transcription_ids to bag-of-words
-            bow_target = torch.zeros(batch_size, vocab_size, device=logits.device)
-            for b in range(batch_size):
-                valid_ids = transcription_ids[b][transcription_ids[b] >= 0]
-                valid_ids = valid_ids[valid_ids < vocab_size]  # Clip to vocab size
-                if len(valid_ids) > 0:
-                    bow_target[b].scatter_(0, valid_ids, 1.0)
-            
-            # Binary cross-entropy loss (multi-label)
-            loss = F.binary_cross_entropy_with_logits(logits, bow_target)
-            result["loss"] = loss
-            
-            # Accuracy: what fraction of top-k predictions are in target
-            with torch.no_grad():
-                top_k = 20
-                _, top_indices = logits.topk(top_k, dim=-1)
-                correct = 0
-                total = 0
-                for b in range(batch_size):
-                    target_set = set(transcription_ids[b].tolist())
-                    pred_set = set(top_indices[b].tolist())
-                    correct += len(target_set & pred_set)
-                    total += min(len(target_set), top_k)
-                result["accuracy"] = correct / max(total, 1)
-        
-        return result
 
 
 def compute_rope_freqs(
@@ -981,7 +858,6 @@ class DeSTA25Config(PretrainedConfig):
                  struct_orca_queries_per_group=8,  # Queries per group (total = num_groups * queries_per_group)
                  struct_orca_inter_group_weight=0.1,  # Weight for inter-group orthogonality loss
                  struct_orca_intra_group_weight=0.01,  # Weight for intra-group diversity loss
-                 struct_orca_iv_weight=0.1,  # Weight for IV-Guided Disentanglement adversarial loss
                  struct_orca_acd_alpha=0.5,  # Alpha for Acoustic-Contrastive Decoding
                  **kwargs):
         
@@ -1024,7 +900,6 @@ class DeSTA25Config(PretrainedConfig):
         self.struct_orca_queries_per_group = struct_orca_queries_per_group
         self.struct_orca_inter_group_weight = struct_orca_inter_group_weight
         self.struct_orca_intra_group_weight = struct_orca_intra_group_weight
-        self.struct_orca_iv_weight = struct_orca_iv_weight
         self.struct_orca_acd_alpha = struct_orca_acd_alpha
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
@@ -1093,19 +968,6 @@ class DeSTA25AudioModel(PreTrainedModel):
         is_struct_orca = self.config.connector_mode == "struct_orca"
         if is_struct_orca:
             logging.info("Enabling Struct-ORCA components")
-        
-        # Always create discriminator for IV-Guided Disentanglement to ensure 
-        # consistent parameter count across DDP ranks (even if iv_weight=0)
-        vocab_size = getattr(self.config.llm_config, 'vocab_size', 32000)
-        self.content_discriminator = TextContentDiscriminator(
-            hidden_size=self.config.llm_config.hidden_size,
-            num_groups=getattr(self.config, 'struct_orca_num_groups', 8),
-            vocab_size=vocab_size,
-        )
-        self.content_discriminator.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
-        
-        # Storage for discriminator outputs (set during forward)
-        self._discriminator_outputs = None
 
         self.configure_trainable_parameters()
         
@@ -1256,34 +1118,6 @@ class DeSTA25AudioModel(PreTrainedModel):
                         outputs.loss = outputs.loss + loss
                         orca_total += loss.item()
                         orca_loss_log[name] = loss.item()  # Detached for logging
-            
-            # Compute IV discriminator loss INSIDE forward (required for DDP)
-            audio_tokens = getattr(self, "_struct_orca_audio_tokens", None)
-            if audio_tokens is not None and hasattr(self, "content_discriminator"):
-                # Prepare transcription IDs
-                if len(batch_transcription_ids) > 0:
-                    max_len = max(t.size(-1) if t.dim() > 0 else 1 for t in batch_transcription_ids)
-                    padded_trans = torch.full((len(batch_transcription_ids), max_len), -1, 
-                                             device=audio_tokens.device, dtype=torch.long)
-                    for i, t in enumerate(batch_transcription_ids):
-                        t_squeezed = t.squeeze(0) if t.dim() > 1 else t
-                        padded_trans[i, :t_squeezed.size(0)] = t_squeezed
-                    
-                    # Discriminator forward with gradient reversal
-                    disc_dtype = self.content_discriminator.shared_backbone[0].weight.dtype
-                    audio_tokens_casted = audio_tokens.to(dtype=disc_dtype)
-                    disc_output = self.content_discriminator(audio_tokens_casted, padded_trans)
-                    if "loss" in disc_output:
-                        iv_weight = getattr(self.config, "struct_orca_iv_weight", 0.1)
-                        iv_loss = iv_weight * disc_output["loss"]
-                        # Add to outputs.loss (in forward, not trainer)
-                        outputs.loss = outputs.loss + iv_loss
-                        orca_total += iv_loss.item()
-                        orca_loss_log["L_iv_discriminator"] = iv_loss.item()
-                        orca_loss_log["disc_accuracy"] = disc_output.get("accuracy", 0.0)
-                
-                # Clear audio tokens after use
-                self._struct_orca_audio_tokens = None
             
             # Store detached loss values for trainer logging (not for computation)
             self._struct_orca_loss_log = orca_loss_log

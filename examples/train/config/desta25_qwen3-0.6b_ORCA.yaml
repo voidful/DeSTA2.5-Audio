@@ -52,14 +52,11 @@ model:
     num_groups: 8  # Number of semantic groups (emotion, speaker, prosody, etc.)
     queries_per_group: 8  # Queries per group (total = 64 tokens)
     
-    # Loss weights for Phase 1
+    # Loss weights
     inter_group_weight: 0.1  # Push group centroids apart (orthogonality)
     intra_group_weight: 0.01  # Light diversity within groups
     
-    # IV-Guided Disentanglement (Phase 2)
-    iv_weight: 0.1  # Adversarial discriminator loss weight
-    
-    # Acoustic-Contrastive Decoding (Phase 3 - inference)
+    # Acoustic-Contrastive Decoding (inference)
     acd_alpha: 0.5  # Contrast strength: logits = full + alpha * (full - blind)
 
   # Qwen3 使用 <|video_pad|> 作为 placeholder token (已在词表中)
