@@ -1262,7 +1262,10 @@ class DeSTA25AudioModel(PreTrainedModel):
                         padded_trans[i, :t_squeezed.size(0)] = t_squeezed
                     
                     # Discriminator forward with gradient reversal
-                    disc_output = self.content_discriminator(audio_tokens, padded_trans)
+                    # Ensure audio_tokens have same dtype as discriminator
+                    disc_dtype = self.content_discriminator.shared_backbone[0].weight.dtype
+                    audio_tokens_casted = audio_tokens.to(dtype=disc_dtype)
+                    disc_output = self.content_discriminator(audio_tokens_casted, padded_trans)
                     if "loss" in disc_output:
                         iv_weight = getattr(self.config, "struct_orca_iv_weight", 0.1)
                         struct_orca_losses["L_iv_discriminator"] = iv_weight * disc_output["loss"]
