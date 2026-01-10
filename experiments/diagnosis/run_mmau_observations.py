@@ -741,6 +741,120 @@ def run_comparison_analysis(model1, model2, name1, name2, dataset, args, device)
     print(f"    | {'TOTAL WINS':<28} | {wins[name1]:<12} | {wins[name2]:<12} | {'✓ ' + (name2 if wins[name2] > wins[name1] else name1):<12} |")
     print()
     
+    # ========== Visualization: Group-Aware Metrics Bar Chart ==========
+    print("\nGenerating comparison charts...")
+    
+    # Bar chart for group-aware metrics
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Left: Group-Aware Metrics (higher is better)
+    metric_names = ['GIS', 'TUV', 'Centroid\nOrth']
+    values1 = [group_metrics1['group_independence_score'], 
+               group_metrics1['token_utilization_variance'],
+               group_metrics1['centroid_orthogonality']]
+    values2 = [group_metrics2['group_independence_score'],
+               group_metrics2['token_utilization_variance'],
+               group_metrics2['centroid_orthogonality']]
+    
+    x = np.arange(len(metric_names))
+    width = 0.35
+    
+    ax1 = axes[0]
+    bars1 = ax1.bar(x - width/2, values1, width, label=name1, color='#4ECDC4', alpha=0.8)
+    bars2 = ax1.bar(x + width/2, values2, width, label=name2, color='#FF6B6B', alpha=0.8)
+    
+    ax1.set_ylabel('Score (higher = better)')
+    ax1.set_title('Group-Aware Metrics Comparison')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(metric_names)
+    ax1.legend()
+    ax1.set_ylim(0, 1.1)
+    ax1.axhline(y=0.5, color='gray', linestyle='--', alpha=0.3)
+    
+    # Add value labels on bars
+    for bar in bars1:
+        height = bar.get_height()
+        ax1.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
+    for bar in bars2:
+        height = bar.get_height()
+        ax1.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
+    
+    # Right: Token Orthogonality (lower is better)
+    ax2 = axes[1]
+    metric_names2 = ['Token\nCosine Sim', 'Intra-Group\nDiversity']
+    values1_2 = [sim1, group_metrics1['intra_group_diversity']['mean']]
+    values2_2 = [sim2, group_metrics2['intra_group_diversity']['mean']]
+    
+    x2 = np.arange(len(metric_names2))
+    bars1_2 = ax2.bar(x2 - width/2, values1_2, width, label=name1, color='#4ECDC4', alpha=0.8)
+    bars2_2 = ax2.bar(x2 + width/2, values2_2, width, label=name2, color='#FF6B6B', alpha=0.8)
+    
+    ax2.set_ylabel('Score')
+    ax2.set_title('Token Similarity Metrics')
+    ax2.set_xticks(x2)
+    ax2.set_xticklabels(metric_names2)
+    ax2.legend()
+    ax2.set_ylim(0, 1.0)
+    
+    # Add value labels
+    for bar in bars1_2:
+        height = bar.get_height()
+        ax2.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
+    for bar in bars2_2:
+        height = bar.get_height()
+        ax2.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(figures_dir, "comparison_group_metrics.png"), dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {os.path.join(figures_dir, 'comparison_group_metrics.png')}")
+    
+    # ========== Radar Chart for Overall Comparison ==========
+    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
+    
+    categories = ['GIS', 'TUV', 'Centroid Orth', '1 - Token Sim', 'IGD']
+    # Normalize to 0-1 scale, invert Token Sim so higher is better
+    values1_radar = [
+        group_metrics1['group_independence_score'],
+        group_metrics1['token_utilization_variance'],
+        group_metrics1['centroid_orthogonality'],
+        1 - sim1,  # Invert so higher is better
+        group_metrics1['intra_group_diversity']['mean'],
+    ]
+    values2_radar = [
+        group_metrics2['group_independence_score'],
+        group_metrics2['token_utilization_variance'],
+        group_metrics2['centroid_orthogonality'],
+        1 - sim2,
+        group_metrics2['intra_group_diversity']['mean'],
+    ]
+    
+    # Close the radar chart
+    values1_radar += values1_radar[:1]
+    values2_radar += values2_radar[:1]
+    
+    angles = np.linspace(0, 2 * np.pi, len(categories), endpoint=False).tolist()
+    angles += angles[:1]
+    
+    ax.plot(angles, values1_radar, 'o-', linewidth=2, label=name1, color='#4ECDC4')
+    ax.fill(angles, values1_radar, alpha=0.25, color='#4ECDC4')
+    ax.plot(angles, values2_radar, 'o-', linewidth=2, label=name2, color='#FF6B6B')
+    ax.fill(angles, values2_radar, alpha=0.25, color='#FF6B6B')
+    
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(categories, size=11)
+    ax.set_ylim(0, 1)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+    ax.set_title('ORCA Metrics Comparison\n(All metrics: higher = better)', size=14, pad=20)
+    
+    plt.savefig(os.path.join(figures_dir, "comparison_radar.png"), dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {os.path.join(figures_dir, 'comparison_radar.png')}")
+    
     return results
 
 
