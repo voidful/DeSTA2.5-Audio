@@ -1244,6 +1244,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             # Collect group losses from perception module
             struct_orca_losses = getattr(self.perception, "_struct_orca_losses", None)
+            
+            # DEBUG: log struct_orca_losses from perception
+            import logging
+            logging.info(f"[MODEL DEBUG] perception._struct_orca_losses = {struct_orca_losses}")
+            
             if struct_orca_losses is None:
                 struct_orca_losses = {}
             else:
