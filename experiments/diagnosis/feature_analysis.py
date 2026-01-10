@@ -92,6 +92,264 @@ def compute_feature_statistics(features: np.ndarray) -> Dict[str, float]:
     }
 
 
+# =============================================================================
+# Group-Aware Metrics for Struct-ORCA
+# =============================================================================
+
+def compute_group_independence_score(
+    audio_tokens: np.ndarray,
+    num_groups: int = 8,
+    queries_per_group: int = 8
+) -> float:
+    """
+    Compute Group Independence Score (GIS).
+    
+    Measures how independent different groups are from each other.
+    Higher GIS = groups encode more distinct information.
+    
+    Args:
+        audio_tokens: [N, total_tokens, hidden_dim] or [N, total_tokens * hidden_dim]
+        num_groups: Number of groups (default: 8)
+        queries_per_group: Tokens per group (default: 8)
+        
+    Returns:
+        GIS score in range [0, 1], higher is better
+    """
+    # Reshape if flattened
+    if len(audio_tokens.shape) == 2:
+        # Assume it's [N, tokens * hidden_dim]
+        N = audio_tokens.shape[0]
+        total_dim = audio_tokens.shape[1]
+        total_tokens = num_groups * queries_per_group
+        hidden_dim = total_dim // total_tokens
+        audio_tokens = audio_tokens.reshape(N, total_tokens, hidden_dim)
+    
+    N, total_tokens, hidden_dim = audio_tokens.shape
+    
+    # Compute group centroids [N, num_groups, hidden_dim]
+    group_centroids = []
+    for g in range(num_groups):
+        start = g * queries_per_group
+        end = (g + 1) * queries_per_group
+        centroid = audio_tokens[:, start:end, :].mean(axis=1)  # [N, hidden_dim]
+        group_centroids.append(centroid)
+    
+    group_centroids = np.stack(group_centroids, axis=1)  # [N, num_groups, hidden_dim]
+    
+    # Compute mean centroid across samples [num_groups, hidden_dim]
+    mean_centroids = group_centroids.mean(axis=0)
+    
+    # Compute correlation matrix between groups
+    # Normalize centroids
+    norms = np.linalg.norm(mean_centroids, axis=1, keepdims=True)
+    normalized = mean_centroids / (norms + 1e-8)
+    
+    # Correlation matrix [num_groups, num_groups]
+    corr_matrix = np.abs(normalized @ normalized.T)
+    
+    # GIS = 1 - mean of off-diagonal absolute correlations
+    mask = ~np.eye(num_groups, dtype=bool)
+    off_diag_corr = corr_matrix[mask].mean()
+    
+    return float(1.0 - off_diag_corr)
+
+
+def compute_intra_group_diversity(
+    audio_tokens: np.ndarray,
+    num_groups: int = 8,
+    queries_per_group: int = 8
+) -> Dict[str, Any]:
+    """
+    Compute Intra-Group Diversity (IGD) for each group.
+    
+    Measures how diverse tokens are within each group.
+    Moderate diversity is ideal - too low = redundancy, too high = no focus.
+    
+    Args:
+        audio_tokens: [N, total_tokens, hidden_dim]
+        num_groups: Number of groups
+        queries_per_group: Tokens per group
+        
+    Returns:
+        Dictionary with per-group diversity and mean
+    """
+    # Reshape if flattened
+    if len(audio_tokens.shape) == 2:
+        N = audio_tokens.shape[0]
+        total_dim = audio_tokens.shape[1]
+        total_tokens = num_groups * queries_per_group
+        hidden_dim = total_dim // total_tokens
+        audio_tokens = audio_tokens.reshape(N, total_tokens, hidden_dim)
+    
+    N, total_tokens, hidden_dim = audio_tokens.shape
+    
+    group_diversities = []
+    
+    for g in range(num_groups):
+        start = g * queries_per_group
+        end = (g + 1) * queries_per_group
+        group_tokens = audio_tokens[:, start:end, :]  # [N, K, D]
+        
+        # Mean over samples
+        mean_group_tokens = group_tokens.mean(axis=0)  # [K, D]
+        
+        # Compute pairwise cosine similarities within group
+        norms = np.linalg.norm(mean_group_tokens, axis=1, keepdims=True)
+        normalized = mean_group_tokens / (norms + 1e-8)
+        sim_matrix = normalized @ normalized.T  # [K, K]
+        
+        # Diversity = 1 - mean of off-diagonal similarities
+        mask = ~np.eye(queries_per_group, dtype=bool)
+        mean_sim = sim_matrix[mask].mean()
+        diversity = 1.0 - mean_sim
+        
+        group_diversities.append(float(diversity))
+    
+    return {
+        "per_group": group_diversities,
+        "mean": float(np.mean(group_diversities)),
+        "std": float(np.std(group_diversities)),
+        "min": float(np.min(group_diversities)),
+        "max": float(np.max(group_diversities)),
+    }
+
+
+def compute_token_utilization_variance(audio_tokens: np.ndarray) -> float:
+    """
+    Compute Token Utilization Variance (TUV).
+    
+    Measures whether all tokens contribute equally to the representation.
+    Higher TUV = more uniform token utilization = no dead tokens.
+    
+    TUV = 1 - (std of token norms / mean of token norms)
+    
+    Args:
+        audio_tokens: [N, total_tokens, hidden_dim] or [N, total_tokens * hidden_dim]
+        
+    Returns:
+        TUV score in range [0, 1], higher is better
+    """
+    # Reshape if flattened
+    if len(audio_tokens.shape) == 2:
+        # For flattened tokens, we need to know the token dimension
+        # Assume standard 64 tokens
+        N = audio_tokens.shape[0]
+        total_dim = audio_tokens.shape[1]
+        # Try to infer tokens assuming common dimensions
+        for num_tokens in [64, 32, 128]:
+            if total_dim % num_tokens == 0:
+                hidden_dim = total_dim // num_tokens
+                audio_tokens = audio_tokens.reshape(N, num_tokens, hidden_dim)
+                break
+        else:
+            # Fallback: treat entire vector as single token
+            return 1.0
+    
+    N, num_tokens, hidden_dim = audio_tokens.shape
+    
+    # Compute L2 norm of each token [N, num_tokens]
+    token_norms = np.linalg.norm(audio_tokens, axis=2)
+    
+    # Mean norms across samples [num_tokens]
+    mean_token_norms = token_norms.mean(axis=0)
+    
+    # TUV = 1 - CV (coefficient of variation)
+    mean_norm = mean_token_norms.mean()
+    std_norm = mean_token_norms.std()
+    
+    if mean_norm < 1e-8:
+        return 0.0
+    
+    cv = std_norm / mean_norm
+    tuv = max(0.0, 1.0 - cv)
+    
+    return float(tuv)
+
+
+def compute_centroid_orthogonality(
+    audio_tokens: np.ndarray,
+    num_groups: int = 8,
+    queries_per_group: int = 8
+) -> float:
+    """
+    Compute Centroid Orthogonality.
+    
+    Measures how orthogonal group centroids are to each other.
+    Higher = groups occupy more distinct subspaces.
+    
+    Args:
+        audio_tokens: [N, total_tokens, hidden_dim]
+        num_groups: Number of groups
+        queries_per_group: Tokens per group
+        
+    Returns:
+        Orthogonality score in range [0, 1], higher is better
+    """
+    # Reshape if flattened
+    if len(audio_tokens.shape) == 2:
+        N = audio_tokens.shape[0]
+        total_dim = audio_tokens.shape[1]
+        total_tokens = num_groups * queries_per_group
+        hidden_dim = total_dim // total_tokens
+        audio_tokens = audio_tokens.reshape(N, total_tokens, hidden_dim)
+    
+    N, total_tokens, hidden_dim = audio_tokens.shape
+    
+    # Compute group centroids
+    centroids = []
+    for g in range(num_groups):
+        start = g * queries_per_group
+        end = (g + 1) * queries_per_group
+        centroid = audio_tokens[:, start:end, :].mean(axis=(0, 1))  # [hidden_dim]
+        centroids.append(centroid)
+    
+    centroids = np.stack(centroids, axis=0)  # [num_groups, hidden_dim]
+    
+    # Normalize
+    norms = np.linalg.norm(centroids, axis=1, keepdims=True)
+    normalized = centroids / (norms + 1e-8)
+    
+    # Cosine similarity matrix
+    sim_matrix = np.abs(normalized @ normalized.T)
+    
+    # Orthogonality = 1 - mean of off-diagonal cosine similarities
+    mask = ~np.eye(num_groups, dtype=bool)
+    mean_sim = sim_matrix[mask].mean()
+    
+    return float(1.0 - mean_sim)
+
+
+def compute_group_aware_metrics(
+    audio_tokens: np.ndarray,
+    num_groups: int = 8,
+    queries_per_group: int = 8
+) -> Dict[str, Any]:
+    """
+    Compute all group-aware metrics for Struct-ORCA.
+    
+    Args:
+        audio_tokens: [N, total_tokens, hidden_dim] or flattened
+        num_groups: Number of groups
+        queries_per_group: Tokens per group
+        
+    Returns:
+        Dictionary with all group-aware metrics
+    """
+    return {
+        "group_independence_score": compute_group_independence_score(
+            audio_tokens, num_groups, queries_per_group
+        ),
+        "intra_group_diversity": compute_intra_group_diversity(
+            audio_tokens, num_groups, queries_per_group
+        ),
+        "token_utilization_variance": compute_token_utilization_variance(audio_tokens),
+        "centroid_orthogonality": compute_centroid_orthogonality(
+            audio_tokens, num_groups, queries_per_group
+        ),
+    }
+
+
+
 def extract_audio_representations(
     model,
     dataloader,

@@ -36,7 +36,8 @@ from feature_analysis import (
     compute_pca_explained_variance,
     compute_effective_dimensionality,
     compute_feature_statistics,
-    analyze_feature_collapse
+    analyze_feature_collapse,
+    compute_group_aware_metrics
 )
 from mutual_information import estimate_mutual_information, compute_linear_cka
 from visualizations import plot_tsne_by_attribute, plot_pca_variance_curve, plot_group_similarity_heatmap
@@ -177,12 +178,18 @@ def extract_representations_from_mmau(
     }
 
 
-def run_observation1_feature_collapse(audio_tokens, output_dir):
+def run_observation1_feature_collapse(audio_tokens, output_dir, num_groups=8, queries_per_group=8):
     """
     Observation 1: Feature Collapse Analysis
     
     Measures how much of the representation space is actually utilized.
     High PCA concentration = feature collapse (bad).
+    
+    Also includes Group-Aware metrics for Struct-ORCA:
+    - Group Independence Score (GIS)
+    - Intra-Group Diversity (IGD)
+    - Token Utilization Variance (TUV)
+    - Centroid Orthogonality
     """
     print("\n" + "="*60)
     print("OBSERVATION 1: Feature Collapse Analysis")
@@ -215,7 +222,25 @@ def run_observation1_feature_collapse(audio_tokens, output_dir):
         "raw_cumulative_variance": cumulative_var[:20].tolist(),
     }
     
-    print(f"\nEffective Dimensionality: {eff_dim:.2f}")
+    # Add Group-Aware Metrics (for Struct-ORCA)
+    total_tokens = num_groups * queries_per_group
+    if len(audio_tokens.shape) >= 2 and (audio_tokens.shape[1] == total_tokens or 
+                                         audio_tokens.shape[-1] % total_tokens == 0):
+        print("\n--- Group-Aware Metrics (Struct-ORCA) ---")
+        group_metrics = compute_group_aware_metrics(audio_tokens, num_groups, queries_per_group)
+        results["group_aware"] = group_metrics
+        
+        print(f"  Group Independence Score (GIS): {group_metrics['group_independence_score']:.4f}")
+        print(f"    (Higher is better - groups encode distinct info)")
+        print(f"  Intra-Group Diversity Mean: {group_metrics['intra_group_diversity']['mean']:.4f}")
+        print(f"    (Moderate is ideal - too low=redundancy, too high=no focus)")
+        print(f"  Token Utilization Variance (TUV): {group_metrics['token_utilization_variance']:.4f}")
+        print(f"    (Higher is better - no dead tokens)")
+        print(f"  Centroid Orthogonality: {group_metrics['centroid_orthogonality']:.4f}")
+        print(f"    (Higher is better - groups in distinct subspaces)")
+    
+    print(f"\n--- Traditional Metrics ---")
+    print(f"Effective Dimensionality: {eff_dim:.2f}")
     print(f"  (Higher is better - more dimensions utilized)")
     print(f"\nPCA Explained Variance:")
     print(f"  PC1: {results['pca_variance']['pc1']:.2%}")
@@ -535,7 +560,7 @@ def run_comparison_analysis(model1, model2, name1, name2, dataset, args, device)
     print("OBSERVATION 1: Feature Collapse Comparison")
     print("="*60)
     
-    from feature_analysis import compute_pca_explained_variance, compute_effective_dimensionality
+    from feature_analysis import compute_pca_explained_variance, compute_effective_dimensionality, compute_group_aware_metrics
     
     audio1_flat = data1['audio_tokens'].reshape(data1['audio_tokens'].shape[0], -1)
     audio2_flat = data2['audio_tokens'].reshape(data2['audio_tokens'].shape[0], -1)
@@ -546,25 +571,41 @@ def run_comparison_analysis(model1, model2, name1, name2, dataset, args, device)
     eff_dim1 = compute_effective_dimensionality(audio1_flat)
     eff_dim2 = compute_effective_dimensionality(audio2_flat)
     
+    # Compute group-aware metrics for both models
+    group_metrics1 = compute_group_aware_metrics(data1['audio_tokens'], num_groups=8, queries_per_group=8)
+    group_metrics2 = compute_group_aware_metrics(data2['audio_tokens'], num_groups=8, queries_per_group=8)
+    
     results["observation1"] = {
         name1: {
             "effective_dim": float(eff_dim1),
             "pc1": float(var1[0]),
             "cumulative_3": float(cumvar1[2]),
-            "cumulative_variance": cumvar1[:20].tolist()
+            "cumulative_variance": cumvar1[:20].tolist(),
+            "group_independence_score": group_metrics1["group_independence_score"],
+            "intra_group_diversity_mean": group_metrics1["intra_group_diversity"]["mean"],
+            "token_utilization_variance": group_metrics1["token_utilization_variance"],
+            "centroid_orthogonality": group_metrics1["centroid_orthogonality"],
         },
         name2: {
             "effective_dim": float(eff_dim2),
             "pc1": float(var2[0]),
             "cumulative_3": float(cumvar2[2]),
-            "cumulative_variance": cumvar2[:20].tolist()
+            "cumulative_variance": cumvar2[:20].tolist(),
+            "group_independence_score": group_metrics2["group_independence_score"],
+            "intra_group_diversity_mean": group_metrics2["intra_group_diversity"]["mean"],
+            "token_utilization_variance": group_metrics2["token_utilization_variance"],
+            "centroid_orthogonality": group_metrics2["centroid_orthogonality"],
         }
     }
     
     print(f"\n{name1}:")
     print(f"  Effective Dim: {eff_dim1:.2f}, PC1: {var1[0]:.2%}, PC1-3: {cumvar1[2]:.2%}")
+    print(f"  GIS: {group_metrics1['group_independence_score']:.4f}, IGD: {group_metrics1['intra_group_diversity']['mean']:.4f}")
+    print(f"  TUV: {group_metrics1['token_utilization_variance']:.4f}, CentroidOrth: {group_metrics1['centroid_orthogonality']:.4f}")
     print(f"\n{name2}:")
     print(f"  Effective Dim: {eff_dim2:.2f}, PC1: {var2[0]:.2%}, PC1-3: {cumvar2[2]:.2%}")
+    print(f"  GIS: {group_metrics2['group_independence_score']:.4f}, IGD: {group_metrics2['intra_group_diversity']['mean']:.4f}")
+    print(f"  TUV: {group_metrics2['token_utilization_variance']:.4f}, CentroidOrth: {group_metrics2['centroid_orthogonality']:.4f}")
     
     # Plot comparison PCA
     plot_pca_variance_curve(
