@@ -90,13 +90,19 @@ class DeSTA25Trainer(Trainer):
                         log_dict["train/orca_total"] = orca_total
             
             elif is_struct_orca:
-                # Struct-ORCA: collect ALL losses from outputs.struct_orca_losses
-                # This includes L_inter_group, L_intra_group, and L_iv_discriminator (computed in forward)
-                struct_orca_losses = getattr(outputs, "struct_orca_losses", None)
+                # Struct-ORCA: collect ALL losses from model (outputs doesn't persist dynamic attrs)
+                # First get group losses from perception module
+                struct_orca_losses = getattr(actual_model.perception, "_struct_orca_losses", None)
                 
-                # Debug log every 100 steps
-                if self.state.global_step % 100 == 0:
-                    logging.info(f"[ORCA DEBUG] Step {self.state.global_step}: struct_orca_losses={struct_orca_losses}")
+                # Also get IV discriminator losses (computed in forward, stored on model)
+                iv_losses = getattr(actual_model, "_struct_orca_iv_losses", None)
+                if iv_losses is not None:
+                    if struct_orca_losses is None:
+                        struct_orca_losses = iv_losses
+                    else:
+                        struct_orca_losses = {**struct_orca_losses, **iv_losses}
+                    # Clear after use
+                    actual_model._struct_orca_iv_losses = None
                 
                 if struct_orca_losses is not None:
                     for name, l in struct_orca_losses.items():
