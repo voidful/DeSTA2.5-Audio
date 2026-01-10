@@ -1135,9 +1135,19 @@ class DeSTA25AudioModel(PreTrainedModel):
                             trans_ids = trans_ids.squeeze(0)
                             if trans_ids.device != inputs_embeds.device:
                                 trans_ids = trans_ids.to(inputs_embeds.device)
+                            # Skip empty transcriptions
+                            if trans_ids.numel() == 0:
+                                continue
                             trans_emb = self.llm_model.model.embed_tokens(trans_ids)
-                            transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
-                        transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [N_audio, H]
+                            # Check for empty embeddings
+                            if trans_emb.size(0) > 0:
+                                transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
+                        
+                        # Only proceed if we have valid transcription embeddings
+                        if len(transcription_embeds_list) > 0:
+                            transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [N_valid, H]
+                        else:
+                            transcription_embeds = None
                     
                     # Get target embeddings from labels (positive samples)
                     with torch.no_grad():
@@ -1161,22 +1171,31 @@ class DeSTA25AudioModel(PreTrainedModel):
                     # Compute contrastive alignment loss
                     if transcription_embeds is not None and target_embeds is not None:
                         # Pool audio tokens: [N_audio, K, H] -> [N_audio, H]
-                        audio_pooled = F.normalize(struct_orca_tokens.mean(dim=1), dim=-1)
+                        audio_mean = struct_orca_tokens.mean(dim=1)
+                        # Use eps to prevent NaN from zero vectors
+                        audio_pooled = F.normalize(audio_mean, dim=-1, eps=1e-8)
                         
                         # Handle batch size mismatch (N_audio may differ from B)
-                        # Use first transcription/target embed for each audio
                         num_audio = audio_pooled.size(0)
-                        if transcription_embeds.size(0) == num_audio:
-                            trans_pooled = F.normalize(transcription_embeds, dim=-1)
-                        else:
-                            # Repeat to match audio count
-                            trans_pooled = F.normalize(transcription_embeds[:num_audio], dim=-1)
+                        num_trans = transcription_embeds.size(0)
                         
-                        if target_embeds.size(0) >= num_audio:
-                            target_pooled = F.normalize(target_embeds[:num_audio], dim=-1)
+                        # Match transcription embeddings to audio count
+                        if num_trans >= num_audio:
+                            trans_pooled = F.normalize(transcription_embeds[:num_audio], dim=-1, eps=1e-8)
                         else:
-                            # Repeat last target embed to match
-                            target_pooled = F.normalize(target_embeds.repeat(num_audio, 1)[:num_audio], dim=-1)
+                            # Pad by repeating last embedding
+                            padding = transcription_embeds[-1:].expand(num_audio - num_trans, -1)
+                            trans_padded = torch.cat([transcription_embeds, padding], dim=0)
+                            trans_pooled = F.normalize(trans_padded, dim=-1, eps=1e-8)
+                        
+                        # Match target embeddings to audio count  
+                        if target_embeds.size(0) >= num_audio:
+                            target_pooled = F.normalize(target_embeds[:num_audio], dim=-1, eps=1e-8)
+                        else:
+                            # Pad by repeating last embedding
+                            padding = target_embeds[-1:].expand(num_audio - target_embeds.size(0), -1)
+                            target_padded = torch.cat([target_embeds, padding], dim=0)
+                            target_pooled = F.normalize(target_padded, dim=-1, eps=1e-8)
                         
                         # Similarity to transcription (should be LOW - negative samples)
                         sim_trans = F.cosine_similarity(audio_pooled, trans_pooled, dim=-1)
@@ -1184,28 +1203,30 @@ class DeSTA25AudioModel(PreTrainedModel):
                         # Similarity to target (should be HIGH - positive samples)
                         sim_target = F.cosine_similarity(audio_pooled, target_pooled, dim=-1)
                         
-                        # Contrastive loss with margin
-                        # Loss = max(0, margin + sim_trans - sim_target)
-                        margin = 0.5
-                        contrastive_loss = torch.clamp(margin + sim_trans - sim_target, min=0.0).mean()
-                        
-                        # Also add direct target alignment term
-                        target_align_loss = (1 - sim_target).mean()
-                        
-                        # Combined loss
-                        L_align = contrastive_loss + 0.5 * target_align_loss
-                        L_align_weighted = self.config.orca_align_weight_local * L_align
-                        
-                        # Add to total loss
-                        outputs.loss = outputs.loss + L_align_weighted
-                        orca_total += L_align_weighted.item()
-                        
-                        # Log individual components
-                        orca_loss_log["L_align"] = L_align_weighted.item()
-                        orca_loss_log["L_align_contrastive"] = contrastive_loss.item()
-                        orca_loss_log["L_align_target"] = target_align_loss.item()
-                        orca_loss_log["sim_trans"] = sim_trans.mean().item()
-                        orca_loss_log["sim_target"] = sim_target.mean().item()
+                        # Check for NaN before computing loss
+                        if not (torch.isnan(sim_trans).any() or torch.isnan(sim_target).any()):
+                            # Contrastive loss with margin
+                            # Loss = max(0, margin + sim_trans - sim_target)
+                            margin = 0.5
+                            contrastive_loss = torch.clamp(margin + sim_trans - sim_target, min=0.0).mean()
+                            
+                            # Also add direct target alignment term
+                            target_align_loss = (1 - sim_target).mean()
+                            
+                            # Combined loss
+                            L_align = contrastive_loss + 0.5 * target_align_loss
+                            L_align_weighted = self.config.orca_align_weight_local * L_align
+                            
+                            # Add to total loss
+                            outputs.loss = outputs.loss + L_align_weighted
+                            orca_total += L_align_weighted.item()
+                            
+                            # Log individual components
+                            orca_loss_log["L_align"] = L_align_weighted.item()
+                            orca_loss_log["L_align_contrastive"] = contrastive_loss.item()
+                            orca_loss_log["L_align_target"] = target_align_loss.item()
+                            orca_loss_log["sim_trans"] = sim_trans.mean().item()
+                            orca_loss_log["sim_target"] = sim_target.mean().item()
             
             # Store detached loss values for trainer logging (not for computation)
             self._struct_orca_loss_log = orca_loss_log
