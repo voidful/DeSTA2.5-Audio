@@ -59,7 +59,7 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.struct_orca.inter_group_weight=0.1 \
     ++model.struct_orca.intra_group_weight=0.1 \
     ++model.struct_orca.iv_weight=0 \
-    ++model.orca.enabled=true \
+    ++model.orca.enabled=false \
     ++model.orca.align_weight_local=0.1 \
     ++model.orca.orthogonal_projection=true
 

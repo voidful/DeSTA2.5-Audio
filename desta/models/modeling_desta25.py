@@ -1283,7 +1283,21 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             return outputs
         else:
+            # Define is_orca_mode for this branch (Q-Former mode)
+            is_orca_mode = (
+                getattr(self.config, 'orca_enabled', False) and 
+                (
+                    getattr(self.config, 'orca_global_cross_attn', False) or 
+                    getattr(self.config, 'orca_deep_injection_enabled', False)
+                )
+            ) or self.config.connector_mode == "orca_hybrid"
             
+            # FORCE Disable ORCA mode if Struct-ORCA is active (to prevent mixed behaviors/OOM)
+            # This check is redundant here as we are in the `else` branch (not `is_struct_orca_mode`),
+            # but included for robustness if logic changes.
+            if self.config.connector_mode == "struct_orca":
+                is_orca_mode = False
+
             # Check if we should compute losses even in Q-Former mode
             # This allows testing orthogonality losses without ORCA architecture
             compute_qformer_losses = (
@@ -1528,6 +1542,11 @@ class DeSTA25AudioModel(PreTrainedModel):
         of local prosody tokens.
         """
         is_orca = getattr(self.config, 'orca_enabled', False) or self.config.connector_mode == "orca_hybrid"
+    
+        # FORCE Disable deep injection for Struct-ORCA to save memory and ensure ablations are clean
+        if self.config.connector_mode == "struct_orca":
+            return
+
         if not is_orca:
             return
         
