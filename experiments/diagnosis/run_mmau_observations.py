@@ -705,20 +705,41 @@ def run_comparison_analysis(model1, model2, name1, name2, dataset, args, device)
     print("COMPARISON SUMMARY")
     print("="*60)
     
-    summary_table = f"""
-    | Metric                    | {name1:<20} | {name2:<20} | Better |
-    |---------------------------|{'-'*22}|{'-'*22}|--------|
-    | Effective Dim             | {eff_dim1:<20.2f} | {eff_dim2:<20.2f} | {'→' if eff_dim2 > eff_dim1 else '←'} |
-    | PC1 Variance              | {var1[0]*100:<19.2f}% | {var2[0]*100:<19.2f}% | {'→' if var2[0] < var1[0] else '←'} |
-    | Token Cosine Sim          | {sim1:<20.4f} | {sim2:<20.4f} | {'→' if sim2 < sim1 else '←'} |
-    | Task Silhouette           | {sil1:<20.4f} | {sil2:<20.4f} | {'→' if sil2 > sil1 else '←'} |
-    |---------------------------|{'-'*22}|{'-'*22}|--------|
-    | Group Indep. Score (GIS)  | {group_metrics1['group_independence_score']:<20.4f} | {group_metrics2['group_independence_score']:<20.4f} | {'→' if group_metrics2['group_independence_score'] > group_metrics1['group_independence_score'] else '←'} |
-    | Intra-Group Div. (IGD)    | {group_metrics1['intra_group_diversity']['mean']:<20.4f} | {group_metrics2['intra_group_diversity']['mean']:<20.4f} | - |
-    | Token Util. Var. (TUV)    | {group_metrics1['token_utilization_variance']:<20.4f} | {group_metrics2['token_utilization_variance']:<20.4f} | {'→' if group_metrics2['token_utilization_variance'] > group_metrics1['token_utilization_variance'] else '←'} |
-    | Centroid Orthogonality    | {group_metrics1['centroid_orthogonality']:<20.4f} | {group_metrics2['centroid_orthogonality']:<20.4f} | {'→' if group_metrics2['centroid_orthogonality'] > group_metrics1['centroid_orthogonality'] else '←'} |
-    """
-    print(summary_table)
+    # Count wins for each model
+    wins = {name1: 0, name2: 0}
+    
+    # Define metrics with evaluations (lower_is_better flag)
+    metrics = [
+        ("Token Cosine Sim (↓)", sim1, sim2, True),  # Lower is better
+        ("Group Indep. Score (↑)", group_metrics1['group_independence_score'], group_metrics2['group_independence_score'], False),
+        ("Token Util. Var. (↑)", group_metrics1['token_utilization_variance'], group_metrics2['token_utilization_variance'], False),
+        ("Centroid Orthogonality (↑)", group_metrics1['centroid_orthogonality'], group_metrics2['centroid_orthogonality'], False),
+        ("Intra-Group Div. (IGD)", group_metrics1['intra_group_diversity']['mean'], group_metrics2['intra_group_diversity']['mean'], None),  # No clear better
+    ]
+    
+    print(f"\n    | {'Metric':<28} | {name1:<12} | {name2:<12} | Better       |")
+    print(f"    |{'-'*30}|{'-'*14}|{'-'*14}|{'-'*14}|")
+    
+    for metric_name, val1, val2, lower_is_better in metrics:
+        if lower_is_better is None:
+            better = "-"
+        elif lower_is_better:
+            better = name2 if val2 < val1 else name1
+            if val2 < val1:
+                wins[name2] += 1
+            else:
+                wins[name1] += 1
+        else:
+            better = name2 if val2 > val1 else name1
+            if val2 > val1:
+                wins[name2] += 1
+            else:
+                wins[name1] += 1
+        print(f"    | {metric_name:<28} | {val1:<12.4f} | {val2:<12.4f} | {better:<12} |")
+    
+    print(f"    |{'-'*30}|{'-'*14}|{'-'*14}|{'-'*14}|")
+    print(f"    | {'TOTAL WINS':<28} | {wins[name1]:<12} | {wins[name2]:<12} | {'✓ ' + (name2 if wins[name2] > wins[name1] else name1):<12} |")
+    print()
     
     return results
 
