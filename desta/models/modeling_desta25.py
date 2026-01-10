@@ -1121,7 +1121,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 labels=labels,
-                output_hidden_states=compute_align_loss,  # Only if needed for alignment loss
+                output_hidden_states=False,  # Struct-ORCA alignment loss doesn't need hidden states
             )
             
             # Collect group losses from perception module (for L_inter_group, L_intra_group)
