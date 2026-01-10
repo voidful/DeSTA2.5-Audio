@@ -90,33 +90,21 @@ class DeSTA25Trainer(Trainer):
                         log_dict["train/orca_total"] = orca_total
             
             elif is_struct_orca:
-                # Struct-ORCA: collect ALL losses from model (outputs doesn't persist dynamic attrs)
-                # First get group losses from perception module
-                struct_orca_losses = getattr(actual_model.perception, "_struct_orca_losses", None)
+                # Struct-ORCA: losses are already added to outputs.loss in forward()
+                # Here we just read the detached values for logging (no gradient flow)
+                orca_loss_log = getattr(actual_model, "_struct_orca_loss_log", None)
+                orca_total = getattr(actual_model, "_struct_orca_loss_total", 0.0)
                 
-                # Also get IV discriminator losses (computed in forward, stored on model)
-                iv_losses = getattr(actual_model, "_struct_orca_iv_losses", None)
-                if iv_losses is not None:
-                    if struct_orca_losses is None:
-                        struct_orca_losses = iv_losses
-                    else:
-                        struct_orca_losses = {**struct_orca_losses, **iv_losses}
-                    # Clear after use
-                    actual_model._struct_orca_iv_losses = None
-                
-                if struct_orca_losses is not None:
-                    for name, l in struct_orca_losses.items():
-                        if l is not None:
-                            if isinstance(l, torch.Tensor):
-                                total_loss = total_loss + l
-                                orca_total += l.item()
-                                log_dict[f"train/{name}"] = l.item()
-                            elif isinstance(l, (int, float)):
-                                # For non-tensor values like disc_accuracy
-                                log_dict[f"train/{name}"] = l
+                if orca_loss_log is not None:
+                    for name, value in orca_loss_log.items():
+                        log_dict[f"train/{name}"] = value
                     
                     if orca_total > 0:
                         log_dict["train/struct_orca_total"] = orca_total
+                    
+                    # Clear after logging
+                    actual_model._struct_orca_loss_log = None
+                    actual_model._struct_orca_loss_total = 0.0
         
         # Log total loss and loss breakdown
         log_dict["train/loss"] = total_loss.item()

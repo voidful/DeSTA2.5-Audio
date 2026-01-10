@@ -1243,10 +1243,19 @@ class DeSTA25AudioModel(PreTrainedModel):
             )
             
             # Collect group losses from perception module (for L_inter_group, L_intra_group)
-            # Note: These are stored on perception during forward, not on outputs
             struct_orca_losses = getattr(self.perception, "_struct_orca_losses", None)
-            if struct_orca_losses is None:
-                struct_orca_losses = {}
+            
+            # Initialize loss log dict (detached values for trainer logging)
+            orca_loss_log = {}
+            orca_total = 0.0
+            
+            # Add group losses to outputs.loss (in forward, not trainer, to avoid DDP issues)
+            if struct_orca_losses is not None:
+                for name, loss in struct_orca_losses.items():
+                    if loss is not None and isinstance(loss, torch.Tensor):
+                        outputs.loss = outputs.loss + loss
+                        orca_total += loss.item()
+                        orca_loss_log[name] = loss.item()  # Detached for logging
             
             # Compute IV discriminator loss INSIDE forward (required for DDP)
             audio_tokens = getattr(self, "_struct_orca_audio_tokens", None)
@@ -1261,23 +1270,24 @@ class DeSTA25AudioModel(PreTrainedModel):
                         padded_trans[i, :t_squeezed.size(0)] = t_squeezed
                     
                     # Discriminator forward with gradient reversal
-                    # Ensure audio_tokens have same dtype as discriminator
                     disc_dtype = self.content_discriminator.shared_backbone[0].weight.dtype
                     audio_tokens_casted = audio_tokens.to(dtype=disc_dtype)
                     disc_output = self.content_discriminator(audio_tokens_casted, padded_trans)
                     if "loss" in disc_output:
                         iv_weight = getattr(self.config, "struct_orca_iv_weight", 0.1)
-                        # Store IV losses on model for trainer to read (outputs doesn't persist attrs)
-                        self._struct_orca_iv_losses = {
-                            "L_iv_discriminator": iv_weight * disc_output["loss"],
-                            "disc_accuracy": disc_output.get("accuracy", 0.0)
-                        }
+                        iv_loss = iv_weight * disc_output["loss"]
+                        # Add to outputs.loss (in forward, not trainer)
+                        outputs.loss = outputs.loss + iv_loss
+                        orca_total += iv_loss.item()
+                        orca_loss_log["L_iv_discriminator"] = iv_loss.item()
+                        orca_loss_log["disc_accuracy"] = disc_output.get("accuracy", 0.0)
                 
                 # Clear audio tokens after use
                 self._struct_orca_audio_tokens = None
             
-            # Note: outputs.struct_orca_losses doesn't work (HF outputs don't persist dynamic attrs)
-            # Trainer reads directly from model.perception._struct_orca_losses and model._struct_orca_iv_losses
+            # Store detached loss values for trainer logging (not for computation)
+            self._struct_orca_loss_log = orca_loss_log
+            self._struct_orca_loss_total = orca_total
             
             return outputs
         else:
