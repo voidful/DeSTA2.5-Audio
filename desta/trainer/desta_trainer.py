@@ -90,49 +90,19 @@ class DeSTA25Trainer(Trainer):
                         log_dict["train/orca_total"] = orca_total
             
             elif is_struct_orca:
-                # Struct-ORCA: collect group losses from perception module
-                struct_orca_losses = getattr(actual_model.perception, "_struct_orca_losses", None)
+                # Struct-ORCA: collect ALL losses from outputs.struct_orca_losses
+                # This includes L_inter_group, L_intra_group, and L_iv_discriminator (computed in forward)
+                struct_orca_losses = getattr(outputs, "struct_orca_losses", None)
                 if struct_orca_losses is not None:
                     for name, l in struct_orca_losses.items():
-                        if l is not None and isinstance(l, torch.Tensor):
-                            total_loss = total_loss + l
-                            orca_total += l.item()
-                            log_dict[f"train/{name}"] = l.item()
-                
-                # Compute discriminator loss for IV-Guided Disentanglement
-                discriminator = getattr(actual_model, "content_discriminator", None)
-                
-                # Get audio tokens directly from model (stored during _prepare_inputs_for_llm)
-                # Note: outputs.audio_global may not be set due to dataclass limitations
-                audio_tokens = getattr(actual_model, "_struct_orca_audio_tokens", None)
-                
-                # Debug log every 100 steps
-                if self.state.global_step % 100 == 0:
-                    logging.info(f"[IV DEBUG] Step {self.state.global_step}: discriminator={discriminator is not None}, audio_tokens={audio_tokens is not None}, shape={audio_tokens.shape if audio_tokens is not None else 'N/A'}")
-                
-                if discriminator is not None and audio_tokens is not None:
-                    # Get transcription IDs from inputs
-                    trans_ids = inputs.get("batch_transcription_ids", None)
-                    if audio_tokens is not None and trans_ids is not None and len(trans_ids) > 0:
-                        # Stack transcription IDs (pad to same length)
-                        max_len = max(t.size(-1) for t in trans_ids)
-                        padded_trans = torch.full((len(trans_ids), max_len), -1, device=audio_tokens.device)
-                        for i, t in enumerate(trans_ids):
-                            t_squeezed = t.squeeze(0) if t.dim() > 1 else t
-                            padded_trans[i, :t_squeezed.size(0)] = t_squeezed
-                        
-                        # Discriminator forward with gradient reversal
-                        disc_output = discriminator(audio_tokens, padded_trans)
-                        if "loss" in disc_output:
-                            iv_weight = getattr(config, "struct_orca_iv_weight", 0.1)
-                            disc_loss = iv_weight * disc_output["loss"]
-                            total_loss = total_loss + disc_loss
-                            orca_total += disc_loss.item()
-                            log_dict["train/L_iv_discriminator"] = disc_output["loss"].item()
-                            log_dict["train/disc_accuracy"] = disc_output.get("accuracy", 0)
-                    
-                    # Clear audio tokens after use to prevent memory accumulation
-                    actual_model._struct_orca_audio_tokens = None
+                        if l is not None:
+                            if isinstance(l, torch.Tensor):
+                                total_loss = total_loss + l
+                                orca_total += l.item()
+                                log_dict[f"train/{name}"] = l.item()
+                            elif isinstance(l, (int, float)):
+                                # For non-tensor values like disc_accuracy
+                                log_dict[f"train/{name}"] = l
                     
                     if orca_total > 0:
                         log_dict["train/struct_orca_total"] = orca_total

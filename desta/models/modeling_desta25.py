@@ -1234,13 +1234,6 @@ class DeSTA25AudioModel(PreTrainedModel):
             # prepare_result is just inputs_embeds for struct_orca (same as qformer_1)
             inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
             
-            # Get global audio tokens from perception for discriminator
-            global_audio_tokens = None
-            if hasattr(self.perception, 'connector') and isinstance(self.perception.connector, GroupwiseOrthogonalConnector):
-                # The connector stores its output - retrieve from last forward
-                # For proper access, we need to extract from the prepared inputs
-                pass  # Will be set via outputs.audio_global at the end
-            
             # Call LLM 
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
@@ -1251,12 +1244,34 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             # Collect group losses from perception module
             struct_orca_losses = getattr(self.perception, "_struct_orca_losses", None)
-            if struct_orca_losses is not None:
-                outputs.struct_orca_losses = struct_orca_losses
+            if struct_orca_losses is None:
+                struct_orca_losses = {}
+            else:
+                struct_orca_losses = dict(struct_orca_losses)  # Make a copy
             
-            # Audio tokens are stored in self._struct_orca_audio_tokens during _prepare_inputs_for_llm
-            # Trainer will access them directly from the model after forward returns
-            # DO NOT clear here - trainer needs to access them in compute_loss
+            # Compute IV discriminator loss INSIDE forward (required for DDP)
+            audio_tokens = getattr(self, "_struct_orca_audio_tokens", None)
+            if audio_tokens is not None and hasattr(self, "content_discriminator"):
+                # Prepare transcription IDs
+                if len(batch_transcription_ids) > 0:
+                    max_len = max(t.size(-1) if t.dim() > 0 else 1 for t in batch_transcription_ids)
+                    padded_trans = torch.full((len(batch_transcription_ids), max_len), -1, 
+                                             device=audio_tokens.device, dtype=torch.long)
+                    for i, t in enumerate(batch_transcription_ids):
+                        t_squeezed = t.squeeze(0) if t.dim() > 1 else t
+                        padded_trans[i, :t_squeezed.size(0)] = t_squeezed
+                    
+                    # Discriminator forward with gradient reversal
+                    disc_output = self.content_discriminator(audio_tokens, padded_trans)
+                    if "loss" in disc_output:
+                        iv_weight = getattr(self.config, "struct_orca_iv_weight", 0.1)
+                        struct_orca_losses["L_iv_discriminator"] = iv_weight * disc_output["loss"]
+                        struct_orca_losses["disc_accuracy"] = disc_output.get("accuracy", 0.0)
+                
+                # Clear audio tokens after use
+                self._struct_orca_audio_tokens = None
+            
+            outputs.struct_orca_losses = struct_orca_losses
             
             return outputs
         else:
