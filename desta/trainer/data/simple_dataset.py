@@ -696,6 +696,7 @@ class BaseAudioTextDataset:
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
+                audio_size_list_per_sample.append([])  # Keep columns same length
                 skip_reasons["audio_file_not_found"] += 1
                 if not hasattr(self, '_first_missing_audio_logged'):
                     logging.error(f"[DEBUG] First missing audio file: {missing_audio_path}")
@@ -761,6 +762,7 @@ class BaseAudioTextDataset:
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
+                audio_size_list_per_sample.append([])  # Keep columns same length
                 skip_reasons["no_audio_markers"] += 1
                 continue
 
