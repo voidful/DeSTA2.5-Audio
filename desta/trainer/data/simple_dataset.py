@@ -373,10 +373,26 @@ class BaseAudioTextDataset:
         
         data_files = [resolve_filepath(fp) for fp in self.manifest_filepaths]
         
-        # Create a stable cache path based on manifest files AND model config
-        # Include connector_mode and local_enabled to ensure different configs use different caches
+        # === PERMANENT FIX: Calculate audio_size ONCE and include in cache key ===
+        # This ensures different audio_size configs ALWAYS use different caches
+        if self.connector_mode == "orca_hybrid":
+            self.computed_audio_size = self.orca_global_num_tokens
+        elif self.connector_mode == "struct_orca":
+            global_tokens = self.struct_orca_num_groups * self.struct_orca_queries_per_group
+            if self.struct_orca_local_enabled:
+                local_tokens = self.whisper_output_frames // self.struct_orca_local_downsample
+                self.computed_audio_size = global_tokens + local_tokens
+            else:
+                self.computed_audio_size = global_tokens
+        else:
+            self.computed_audio_size = self.prompt_size
+        
+        logging.info(f"[Dataset] connector_mode={self.connector_mode}, audio_size={self.computed_audio_size}")
+        
+        # Create a stable cache path including ACTUAL audio_size value (not just flags)
+        # This guarantees audio_size=64 and audio_size=439 use completely different caches
         import hashlib
-        config_str = f"{self.connector_mode}_{self.struct_orca_local_enabled}_{self.struct_orca_num_groups}_{self.struct_orca_queries_per_group}"
+        config_str = f"{self.connector_mode}_audiosize{self.computed_audio_size}"
         cache_input = "_".join(sorted(data_files)) + "_" + config_str
         cache_key = hashlib.md5(cache_input.encode()).hexdigest()[:12]
         cache_dir = os.path.join(
@@ -681,32 +697,8 @@ class BaseAudioTextDataset:
                     self._first_missing_audio_logged = True
                 continue
 
-            # Use appropriate audio size based on connector mode
-            if self.connector_mode == "orca_hybrid":
-                audio_size = self.orca_global_num_tokens
-            elif self.connector_mode == "struct_orca":
-                # Global tokens = num_groups * queries_per_group
-                global_tokens = self.struct_orca_num_groups * self.struct_orca_queries_per_group
-                if self.struct_orca_local_enabled:
-                    # Local tokens = whisper_frames / downsample_factor
-                    # Whisper outputs 1500 frames for 30s audio, 4x downsample = 375
-                    local_tokens = self.whisper_output_frames // self.struct_orca_local_downsample
-                    audio_size = global_tokens + local_tokens
-                else:
-                    audio_size = global_tokens
-                # Debug logging for first sample
-                if not hasattr(self, '_debug_audio_size_logged'):
-                    logging.info(f"[DEBUG] struct_orca audio_size calculation:")
-                    logging.info(f"  connector_mode: {self.connector_mode}")
-                    logging.info(f"  struct_orca_local_enabled: {self.struct_orca_local_enabled}")
-                    logging.info(f"  num_groups: {self.struct_orca_num_groups}, queries_per_group: {self.struct_orca_queries_per_group}")
-                    logging.info(f"  global_tokens: {global_tokens}")
-                    if self.struct_orca_local_enabled:
-                        logging.info(f"  local_tokens: {local_tokens} (1500 / {self.struct_orca_local_downsample})")
-                    logging.info(f"  FINAL audio_size: {audio_size}")
-                    self._debug_audio_size_logged = True
-            else:
-                audio_size = self.prompt_size
+            # Use the pre-computed audio_size from __init__ (ensures consistency with cache key)
+            audio_size = self.computed_audio_size
             audio_size_list = [audio_size] * len(new_audios)
             transcriptions = ["" for _ in new_audios]
             transcription_size_list = [

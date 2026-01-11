@@ -32,13 +32,8 @@ export HF_HOME=/work/voidful2nlp/.cache/huggingface
 export TRANSFORMERS_CACHE=$HF_HOME
 export PYTHONNOUSERSITE=1
 
-# Clear preprocessed dataset cache to force reprocessing with new audio_size (439 tokens)
-# This is needed because local_enabled=true changes token count from 64 to 439
-echo "Clearing dataset cache for F1 local branch..."
-rm -rf ${HF_HOME}/desta_preprocessed/*
-# Also clear entire HuggingFace datasets cache to avoid stale arrow file issues
-rm -rf ${HF_HOME}/datasets/*
-echo "Cache cleared."
+# NOTE: Cache clearing no longer needed - cache key now includes audio_size value
+# Different configs (local_enabled=true/false) automatically use different caches
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
