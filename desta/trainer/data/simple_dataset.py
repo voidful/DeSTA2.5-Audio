@@ -698,7 +698,29 @@ class BaseAudioTextDataset:
                 continue
 
             # Use the pre-computed audio_size from __init__ (ensures consistency with cache key)
-            audio_size = self.computed_audio_size
+            # Add fallback recalculation in case pickling breaks the attribute
+            if hasattr(self, 'computed_audio_size'):
+                audio_size = self.computed_audio_size
+            else:
+                # Fallback: recalculate (should not happen but safety net)
+                if self.connector_mode == "orca_hybrid":
+                    audio_size = self.orca_global_num_tokens
+                elif self.connector_mode == "struct_orca":
+                    global_tokens = self.struct_orca_num_groups * self.struct_orca_queries_per_group
+                    if self.struct_orca_local_enabled:
+                        local_tokens = self.whisper_output_frames // self.struct_orca_local_downsample
+                        audio_size = global_tokens + local_tokens
+                    else:
+                        audio_size = global_tokens
+                else:
+                    audio_size = self.prompt_size
+                logging.warning(f"[WARN] computed_audio_size not found, recalculated as {audio_size}")
+            
+            # Log first sample's audio_size for verification
+            if not hasattr(self, '_first_audio_size_logged'):
+                logging.info(f"[Preprocessing] Using audio_size={audio_size} for placeholder creation")
+                self._first_audio_size_logged = True
+            
             audio_size_list = [audio_size] * len(new_audios)
             transcriptions = ["" for _ in new_audios]
             transcription_size_list = [
