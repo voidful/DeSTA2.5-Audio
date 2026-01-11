@@ -204,6 +204,13 @@ class BaseCollateFn:
         batch_audio_sizes = []  # Store audio_size from preprocessing to avoid tokenizer roundtrip
         
         for i, item in enumerate(batch):
+            if i == 0 and not hasattr(self, '_debug_collate_keys_logged'):
+                logging.warning(f"[DEBUG] Collate item keys: {item.keys()}")
+                logging.warning(f"[DEBUG] batch_audio_sizes in item? {'batch_audio_sizes' in item}")
+                if 'batch_audio_sizes' in item:
+                     logging.warning(f"[DEBUG] item['batch_audio_sizes']: {item['batch_audio_sizes']}")
+                self._debug_collate_keys_logged = True
+
             # Calculate label positions
             total_length = audio_text_inputs["length"][i]
             audio_context_length = len(self.tokenizer.tokenize(item["audio_context"]))
@@ -455,6 +462,11 @@ class BaseAudioTextDataset:
                 
                 try:
                     self.dataset = _load_and_preprocess()
+        logging.warning(f"[DEBUG] Dataset columns: {self.dataset.column_names}")
+        if "batch_audio_sizes" in self.dataset.column_names:
+            logging.warning(f"[DEBUG] batch_audio_sizes found in columns (first 3): {self.dataset[:3]['batch_audio_sizes']}")
+        else:
+            logging.warning("[DEBUG] batch_audio_sizes MISSING from dataset columns!")
                     
                     # Save to disk
                     logging.info(f"[Rank {_get_rank()}] Saving preprocessed dataset to: {cache_dir}")

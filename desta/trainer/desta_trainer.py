@@ -54,6 +54,15 @@ class DeSTA25Trainer(Trainer):
             return (zero_loss, None) if return_outputs else zero_loss
         
         outputs = model(**inputs)
+        
+        if not hasattr(self, '_debug_loss_inputs_logged'):
+            logging.warning(f"[DEBUG] compute_loss inputs keys: {inputs.keys()}")
+            if 'batch_audio_sizes' in inputs:
+                logging.warning(f"[DEBUG] batch_audio_sizes in inputs: {inputs['batch_audio_sizes']}")
+            else:
+                logging.warning("[DEBUG] batch_audio_sizes MISSING in compute_loss inputs!")
+            self._debug_loss_inputs_logged = True
+            
         lm_loss = outputs.loss
         total_loss = lm_loss
         
