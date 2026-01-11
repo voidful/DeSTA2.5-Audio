@@ -479,6 +479,14 @@ class GroupwiseOrthogonalConnector(nn.Module):
         # Loss weights (configurable)
         self.inter_group_weight = getattr(config, 'struct_orca_inter_group_weight', 0.1)
         self.intra_group_weight = getattr(config, 'struct_orca_intra_group_weight', 0.01)
+        
+        # H1: Variational Grouping
+        self.variational_enabled = getattr(config, 'variational_grouping_enabled', False)
+        self.variational_kl_weight = getattr(config, 'variational_kl_weight', 0.01)
+        if self.variational_enabled:
+            # Project from d_llm to mu and logvar
+            self.mu_proj = nn.Linear(d_llm, d_llm)
+            self.logvar_proj = nn.Linear(d_llm, d_llm)
     
     def forward(
         self, 
@@ -567,6 +575,28 @@ class GroupwiseOrthogonalConnector(nn.Module):
         
         # Compute group losses
         group_losses = self._compute_group_losses(all_group_tokens, group_centroids)
+        
+        # H1: Variational Grouping - Reparameterization and KL Loss
+        if self.variational_enabled:
+            # Predict mu and logvar from global_tokens
+            mu = self.mu_proj(global_tokens)  # [B, total_queries, d_llm]
+            logvar = self.logvar_proj(global_tokens)  # [B, total_queries, d_llm]
+            
+            # Reparameterization trick
+            if self.training:
+                std = torch.exp(0.5 * logvar)
+                eps = torch.randn_like(std)
+                z = mu + eps * std
+            else:
+                z = mu  # Use mean at inference
+            
+            # KL Divergence: D_KL(q(z|x) || N(0,I))
+            # = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+            kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+            kl_loss = kl_loss / (z.shape[0] * z.shape[1])  # Normalize by batch and tokens
+            group_losses['L_kl'] = kl_loss * self.variational_kl_weight
+            
+            return z, group_losses
         
         return global_tokens, group_losses
     
@@ -956,12 +986,17 @@ class DeSTA25Config(PretrainedConfig):
                  orca_adversarial_weight=0.0,  # Weight for adversarial loss
                  orca_local_branch_true=False,  # Ablation F: Enable true local branch with weighted sum + CNN
                  orca_local_ortho_weight=0.0,  # Weight for orthogonality between Global and Local branch
-                 # Struct-ORCA configuration fields
                  struct_orca_num_groups=8,  # Number of semantic groups for queries
                  struct_orca_queries_per_group=8,  # Queries per group (total = num_groups * queries_per_group)
                  struct_orca_inter_group_weight=0.1,  # Weight for inter-group orthogonality loss
                  struct_orca_intra_group_weight=0.01,  # Weight for intra-group diversity loss
                  struct_orca_acd_alpha=0.5,  # Alpha for Acoustic-Contrastive Decoding
+                 # G1: Modality-DPO configuration
+                 modality_dpo_enabled=False,  # If True, add Modality-DPO loss
+                 modality_dpo_beta=0.1,  # Beta for DPO log-sigmoid scaling
+                 # H1: Variational Grouping configuration
+                 variational_grouping_enabled=False,  # If True, use variational groups with KL regularization
+                 variational_kl_weight=0.01,  # Weight for KL divergence loss
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -1009,6 +1044,14 @@ class DeSTA25Config(PretrainedConfig):
         self.struct_orca_inter_group_weight = struct_orca_inter_group_weight
         self.struct_orca_intra_group_weight = struct_orca_intra_group_weight
         self.struct_orca_acd_alpha = struct_orca_acd_alpha
+
+        # G1: Modality-DPO configuration
+        self.modality_dpo_enabled = modality_dpo_enabled
+        self.modality_dpo_beta = modality_dpo_beta
+
+        # H1: Variational Grouping configuration
+        self.variational_grouping_enabled = variational_grouping_enabled
+        self.variational_kl_weight = variational_kl_weight
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 
@@ -1377,6 +1420,35 @@ class DeSTA25AudioModel(PreTrainedModel):
                             outputs.loss = outputs.loss + L_adv_weighted
                             orca_total += L_adv_weighted.item()
                             orca_loss_log["L_adv"] = loss_adv.item()
+            
+            # G1: Modality-DPO Loss
+            # Make the model prefer predictions WITH audio over predictions WITHOUT audio
+            if getattr(self.config, 'modality_dpo_enabled', False) and labels is not None:
+                beta = getattr(self.config, 'modality_dpo_beta', 0.1)
+                
+                # Get log probs from full model (with audio) - already computed above
+                logits_full = outputs.logits
+                log_probs_full = self._get_target_log_probs(logits_full, labels)
+                
+                # Forward pass WITHOUT audio (blind)
+                # Create blind inputs by replacing audio tokens with zeros
+                blind_embeds = self.llm_model.model.embed_tokens(input_ids)
+                
+                with torch.no_grad():
+                    outputs_blind = self.llm_model(
+                        inputs_embeds=blind_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+                    log_probs_blind = self._get_target_log_probs(outputs_blind.logits, labels)
+                
+                # DPO Loss: -log_sigmoid(beta * (log_probs_full - log_probs_blind))
+                logits_diff = log_probs_full - log_probs_blind
+                loss_dpo = -F.logsigmoid(beta * logits_diff).mean()
+                
+                outputs.loss = outputs.loss + loss_dpo
+                orca_total += loss_dpo.item()
+                orca_loss_log["L_dpo"] = loss_dpo.item()
             
             # Store detached loss values for trainer logging (not for computation)
             self._struct_orca_loss_log = orca_loss_log
@@ -1821,6 +1893,31 @@ class DeSTA25AudioModel(PreTrainedModel):
                 losses["sim_target"] = sim_target.mean()
         
         return losses
+    
+    def _get_target_log_probs(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Get log probabilities of target tokens from logits.
+        
+        Args:
+            logits: [B, T, V] model output logits
+            labels: [B, T] target labels (-100 for ignored positions)
+            
+        Returns:
+            [B] sum of log probs for target tokens per sample
+        """
+        labels = labels.clone()
+        loss_mask = labels != -100
+        labels[labels == -100] = 0  # Replace -100 with 0 for gather
+        
+        # Get log probs for target tokens
+        log_probs = torch.gather(
+            logits.log_softmax(-1), 
+            dim=2, 
+            index=labels.unsqueeze(2)
+        ).squeeze(2)  # [B, T]
+        
+        # Sum over valid positions
+        return (log_probs * loss_mask).sum(-1)  # [B]
     
     def compute_qformer_losses(
         self,
