@@ -1595,6 +1595,25 @@ class DeSTA25AudioModel(PreTrainedModel):
 
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
+            
+            # Calculate placeholder size from input_ids (count consecutive placeholder tokens)
+            # For struct_orca with local_enabled, model may produce more tokens than placeholder
+            seq_len = inputs_embeds.size(1)
+            end_position = min(audio_start_position + audio_embeddings.size(0), seq_len)
+            placeholder_size = end_position - audio_start_position
+            
+            # Handle size mismatch: truncate audio_embeddings if larger than placeholder
+            if audio_embeddings.size(0) > placeholder_size:
+                # Log warning once per batch
+                if not hasattr(self, '_placeholder_mismatch_warned'):
+                    import logging
+                    logging.warning(
+                        f"[WARN] Audio tokens ({audio_embeddings.size(0)}) > placeholder ({placeholder_size}). "
+                        f"Truncating audio tokens. This may indicate preprocessing used different audio_size."
+                    )
+                    self._placeholder_mismatch_warned = True
+                audio_embeddings = audio_embeddings[:placeholder_size]
+            
             target_slice = slice(audio_start_position, audio_start_position + audio_embeddings.size(0))
             inputs_embeds[text_batch_idx, target_slice] = audio_embeddings
             
