@@ -36,6 +36,8 @@ export PYTHONNOUSERSITE=1
 # This is needed because local_enabled=true changes token count from 64 to 439
 echo "Clearing dataset cache for F1 local branch..."
 rm -rf ${HF_HOME}/desta_preprocessed/*
+# Also clear HuggingFace datasets cache to avoid stale arrow file issues
+rm -rf ${HF_HOME}/datasets/json/default-*
 echo "Cache cleared."
 
 # ===== 實驗設定 =====
