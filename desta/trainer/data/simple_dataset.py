@@ -462,11 +462,11 @@ class BaseAudioTextDataset:
                 
                 try:
                     self.dataset = _load_and_preprocess()
-        logging.warning(f"[DEBUG] Dataset columns: {self.dataset.column_names}")
-        if "batch_audio_sizes" in self.dataset.column_names:
-            logging.warning(f"[DEBUG] batch_audio_sizes found in columns (first 3): {self.dataset[:3]['batch_audio_sizes']}")
-        else:
-            logging.warning("[DEBUG] batch_audio_sizes MISSING from dataset columns!")
+                    logging.warning(f"[DEBUG] Dataset columns: {self.dataset.column_names}")
+                    if "batch_audio_sizes" in self.dataset.column_names:
+                        logging.warning(f"[DEBUG] batch_audio_sizes found in columns (first 3): {self.dataset[:3]['batch_audio_sizes']}")
+                    else:
+                        logging.warning("[DEBUG] batch_audio_sizes MISSING from dataset columns!")
                     
                     # Save to disk
                     logging.info(f"[Rank {_get_rank()}] Saving preprocessed dataset to: {cache_dir}")
