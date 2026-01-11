@@ -201,16 +201,8 @@ class BaseCollateFn:
         batch_transcription_ids = []
         audio_context_batch_start_positions = []
         audio_start_answer_positions = []
-        batch_audio_sizes = []  # Store audio_size from preprocessing to avoid tokenizer roundtrip
         
         for i, item in enumerate(batch):
-            if i == 0 and not hasattr(self, '_debug_collate_keys_logged'):
-                logging.warning(f"[DEBUG] Collate item keys: {item.keys()}")
-                logging.warning(f"[DEBUG] batch_audio_sizes in item? {'batch_audio_sizes' in item}")
-                if 'batch_audio_sizes' in item:
-                     logging.warning(f"[DEBUG] item['batch_audio_sizes']: {item['batch_audio_sizes']}")
-                self._debug_collate_keys_logged = True
-
             # Calculate label positions
             total_length = audio_text_inputs["length"][i]
             audio_context_length = len(self.tokenizer.tokenize(item["audio_context"]))
@@ -242,10 +234,6 @@ class BaseCollateFn:
             ctx_pad = ctx_total - audio_context_inputs["attention_mask"][i].sum()
             for start_position in item["start_positions"]:
                 audio_context_batch_start_positions.append((i, start_position + ctx_pad))
-            
-            # Collect audio_size from preprocessing (bypasses tokenizer roundtrip)
-            if "batch_audio_sizes" in item:
-                batch_audio_sizes.extend(item["batch_audio_sizes"])
 
         # Extract audio features
         batch_features = self.processor(
@@ -267,7 +255,6 @@ class BaseCollateFn:
             "batch_features": batch_features,
             "batch_transcription_ids": batch_transcription_ids,
             "batch_start_positions": batch_start_positions,
-            "batch_audio_sizes": batch_audio_sizes if batch_audio_sizes else None,  # Preprocessed audio_size (bypasses tokenizer roundtrip)
             # Context for evaluation
             "context_input_ids": audio_context_inputs['input_ids'],
             "context_attention_mask": audio_context_inputs['attention_mask'],
@@ -355,15 +342,6 @@ class BaseAudioTextDataset:
         orca_cfg = cfg.model.get("orca", {})
         self.orca_global_num_tokens = orca_cfg.get("global_num_tokens", 4)
         
-        # Struct-ORCA configuration for local branch
-        struct_orca_cfg = cfg.model.get("struct_orca", {})
-        self.struct_orca_num_groups = struct_orca_cfg.get("num_groups", 8)
-        self.struct_orca_queries_per_group = struct_orca_cfg.get("queries_per_group", 8)
-        self.struct_orca_local_enabled = struct_orca_cfg.get("local_enabled", False)
-        # Whisper outputs 1500 frames (30s * 50Hz), 4x downsample = 375 local tokens
-        self.struct_orca_local_downsample = orca_cfg.get("local_downsample", 4)
-        self.whisper_output_frames = 1500  # Fixed for Whisper (max_source_positions)
-        
         model_cfg = cfg.model
         if isinstance(model_cfg, DictConfig):
             self.system_prompt = model_cfg.get("system_prompt", None)
@@ -386,28 +364,9 @@ class BaseAudioTextDataset:
         
         data_files = [resolve_filepath(fp) for fp in self.manifest_filepaths]
         
-        # === PERMANENT FIX: Calculate audio_size ONCE and include in cache key ===
-        # This ensures different audio_size configs ALWAYS use different caches
-        if self.connector_mode == "orca_hybrid":
-            self.computed_audio_size = self.orca_global_num_tokens
-        elif self.connector_mode == "struct_orca":
-            global_tokens = self.struct_orca_num_groups * self.struct_orca_queries_per_group
-            if self.struct_orca_local_enabled:
-                local_tokens = self.whisper_output_frames // self.struct_orca_local_downsample
-                self.computed_audio_size = global_tokens + local_tokens
-            else:
-                self.computed_audio_size = global_tokens
-        else:
-            self.computed_audio_size = self.prompt_size
-        
-        logging.info(f"[Dataset] connector_mode={self.connector_mode}, audio_size={self.computed_audio_size}")
-        
-        # Create a stable cache path including ACTUAL audio_size value (not just flags)
-        # This guarantees audio_size=64 and audio_size=439 use completely different caches
+        # Create a stable cache path based on manifest files
         import hashlib
-        config_str = f"{self.connector_mode}_audiosize{self.computed_audio_size}"
-        cache_input = "_".join(sorted(data_files)) + "_" + config_str
-        cache_key = hashlib.md5(cache_input.encode()).hexdigest()[:12]
+        cache_key = hashlib.md5("_".join(sorted(data_files)).encode()).hexdigest()[:12]
         cache_dir = os.path.join(
             os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
             "desta_preprocessed",
@@ -418,33 +377,15 @@ class BaseAudioTextDataset:
         
         def _load_and_preprocess():
             """Load raw data and run preprocessing."""
-            # Disable HF datasets caching completely to avoid stale .arrow files
-            datasets.disable_caching()
-            
-            ds = datasets.load_dataset(
-                "json", 
-                data_files=data_files,
-                keep_in_memory=True  # Load directly to memory, no disk cache
-            )["train"]
+            ds = datasets.load_dataset("json", data_files=data_files)["train"]
             ds = ds.map(
                 self._preprocess_function,
                 batched=True,
                 batch_size=128,
                 num_proc=1,
-                load_from_cache_file=False,
-                keep_in_memory=True
+                load_from_cache_file=False,  # Don't use HF cache, we manage our own
+                keep_in_memory=False
             )
-            
-            # Force schema for batch_audio_sizes to avoid inference errors on empty initial batches
-            # This ensures [[], [], [439]] is handled as int64 list, not null/string
-            try:
-                from datasets import Sequence, Value
-                if "batch_audio_sizes" in ds.column_names:
-                    logging.info("Explicitly casting batch_audio_sizes to Sequence(Sequence(int64))...")
-                    ds = ds.cast_column("batch_audio_sizes", Sequence(Sequence(Value("int64"))))
-            except Exception as e:
-                logging.warning(f"Failed to cast batch_audio_sizes: {e}")
-                
             return ds
         
         # Check if preprocessed cache already exists and is ready
@@ -473,11 +414,6 @@ class BaseAudioTextDataset:
                 
                 try:
                     self.dataset = _load_and_preprocess()
-                    logging.warning(f"[DEBUG] Dataset columns: {self.dataset.column_names}")
-                    if "batch_audio_sizes" in self.dataset.column_names:
-                        logging.warning(f"[DEBUG] batch_audio_sizes found in columns (first 3): {self.dataset[:3]['batch_audio_sizes']}")
-                    else:
-                        logging.warning("[DEBUG] batch_audio_sizes MISSING from dataset columns!")
                     
                     # Save to disk
                     logging.info(f"[Rank {_get_rank()}] Saving preprocessed dataset to: {cache_dir}")
@@ -489,12 +425,9 @@ class BaseAudioTextDataset:
                     
                     logging.info(f"[Rank {_get_rank()}] Preprocessing complete. Saved {len(self.dataset)} samples.")
                 finally:
-                    # Remove lock file (use try-except for race condition safety)
-                    try:
-                        if os.path.exists(lock_file):
-                            os.remove(lock_file)
-                    except FileNotFoundError:
-                        pass  # Already removed by another process
+                    # Remove lock file
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
             
             # Synchronize - rank 0 finishes before others proceed
             _barrier()
@@ -644,7 +577,6 @@ class BaseAudioTextDataset:
         start_positions_list = []
         audio_list = []
         transcription_list = []
-        audio_size_list_per_sample = []  # Store audio_size for each sample
 
         ids = examples["id"]
         prompts = examples.get("prompt", [""] * len(ids))
@@ -719,7 +651,6 @@ class BaseAudioTextDataset:
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
-                audio_size_list_per_sample.append([])  # Keep columns same length
                 skip_reasons["audio_file_not_found"] += 1
                 if not hasattr(self, '_first_missing_audio_logged'):
                     logging.error(f"[DEBUG] First missing audio file: {missing_audio_path}")
@@ -728,30 +659,11 @@ class BaseAudioTextDataset:
                     self._first_missing_audio_logged = True
                 continue
 
-            # Use the pre-computed audio_size from __init__ (ensures consistency with cache key)
-            # Add fallback recalculation in case pickling breaks the attribute
-            if hasattr(self, 'computed_audio_size'):
-                audio_size = self.computed_audio_size
+            # Use appropriate audio size based on connector mode
+            if self.connector_mode == "orca_hybrid":
+                audio_size = self.orca_global_num_tokens
             else:
-                # Fallback: recalculate (should not happen but safety net)
-                if self.connector_mode == "orca_hybrid":
-                    audio_size = self.orca_global_num_tokens
-                elif self.connector_mode == "struct_orca":
-                    global_tokens = self.struct_orca_num_groups * self.struct_orca_queries_per_group
-                    if self.struct_orca_local_enabled:
-                        local_tokens = self.whisper_output_frames // self.struct_orca_local_downsample
-                        audio_size = global_tokens + local_tokens
-                    else:
-                        audio_size = global_tokens
-                else:
-                    audio_size = self.prompt_size
-                logging.warning(f"[WARN] computed_audio_size not found, recalculated as {audio_size}")
-            
-            # Log first sample's audio_size for verification
-            if not hasattr(self, '_first_audio_size_logged'):
-                logging.info(f"[Preprocessing] Using audio_size={audio_size} for placeholder creation")
-                self._first_audio_size_logged = True
-            
+                audio_size = self.prompt_size
             audio_size_list = [audio_size] * len(new_audios)
             transcriptions = ["" for _ in new_audios]
             transcription_size_list = [
@@ -785,7 +697,6 @@ class BaseAudioTextDataset:
                 start_positions_list.append([])
                 audio_list.append([])
                 transcription_list.append([])
-                audio_size_list_per_sample.append([])  # Keep columns same length
                 skip_reasons["no_audio_markers"] += 1
                 continue
 
@@ -793,7 +704,6 @@ class BaseAudioTextDataset:
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
             transcription_list.append(transcriptions)
-            audio_size_list_per_sample.append(audio_size_list)  # Save audio_size_list for this sample
 
             if is_first_batch and not hasattr(self, "_debug_prompt_logged"):
                 logging.info("[DEBUG] Prompt-only preprocessing active.")
@@ -815,7 +725,6 @@ class BaseAudioTextDataset:
         examples["start_positions"] = start_positions_list
         examples["transcription_list"] = transcription_list
         examples["processed_audios"] = audio_list
-        examples["batch_audio_sizes"] = audio_size_list_per_sample  # Store audio_size for runtime
 
         # Calculate targets and lengths
         targets = []
