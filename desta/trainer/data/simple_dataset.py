@@ -434,6 +434,17 @@ class BaseAudioTextDataset:
                 load_from_cache_file=False,
                 keep_in_memory=True
             )
+            
+            # Force schema for batch_audio_sizes to avoid inference errors on empty initial batches
+            # This ensures [[], [], [439]] is handled as int64 list, not null/string
+            try:
+                from datasets import Sequence, Value
+                if "batch_audio_sizes" in ds.column_names:
+                    logging.info("Explicitly casting batch_audio_sizes to Sequence(Sequence(int64))...")
+                    ds = ds.cast_column("batch_audio_sizes", Sequence(Sequence(Value("int64"))))
+            except Exception as e:
+                logging.warning(f"Failed to cast batch_audio_sizes: {e}")
+                
             return ds
         
         # Check if preprocessed cache already exists and is ready
