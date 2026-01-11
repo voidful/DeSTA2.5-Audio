@@ -260,6 +260,7 @@ class ORCAHybridConnector(nn.Module):
         qformer_config._attn_implementation = "sdpa" if getattr(config, 'use_flash_attention', False) else "eager"
         
         self.global_qformer = BertEncoder(qformer_config)
+        self.global_proj = nn.Sequential(
             nn.LayerNorm(d_encoder),
             nn.Linear(d_encoder, d_llm)
         )
