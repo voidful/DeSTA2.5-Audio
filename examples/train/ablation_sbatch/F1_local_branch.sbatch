@@ -73,8 +73,6 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.orca.enabled=false \
     ++model.orca.align_weight_local=0.1 \
     ++model.orca.orthogonal_projection=true \
-    ++model.orca.adversarial_erasure=true \
-    ++model.orca.adversarial_weight=0.1 \
     ++model.struct_orca.local_enabled=true \
     ++model.struct_orca.global_local_ortho_weight=0.1
 
