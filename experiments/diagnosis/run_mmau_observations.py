@@ -123,11 +123,24 @@ def extract_representations_from_mmau(
                 # Returns (global_tokens, speech_feature_lengths) tuple
                 with torch.no_grad():
                     outputs = model.perception(input_features=feature)
-                    # perception returns tuple: (audio_tokens, lengths)
+                    # perception returns:
+                    # - (tokens, lengths) for struct_orca
+                    # - (tokens, lengths) for orca_hybrid (now potentially with losses in tuple)
+                    # - (tokens, lengths) for qformer_1
+                    
                     if isinstance(outputs, tuple):
-                        # Convert to float32 before numpy (bfloat16 not supported by numpy)
-                        audio_tokens = outputs[0].float().cpu().numpy()  # [1, num_tokens, H]
+                        # outputs could be (tokens, lengths) OR ((tokens, loss), lengths)
+                        # We need to inspect the first element
+                        first_elem = outputs[0]
+                        
+                        if isinstance(first_elem, tuple):
+                             # Case: ((tokens, loss), lengths) - from modified ORCAHybridConnector
+                             audio_tokens = first_elem[0].float().cpu().numpy()
+                        else:
+                             # Case: (tokens, lengths) - standard
+                             audio_tokens = first_elem.float().cpu().numpy()
                     else:
+                        # Fallback for other return types
                         audio_tokens = outputs.audio_global.float().cpu().numpy()
                 
                 all_audio_tokens.append(audio_tokens[0])
@@ -223,9 +236,8 @@ def run_observation1_feature_collapse(audio_tokens, output_dir, num_groups=8, qu
     }
     
     # Add Group-Aware Metrics (for Struct-ORCA)
-    # Note: For local_enabled models, tokens > total_tokens, so we use >= check
     total_tokens = num_groups * queries_per_group
-    if len(audio_tokens.shape) >= 2 and (audio_tokens.shape[1] >= total_tokens or 
+    if len(audio_tokens.shape) >= 2 and (audio_tokens.shape[1] == total_tokens or 
                                          audio_tokens.shape[-1] % total_tokens == 0):
         print("\n--- Group-Aware Metrics (Struct-ORCA) ---")
         group_metrics = compute_group_aware_metrics(audio_tokens, num_groups, queries_per_group)

@@ -13,10 +13,11 @@
 #SBATCH --error=./slurm-report/F1_local_%j.out
 
 # ==========================================
-# F1: All Methods + Local Branch
-# - All E1 methods: both losses, ortho proj, adv erasure
-# - Local branch: CNN-downsampled Whisper features
-# - Global-local orthogonality constraint
+# F1: Local Branch Ablation
+# - Weighted Sum of Layer Outputs
+# - 4x CNN Downsampling
+# - Concatenation with Global Features
+# - Orthogonality Loss (Global vs Local)
 # ==========================================
 
 # ===== 環境設定 =====
@@ -31,9 +32,6 @@ export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 export HF_HOME=/work/voidful2nlp/.cache/huggingface
 export TRANSFORMERS_CACHE=$HF_HOME
 export PYTHONNOUSERSITE=1
-
-# NOTE: Cache clearing no longer needed - cache key now includes audio_size value
-# Different configs (local_enabled=true/false) automatically use different caches
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
@@ -67,10 +65,8 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.struct_orca.iv_weight=0 \
     ++model.orca.enabled=false \
     ++model.orca.align_weight_local=0.1 \
-    ++model.orca.orthogonal_projection=true \
-    ++model.struct_orca.local_enabled=true \
-    ++model.struct_orca.global_local_ortho_weight=0.1 \
-    ++trainer.remove_unused_columns=false
+    ++model.orca.local_branch_true=true \
+    ++model.orca.local_ortho_weight=0.1
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
