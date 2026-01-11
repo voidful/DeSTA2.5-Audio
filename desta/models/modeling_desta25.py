@@ -390,6 +390,35 @@ class GroupwiseOrthogonalConnector(nn.Module):
         # Loss weights (configurable)
         self.inter_group_weight = getattr(config, 'struct_orca_inter_group_weight', 0.1)
         self.intra_group_weight = getattr(config, 'struct_orca_intra_group_weight', 0.01)
+        
+        # === Local Branch (CNN downsampled Whisper features) ===
+        self.local_enabled = getattr(config, 'struct_orca_local_enabled', False)
+        if self.local_enabled:
+            self.local_downsample = getattr(config, 'orca_local_downsample', 4)
+            self.local_kernel_size = getattr(config, 'orca_local_kernel_size', 5)
+            self.global_local_ortho_weight = getattr(config, 'struct_orca_global_local_ortho_weight', 0.1)
+            
+            # Learnable layer weights for weighted sum (same as global tokens)
+            num_target_layers = len(self.target_layer_ids)
+            self.local_layer_weights = nn.Parameter(
+                torch.zeros(num_target_layers, dtype=torch.float)
+            )
+            
+            # 1D Conv for downsampling: input [B, T, D] -> [B, T/downsample, D]
+            # Conv1d expects [B, D, T], so we'll transpose in forward
+            self.local_conv = nn.Conv1d(
+                in_channels=d_encoder,
+                out_channels=d_encoder,
+                kernel_size=self.local_kernel_size,
+                stride=self.local_downsample,
+                padding=self.local_kernel_size // 2
+            )
+            
+            # Projection to LLM dimension
+            self.local_proj = nn.Sequential(
+                nn.LayerNorm(d_encoder),
+                nn.Linear(d_encoder, d_llm)
+            )
     
     def forward(
         self, 
@@ -478,6 +507,42 @@ class GroupwiseOrthogonalConnector(nn.Module):
         
         # Compute group losses
         group_losses = self._compute_group_losses(all_group_tokens, group_centroids)
+        
+        # === Local Branch: CNN downsampled Whisper features ===
+        if self.local_enabled:
+            # Weighted sum of all target layer outputs (same as global tokens approach)
+            # target_layer_outputs is already collected: list of [B, T, D_encoder]
+            stacked_layers = torch.stack(target_layer_outputs, dim=0)  # [L, B, T, D]
+            stacked_layers = stacked_layers.permute(1, 2, 0, 3)  # [B, T, L, D]
+            
+            # Apply learnable layer weights
+            local_weights = torch.softmax(self.local_layer_weights, dim=0)  # [L]
+            local_weights = local_weights.view(1, 1, -1, 1)  # [1, 1, L, 1]
+            weighted_features = (stacked_layers * local_weights).sum(dim=2)  # [B, T, D]
+            
+            # Apply 1D CNN downsample: Conv1d expects [B, D, T]
+            local_features = weighted_features.transpose(1, 2)  # [B, D, T]
+            local_features = self.local_conv(local_features)    # [B, D, T/downsample]
+            local_features = local_features.transpose(1, 2)     # [B, T/downsample, D]
+            
+            # Project to LLM dimension
+            local_tokens = self.local_proj(local_features)  # [B, T/downsample, d_llm]
+            
+            # Compute global-local orthogonality loss
+            global_centroid = global_tokens.mean(dim=1)  # [B, d_llm]
+            local_centroid = local_tokens.mean(dim=1)    # [B, d_llm]
+            
+            global_norm = F.normalize(global_centroid, dim=-1)
+            local_norm = F.normalize(local_centroid, dim=-1)
+            
+            # Push global and local centroids to be orthogonal (cosine sim -> 0)
+            cos_sim = (global_norm * local_norm).sum(dim=-1)  # [B]
+            L_global_local = (cos_sim ** 2).mean()
+            group_losses["L_global_local_ortho"] = self.global_local_ortho_weight * L_global_local
+            
+            # Concatenate global and local tokens
+            all_tokens = torch.cat([global_tokens, local_tokens], dim=1)
+            return all_tokens, group_losses
         
         return global_tokens, group_losses
     
@@ -708,12 +773,14 @@ class WhisperPerception(nn.Module):
             speech_feature_lengths = [self.config.orca_global_num_tokens] * bs
             return global_tokens, speech_feature_lengths
         elif self.config.connector_mode == "struct_orca":
-            # result is (global_tokens, group_losses) tuple
-            global_tokens, group_losses = result
+            # result is (all_tokens, group_losses) tuple
+            # all_tokens = global_tokens if local disabled, else [global_tokens, local_tokens] concatenated
+            all_tokens, group_losses = result
             self._struct_orca_losses = group_losses
-            total_queries = self.config.struct_orca_num_groups * self.config.struct_orca_queries_per_group
-            speech_feature_lengths = [total_queries] * bs
-            return global_tokens, speech_feature_lengths
+            # Use actual token count from tensor (handles both with/without local branch)
+            actual_token_count = all_tokens.size(1)
+            speech_feature_lengths = [actual_token_count] * bs
+            return all_tokens, speech_feature_lengths
         else:
             # result is audio_features tensor
             audio_features = result
@@ -863,6 +930,8 @@ class DeSTA25Config(PretrainedConfig):
                  struct_orca_inter_group_weight=0.1,  # Weight for inter-group orthogonality loss
                  struct_orca_intra_group_weight=0.01,  # Weight for intra-group diversity loss
                  struct_orca_acd_alpha=0.5,  # Alpha for Acoustic-Contrastive Decoding
+                 struct_orca_local_enabled=False,  # If True, add CNN-downsampled local tokens
+                 struct_orca_global_local_ortho_weight=0.1,  # Weight for global-local orthogonality loss
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -908,6 +977,8 @@ class DeSTA25Config(PretrainedConfig):
         self.struct_orca_inter_group_weight = struct_orca_inter_group_weight
         self.struct_orca_intra_group_weight = struct_orca_intra_group_weight
         self.struct_orca_acd_alpha = struct_orca_acd_alpha
+        self.struct_orca_local_enabled = struct_orca_local_enabled
+        self.struct_orca_global_local_ortho_weight = struct_orca_global_local_ortho_weight
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 

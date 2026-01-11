@@ -131,6 +131,8 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         struct_orca_intra_group_weight=struct_orca_cfg.get("intra_group_weight", 0.01),
         struct_orca_iv_weight=struct_orca_cfg.get("iv_weight", 0.1),
         struct_orca_acd_alpha=struct_orca_cfg.get("acd_alpha", 0.5),
+        struct_orca_local_enabled=struct_orca_cfg.get("local_enabled", False),
+        struct_orca_global_local_ortho_weight=struct_orca_cfg.get("global_local_ortho_weight", 0.1),
     )
     
     model = DeSTA25AudioModel(model_config)
