@@ -389,15 +389,22 @@ class BaseAudioTextDataset:
         
         def _load_and_preprocess():
             """Load raw data and run preprocessing."""
-            ds = datasets.load_dataset("json", data_files=data_files)["train"]
-            ds = ds.map(
-                self._preprocess_function,
-                batched=True,
-                batch_size=128,
-                num_proc=1,
-                load_from_cache_file=False,  # Don't use HF cache, we manage our own
-                keep_in_memory=False
-            )
+            # Use a unique temp cache dir to avoid stale .arrow files from HF cache
+            import tempfile
+            with tempfile.TemporaryDirectory() as temp_cache_dir:
+                ds = datasets.load_dataset(
+                    "json", 
+                    data_files=data_files,
+                    cache_dir=temp_cache_dir  # Use temp dir to avoid stale cache
+                )["train"]
+                ds = ds.map(
+                    self._preprocess_function,
+                    batched=True,
+                    batch_size=128,
+                    num_proc=1,
+                    load_from_cache_file=False,  # Don't use HF cache, we manage our own
+                    keep_in_memory=True  # Keep in memory to avoid arrow file issues
+                )
             return ds
         
         # Check if preprocessed cache already exists and is ready
