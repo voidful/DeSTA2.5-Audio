@@ -201,6 +201,7 @@ class BaseCollateFn:
         batch_transcription_ids = []
         audio_context_batch_start_positions = []
         audio_start_answer_positions = []
+        batch_audio_sizes = []  # Store audio_size from preprocessing to avoid tokenizer roundtrip
         
         for i, item in enumerate(batch):
             # Calculate label positions
@@ -234,6 +235,10 @@ class BaseCollateFn:
             ctx_pad = ctx_total - audio_context_inputs["attention_mask"][i].sum()
             for start_position in item["start_positions"]:
                 audio_context_batch_start_positions.append((i, start_position + ctx_pad))
+            
+            # Collect audio_size from preprocessing (bypasses tokenizer roundtrip)
+            if "audio_size_list" in item:
+                batch_audio_sizes.extend(item["audio_size_list"])
 
         # Extract audio features
         batch_features = self.processor(
@@ -255,6 +260,7 @@ class BaseCollateFn:
             "batch_features": batch_features,
             "batch_transcription_ids": batch_transcription_ids,
             "batch_start_positions": batch_start_positions,
+            "batch_audio_sizes": batch_audio_sizes if batch_audio_sizes else None,  # Preprocessed audio_size (bypasses tokenizer roundtrip)
             # Context for evaluation
             "context_input_ids": audio_context_inputs['input_ids'],
             "context_attention_mask": audio_context_inputs['attention_mask'],
@@ -615,6 +621,7 @@ class BaseAudioTextDataset:
         start_positions_list = []
         audio_list = []
         transcription_list = []
+        audio_size_list_per_sample = []  # Store audio_size for each sample
 
         ids = examples["id"]
         prompts = examples.get("prompt", [""] * len(ids))
@@ -761,6 +768,7 @@ class BaseAudioTextDataset:
             start_positions_list.append(start_positions)
             audio_list.append(new_audios)
             transcription_list.append(transcriptions)
+            audio_size_list_per_sample.append(audio_size_list)  # Save audio_size_list for this sample
 
             if is_first_batch and not hasattr(self, "_debug_prompt_logged"):
                 logging.info("[DEBUG] Prompt-only preprocessing active.")
@@ -782,6 +790,7 @@ class BaseAudioTextDataset:
         examples["start_positions"] = start_positions_list
         examples["transcription_list"] = transcription_list
         examples["processed_audios"] = audio_list
+        examples["audio_size_list"] = audio_size_list_per_sample  # Store audio_size for runtime
 
         # Calculate targets and lengths
         targets = []

@@ -1069,6 +1069,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 batch_transcription_ids,
                 batch_start_positions,
                 labels=None,
+                batch_audio_sizes=None,  # Preprocessed audio_size (bypasses tokenizer roundtrip issue)
                 **kwargs):
         
         # Prepare inputs, which handles both ORCA and non-ORCA paths
@@ -1077,7 +1078,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             attention_mask=attention_mask, 
             batch_features=batch_features,
             batch_transcription_ids=batch_transcription_ids, 
-            batch_start_positions=batch_start_positions
+            batch_start_positions=batch_start_positions,
+            batch_audio_sizes=batch_audio_sizes
         )
         
         # Handle ORCA mode - check based on result type or connector_mode
@@ -1479,7 +1481,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                                attention_mask,
                                batch_features,
                                batch_transcription_ids,
-                               batch_start_positions
+                               batch_start_positions,
+                               batch_audio_sizes=None  # Preprocessed audio_size to bypass tokenizer roundtrip
         ):
         """
         Prepare the embeddings input for the LLM.
@@ -1596,13 +1599,20 @@ class DeSTA25AudioModel(PreTrainedModel):
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
             
-            # Calculate placeholder size from input_ids (count consecutive placeholder tokens)
-            # For struct_orca with local_enabled, model may produce more tokens than placeholder
-            seq_len = inputs_embeds.size(1)
-            end_position = min(audio_start_position + audio_embeddings.size(0), seq_len)
-            placeholder_size = end_position - audio_start_position
+            # Determine placeholder size:
+            # 1. Use batch_audio_sizes if available (from preprocessing, bypasses tokenizer roundtrip)
+            # 2. Fall back to calculating from inputs_embeds
+            if batch_audio_sizes is not None and audio_batch_idx < len(batch_audio_sizes):
+                # Use preprocessed audio_size (e.g., 439 for local_enabled)
+                expected_audio_size = batch_audio_sizes[audio_batch_idx]
+                placeholder_size = expected_audio_size + trans_len
+            else:
+                # Fallback: calculate from inputs_embeds (may be affected by tokenizer roundtrip)
+                seq_len = inputs_embeds.size(1)
+                end_position = min(audio_start_position + audio_embeddings.size(0), seq_len)
+                placeholder_size = end_position - audio_start_position
             
-            # Handle size mismatch: truncate audio_embeddings if larger than placeholder
+            # Handle size mismatch: truncate or pad audio_embeddings to match placeholder
             if audio_embeddings.size(0) > placeholder_size:
                 # Log warning once per batch
                 if not hasattr(self, '_placeholder_mismatch_warned'):
