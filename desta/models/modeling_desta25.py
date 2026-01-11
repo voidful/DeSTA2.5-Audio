@@ -1599,12 +1599,20 @@ class DeSTA25AudioModel(PreTrainedModel):
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
             
+            # Debug logging for audio sizes
+            if not hasattr(self, '_debug_audio_sizes_logged'):
+                import logging
+                logging.info(f"[DEBUG] _prepare_inputs_for_llm: batch_audio_sizes={batch_audio_sizes}")
+                logging.info(f"[DEBUG] _prepare_inputs_for_llm: audio_embeddings.size(0)={audio_embeddings.size(0)}")
+                logging.info(f"[DEBUG] _prepare_inputs_for_llm: audio_batch_idx={audio_batch_idx}")
+                self._debug_audio_sizes_logged = True
+            
             # Determine placeholder size:
             # 1. Use batch_audio_sizes if available (from preprocessing, bypasses tokenizer roundtrip)
             # 2. Fall back to calculating from inputs_embeds
             if batch_audio_sizes is not None and audio_batch_idx < len(batch_audio_sizes):
                 # Use preprocessed audio_size (e.g., 439 for local_enabled)
-                expected_audio_size = batch_audio_sizes[audio_batch_idx]
+                expected_audio_size = int(batch_audio_sizes[audio_batch_idx])
                 placeholder_size = expected_audio_size + trans_len
             else:
                 # Fallback: calculate from inputs_embeds (may be affected by tokenizer roundtrip)

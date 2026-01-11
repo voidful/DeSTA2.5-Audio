@@ -121,13 +121,11 @@ class BaseCollateFn:
         self, 
         data_cfg: DictConfig, 
         tokenizer: AutoTokenizer, 
-        processor: AutoFeatureExtractor,
-        computed_audio_size: int = None  # Preprocessed audio_size to bypass tokenizer roundtrip
+        processor: AutoFeatureExtractor
     ):
         self.tokenizer = tokenizer
         self.processor = processor
         self.max_seq_length = data_cfg.max_seq_length
-        self.computed_audio_size = computed_audio_size  # e.g., 439 for local_enabled
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Prepare a training batch from list of samples."""
@@ -239,13 +237,8 @@ class BaseCollateFn:
                 audio_context_batch_start_positions.append((i, start_position + ctx_pad))
             
             # Collect audio_size from preprocessing (bypasses tokenizer roundtrip)
-            # Use self.computed_audio_size which is set from config during dataset creation
-            if self.computed_audio_size is not None:
-                # Each sample may have multiple audios, extend with audio_size for each
-                num_audios = len(item["processed_audios"])
-                batch_audio_sizes.extend([self.computed_audio_size] * num_audios)
-            elif "audio_size_list" in item:
-                batch_audio_sizes.extend(item["audio_size_list"])
+            if "batch_audio_sizes" in item:
+                batch_audio_sizes.extend(item["batch_audio_sizes"])
 
         # Extract audio features
         batch_features = self.processor(
@@ -573,8 +566,7 @@ class BaseAudioTextDataset:
         self.collate_fn = BaseCollateFn(
             data_cfg=data_cfg, 
             tokenizer=self.tokenizer, 
-            processor=self.processor,
-            computed_audio_size=self.computed_audio_size  # Pass to collate for model
+            processor=self.processor
         )
         
         # Sanity check: verify first sample can be loaded
@@ -800,7 +792,7 @@ class BaseAudioTextDataset:
         examples["start_positions"] = start_positions_list
         examples["transcription_list"] = transcription_list
         examples["processed_audios"] = audio_list
-        examples["audio_size_list"] = audio_size_list_per_sample  # Store audio_size for runtime
+        examples["batch_audio_sizes"] = audio_size_list_per_sample  # Store audio_size for runtime
 
         # Calculate targets and lengths
         targets = []
