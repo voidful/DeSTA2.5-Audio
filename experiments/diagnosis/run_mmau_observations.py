@@ -223,8 +223,9 @@ def run_observation1_feature_collapse(audio_tokens, output_dir, num_groups=8, qu
     }
     
     # Add Group-Aware Metrics (for Struct-ORCA)
+    # Note: For local_enabled models, tokens > total_tokens, so we use >= check
     total_tokens = num_groups * queries_per_group
-    if len(audio_tokens.shape) >= 2 and (audio_tokens.shape[1] == total_tokens or 
+    if len(audio_tokens.shape) >= 2 and (audio_tokens.shape[1] >= total_tokens or 
                                          audio_tokens.shape[-1] % total_tokens == 0):
         print("\n--- Group-Aware Metrics (Struct-ORCA) ---")
         group_metrics = compute_group_aware_metrics(audio_tokens, num_groups, queries_per_group)

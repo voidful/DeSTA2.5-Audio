@@ -335,6 +335,14 @@ def compute_group_aware_metrics(
     Returns:
         Dictionary with all group-aware metrics
     """
+    # Handle models with local tokens by truncating to global tokens only
+    # This ensures compatibility with local_enabled models
+    expected_global_tokens = num_groups * queries_per_group
+    
+    if len(audio_tokens.shape) == 3 and audio_tokens.shape[1] > expected_global_tokens:
+        # Truncate to global tokens only (local tokens are appended after global)
+        audio_tokens = audio_tokens[:, :expected_global_tokens, :]
+    
     return {
         "group_independence_score": compute_group_independence_score(
             audio_tokens, num_groups, queries_per_group
