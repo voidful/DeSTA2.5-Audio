@@ -434,9 +434,12 @@ class BaseAudioTextDataset:
                     
                     logging.info(f"[Rank {_get_rank()}] Preprocessing complete. Saved {len(self.dataset)} samples.")
                 finally:
-                    # Remove lock file
-                    if os.path.exists(lock_file):
-                        os.remove(lock_file)
+                    # Remove lock file (use try-except for race condition safety)
+                    try:
+                        if os.path.exists(lock_file):
+                            os.remove(lock_file)
+                    except FileNotFoundError:
+                        pass  # Already removed by another process
             
             # Synchronize - rank 0 finishes before others proceed
             _barrier()
