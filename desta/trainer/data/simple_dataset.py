@@ -373,9 +373,12 @@ class BaseAudioTextDataset:
         
         data_files = [resolve_filepath(fp) for fp in self.manifest_filepaths]
         
-        # Create a stable cache path based on manifest files
+        # Create a stable cache path based on manifest files AND model config
+        # Include connector_mode and local_enabled to ensure different configs use different caches
         import hashlib
-        cache_key = hashlib.md5("_".join(sorted(data_files)).encode()).hexdigest()[:12]
+        config_str = f"{self.connector_mode}_{self.struct_orca_local_enabled}_{self.struct_orca_num_groups}_{self.struct_orca_queries_per_group}"
+        cache_input = "_".join(sorted(data_files)) + "_" + config_str
+        cache_key = hashlib.md5(cache_input.encode()).hexdigest()[:12]
         cache_dir = os.path.join(
             os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
             "desta_preprocessed",
