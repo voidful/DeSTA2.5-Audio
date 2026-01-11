@@ -342,6 +342,15 @@ class BaseAudioTextDataset:
         orca_cfg = cfg.model.get("orca", {})
         self.orca_global_num_tokens = orca_cfg.get("global_num_tokens", 4)
         
+        # Struct-ORCA configuration for local branch
+        struct_orca_cfg = cfg.model.get("struct_orca", {})
+        self.struct_orca_num_groups = struct_orca_cfg.get("num_groups", 8)
+        self.struct_orca_queries_per_group = struct_orca_cfg.get("queries_per_group", 8)
+        self.struct_orca_local_enabled = struct_orca_cfg.get("local_enabled", False)
+        # Whisper outputs 1500 frames (30s * 50Hz), 4x downsample = 375 local tokens
+        self.struct_orca_local_downsample = orca_cfg.get("local_downsample", 4)
+        self.whisper_output_frames = 1500  # Fixed for Whisper (max_source_positions)
+        
         model_cfg = cfg.model
         if isinstance(model_cfg, DictConfig):
             self.system_prompt = model_cfg.get("system_prompt", None)
@@ -662,6 +671,16 @@ class BaseAudioTextDataset:
             # Use appropriate audio size based on connector mode
             if self.connector_mode == "orca_hybrid":
                 audio_size = self.orca_global_num_tokens
+            elif self.connector_mode == "struct_orca":
+                # Global tokens = num_groups * queries_per_group
+                global_tokens = self.struct_orca_num_groups * self.struct_orca_queries_per_group
+                if self.struct_orca_local_enabled:
+                    # Local tokens = whisper_frames / downsample_factor
+                    # Whisper outputs 1500 frames for 30s audio, 4x downsample = 375
+                    local_tokens = self.whisper_output_frames // self.struct_orca_local_downsample
+                    audio_size = global_tokens + local_tokens
+                else:
+                    audio_size = global_tokens
             else:
                 audio_size = self.prompt_size
             audio_size_list = [audio_size] * len(new_audios)
