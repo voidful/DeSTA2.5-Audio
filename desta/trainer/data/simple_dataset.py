@@ -684,6 +684,17 @@ class BaseAudioTextDataset:
                     audio_size = global_tokens + local_tokens
                 else:
                     audio_size = global_tokens
+                # Debug logging for first sample
+                if not hasattr(self, '_debug_audio_size_logged'):
+                    logging.info(f"[DEBUG] struct_orca audio_size calculation:")
+                    logging.info(f"  connector_mode: {self.connector_mode}")
+                    logging.info(f"  struct_orca_local_enabled: {self.struct_orca_local_enabled}")
+                    logging.info(f"  num_groups: {self.struct_orca_num_groups}, queries_per_group: {self.struct_orca_queries_per_group}")
+                    logging.info(f"  global_tokens: {global_tokens}")
+                    if self.struct_orca_local_enabled:
+                        logging.info(f"  local_tokens: {local_tokens} (1500 / {self.struct_orca_local_downsample})")
+                    logging.info(f"  FINAL audio_size: {audio_size}")
+                    self._debug_audio_size_logged = True
             else:
                 audio_size = self.prompt_size
             audio_size_list = [audio_size] * len(new_audios)
