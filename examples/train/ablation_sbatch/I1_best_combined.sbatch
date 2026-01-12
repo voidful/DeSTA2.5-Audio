@@ -13,13 +13,17 @@
 #SBATCH --error=./slurm-report/I1_best_%j.out
 
 # ==========================================
-# I1: Best Configuration
-# = G1 (Modality-DPO) + H1 (Variational Grouping) + D1 (Orthogonal Projection)
-# 
-# 基於實驗分析：
-# - G1 提供最佳 Music 分數 (54.49%)
-# - H1 提供最佳 Speech 分數 (71.47%)
-# - D1 提供穩定的正交化基礎
+# I1: Premium Configuration (Updated based on analysis)
+# = G1 (Modality-DPO) - best overall
+# + H1 (Variational) - best Speech (lower weight to avoid Music drop)
+# + F1 (Local Branch) - best multi-speaker handling
+# + D1 (Orthogonal Projection) - stable base
+#
+# 預期效果:
+# - Speech: ~71% (H1 優勢)
+# - Music: ~54% (G1 優勢)
+# - Sound: ~59% (F1 優勢)
+# - Total: ~62%
 # ==========================================
 
 # ===== 環境設定 =====
@@ -41,7 +45,7 @@ config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_4b_orca
 
 project=struct_orca_ablation
-name="I1_best_combined"
+name="I1_premium"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -71,8 +75,10 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.modality_dpo_enabled=true \
     ++model.modality_dpo_beta=0.15 \
     ++model.variational_grouping_enabled=true \
-    ++model.variational_kl_weight=0.005
+    ++model.variational_kl_weight=0.003 \
+    ++model.orca.local_branch_true=true \
+    ++model.orca.local_ortho_weight=0.05
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
-./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_I1_best_combined"
+./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_I1_premium"
