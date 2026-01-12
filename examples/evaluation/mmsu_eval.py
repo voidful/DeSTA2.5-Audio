@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 # =====================
 
 DEFAULT_MODEL_ID = "voidful/QAQ_0.6b_orca_all"  # Update to your trained model
-DATASET_ID = "MMSU/MMSU_Bench"  # MMSU dataset
+DATASET_ID = "ddwang2000/MMSU"  # MMSU dataset
 DEFAULT_SPLIT = "test"
 TMP_WAV_PATH = "tmp_mmsu_audio.wav"
 RESULT_DIR = "mmsu_results"
