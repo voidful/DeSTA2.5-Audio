@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 # =====================
 
 DEFAULT_MODEL_ID = "voidful/desta25_4b_H1_variational_grouping"
-DATASET_ID = "ddwang2000/MMSU"  # MMSU dataset
+DATASET_ID = "yuantuo666/MMSU-full_5k_hf_format.v0"  # MMSU dataset
 DEFAULT_SPLIT = "train"
 TMP_WAV_PATH = "tmp_mmsu_audio.wav"
 RESULT_DIR = "mmsu_results"
@@ -103,21 +103,18 @@ def extract_answer_choice(response):
     return None
 
 
-def check_answer(pred_choice, answer_gt, choices):
+def check_answer(pred_choice, answer_index, options):
     """
     Check if predicted choice matches ground truth.
+    answer_index is 0-3, options is a list of 4 choices.
     """
     if pred_choice is None:
         return False
     
-    choice_map = {
-        'A': choices.get('choice_a', ''),
-        'B': choices.get('choice_b', ''),
-        'C': choices.get('choice_c', ''),
-        'D': choices.get('choice_d', '')
-    }
+    choice_map = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+    pred_index = choice_map.get(pred_choice, -1)
     
-    return choice_map.get(pred_choice, '') == answer_gt
+    return pred_index == answer_index
 
 
 # =====================
@@ -132,16 +129,13 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
 
     system_prompt = 'Listen to the audio and answer the multiple choice question. Output ONLY the letter (A, B, C, or D) of the correct answer.'
 
-    # Build question with choices - handle different field naming conventions
-    question = item.get('question', item.get('Question', ''))
+    # Build question with choices - using yuantuo666 format
+    question = item.get('question', '')
+    options = item.get('options', [])  # List of 4 options
     
-    # Try different field names for choices
-    choice_a = item.get('choice_a', item.get('A', item.get('option_a', '')))
-    choice_b = item.get('choice_b', item.get('B', item.get('option_b', '')))
-    choice_c = item.get('choice_c', item.get('C', item.get('option_c', '')))
-    choice_d = item.get('choice_d', item.get('D', item.get('option_d', '')))
-    
-    choices_text = f"A. {choice_a}\nB. {choice_b}\nC. {choice_c}\nD. {choice_d}"
+    # Build choices text from options list
+    choice_labels = ['A', 'B', 'C', 'D']
+    choices_text = '\n'.join([f"{choice_labels[i]}. {opt}" for i, opt in enumerate(options[:4])])
     
     full_question = f"{question}\n\nOptions:\n{choices_text}\n\nAnswer with only the letter (A, B, C, or D):"
 
@@ -307,23 +301,11 @@ def main():
         if idx == 0:
             print(f"Dataset fields: {list(item.keys())}")
         
-        # Handle different field naming conventions
-        answer_gt = item.get("answer_gt", item.get("answer", item.get("Answer", "")))
-        category = item.get("category", item.get("Category", "NA"))
-        subcategory = item.get("sub-category", item.get("sub_category", item.get("Subcategory", "NA")))
-        
-        # Get choices with multiple fallbacks
-        choice_a = item.get('choice_a', item.get('A', item.get('option_a', '')))
-        choice_b = item.get('choice_b', item.get('B', item.get('option_b', '')))
-        choice_c = item.get('choice_c', item.get('C', item.get('option_c', '')))
-        choice_d = item.get('choice_d', item.get('D', item.get('option_d', '')))
-        
-        choices = {
-            'choice_a': choice_a,
-            'choice_b': choice_b,
-            'choice_c': choice_c,
-            'choice_d': choice_d
-        }
+        # Using yuantuo666 format: answer_index (0-3), options (list)
+        answer_index = item.get("answer_index", 0)
+        category = item.get("category", "NA")
+        subcategory = item.get("linguistics_sub_discipline", "NA")
+        options = item.get('options', [])
 
         # 1) DeSTA 推論
         pred = run_desta_on_item(model, item, TMP_WAV_PATH)
@@ -331,9 +313,9 @@ def main():
         # 2) Extract answer choice
         pred_choice = extract_answer_choice(pred)
         
-        # 3) Check correctness
-        is_correct = check_answer(pred_choice, answer_gt, choices)
-        print(is_correct,pred,pred_choice)
+        # 3) Check correctness (answer_index is 0-3)
+        is_correct = check_answer(pred_choice, answer_index, options)
+        print(f"Pred: {pred_choice}, Answer: {answer_index}, Correct: {is_correct}")
         # 4) LLM Judge as backup (if enabled)
         if args.use_judge and not is_correct:
             is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
@@ -360,8 +342,9 @@ def main():
 
         results.append({
             "id": idx,
+            "key": item.get("key", ""),
             "question": item.get("question", ""),
-            "answer_gt": answer_gt,
+            "answer_index": answer_index,
             "prediction": pred,
             "pred_choice": pred_choice,
             "is_correct": is_correct,
