@@ -1086,6 +1086,8 @@ class DeSTA25Config(PretrainedConfig):
                  # O: Acoustic Scene Prior
                  scene_prior_enabled=False,
                  scene_prior_num_classes=10,
+                 # P: ASR Robustness
+                 asr_dropout_prob=0.0,
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -1157,6 +1159,9 @@ class DeSTA25Config(PretrainedConfig):
         # O: Acoustic Scene Prior
         self.scene_prior_enabled = scene_prior_enabled
         self.scene_prior_num_classes = scene_prior_num_classes
+        
+        # P: ASR Robustness
+        self.asr_dropout_prob = asr_dropout_prob
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 
@@ -1320,6 +1325,14 @@ class DeSTA25AudioModel(PreTrainedModel):
                         transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
                     transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [B, H]
             
+            # P: ASR Dropout (Robustness)
+            asr_dropout_prob = getattr(self.config, 'asr_dropout_prob', 0.0)
+            if self.training and asr_dropout_prob > 0 and transcription_embeds is not None:
+                # Create mask: 1 = keep, 0 = drop
+                # Probability of dropping is asr_dropout_prob
+                mask_keep = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) > asr_dropout_prob).float().unsqueeze(-1)
+                transcription_embeds = transcription_embeds * mask_keep
+
             # Extract target embeddings from labels
             if labels is not None:
                 with torch.no_grad():
