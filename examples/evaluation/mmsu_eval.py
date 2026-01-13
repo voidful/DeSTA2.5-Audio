@@ -18,9 +18,9 @@ logging.basicConfig(level=logging.INFO)
 # 基本設定
 # =====================
 
-DEFAULT_MODEL_ID = "voidful/QAQ_0.6b_orca_all"  # Update to your trained model
+DEFAULT_MODEL_ID = "voidful/desta25_4b_H1_variational_grouping"
 DATASET_ID = "ddwang2000/MMSU"  # MMSU dataset
-DEFAULT_SPLIT = "test"
+DEFAULT_SPLIT = "train"
 TMP_WAV_PATH = "tmp_mmsu_audio.wav"
 RESULT_DIR = "mmsu_results"
 JUDGE_MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
@@ -130,13 +130,20 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: \"___\" " where ___ is A, B, C, or D.'
+    system_prompt = 'Listen to the audio and answer the multiple choice question. Output ONLY the letter (A, B, C, or D) of the correct answer.'
 
-    # Build question with choices
-    question = item.get('question', '')
-    choices_text = f"A. {item.get('choice_a', '')}\nB. {item.get('choice_b', '')}\nC. {item.get('choice_c', '')}\nD. {item.get('choice_d', '')}"
+    # Build question with choices - handle different field naming conventions
+    question = item.get('question', item.get('Question', ''))
     
-    full_question = f"{question}\n\n{choices_text}"
+    # Try different field names for choices
+    choice_a = item.get('choice_a', item.get('A', item.get('option_a', '')))
+    choice_b = item.get('choice_b', item.get('B', item.get('option_b', '')))
+    choice_c = item.get('choice_c', item.get('C', item.get('option_c', '')))
+    choice_d = item.get('choice_d', item.get('D', item.get('option_d', '')))
+    
+    choices_text = f"A. {choice_a}\nB. {choice_b}\nC. {choice_c}\nD. {choice_d}"
+    
+    full_question = f"{question}\n\nOptions:\n{choices_text}\n\nAnswer with only the letter (A, B, C, or D):"
 
     messages = [
         {
@@ -158,7 +165,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
             do_sample=False,
             top_p=0.85,
             temperature=0.0,
-            max_new_tokens=512
+            max_new_tokens=64  # Shorter since we just want A/B/C/D
         )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
@@ -296,15 +303,26 @@ def main():
     results = []
 
     for idx, item in enumerate(tqdm(ds, desc="Evaluating")):
-        answer_gt = item.get("answer_gt", "")
-        category = item.get("category", "NA")
-        subcategory = item.get("sub-category", "NA")
+        # Debug: print first item's keys
+        if idx == 0:
+            print(f"Dataset fields: {list(item.keys())}")
+        
+        # Handle different field naming conventions
+        answer_gt = item.get("answer_gt", item.get("answer", item.get("Answer", "")))
+        category = item.get("category", item.get("Category", "NA"))
+        subcategory = item.get("sub-category", item.get("sub_category", item.get("Subcategory", "NA")))
+        
+        # Get choices with multiple fallbacks
+        choice_a = item.get('choice_a', item.get('A', item.get('option_a', '')))
+        choice_b = item.get('choice_b', item.get('B', item.get('option_b', '')))
+        choice_c = item.get('choice_c', item.get('C', item.get('option_c', '')))
+        choice_d = item.get('choice_d', item.get('D', item.get('option_d', '')))
         
         choices = {
-            'choice_a': item.get('choice_a', ''),
-            'choice_b': item.get('choice_b', ''),
-            'choice_c': item.get('choice_c', ''),
-            'choice_d': item.get('choice_d', '')
+            'choice_a': choice_a,
+            'choice_b': choice_b,
+            'choice_c': choice_c,
+            'choice_d': choice_d
         }
 
         # 1) DeSTA 推論
@@ -315,7 +333,7 @@ def main():
         
         # 3) Check correctness
         is_correct = check_answer(pred_choice, answer_gt, choices)
-        
+        print(is_correct,pred,pred_choice)
         # 4) LLM Judge as backup (if enabled)
         if args.use_judge and not is_correct:
             is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
