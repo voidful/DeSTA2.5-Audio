@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=Q1_enhanced
-#SBATCH --partition=normal
-#SBATCH --account=MST111038
+#SBATCH --partition=normal2
+#SBATCH --account=MST114563
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
