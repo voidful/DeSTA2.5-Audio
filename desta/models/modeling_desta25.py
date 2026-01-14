@@ -876,6 +876,17 @@ class WhisperPerception(nn.Module):
         
         # Store group losses for Struct-ORCA (populated during forward)
         self._struct_orca_losses = None
+        
+        # Q: Layer-wise Weighted Sum
+        # Get number of encoder layers from Whisper config
+        num_layers = self.whisper.model.encoder.config.encoder_layers
+        if getattr(config, 'layer_weighted_sum_enabled', False):
+            if getattr(config, 'layer_weighted_learnable', True):
+                # Learnable weights for each layer, initialized uniformly
+                self.layer_weights = nn.Parameter(torch.ones(num_layers) / num_layers)
+            else:
+                # Fixed uniform weights
+                self.register_buffer('layer_weights', torch.ones(num_layers) / num_layers)
 
 
     def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, **kwargs) -> Union[Tuple[torch.Tensor, List[int]], Tuple[torch.Tensor, torch.Tensor, List[int]]]:
@@ -1016,6 +1027,18 @@ class WhisperPerception(nn.Module):
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
             
+            # Q: Layer-wise Weighted Sum
+            # If enabled, combine layer outputs with learnable weights
+            if getattr(self.config, 'layer_weighted_sum_enabled', False) and hasattr(self, 'layer_weights'):
+                # Stack all layer outputs: [num_layers, B, T, H]
+                stacked_outputs = torch.stack(all_layer_outputs, dim=0)
+                # Apply softmax to get normalized weights
+                norm_weights = F.softmax(self.layer_weights, dim=0)  # [num_layers]
+                # Weighted sum: [B, T, H]
+                weighted_output = torch.einsum('lbth,l->bth', stacked_outputs, norm_weights)
+                # Use weighted output as the final layer output for connector
+                all_layer_outputs = [weighted_output]  # Pass as single combined representation
+            
             # Pass all layer outputs to GroupwiseOrthogonalConnector
             global_tokens, group_losses = self.connector(all_layer_outputs)
             return global_tokens, group_losses
@@ -1088,6 +1111,12 @@ class DeSTA25Config(PretrainedConfig):
                  scene_prior_num_classes=10,
                  # P: ASR Robustness
                  asr_dropout_prob=0.0,
+                 # Q: Enhanced Audio Representation
+                 layer_weighted_sum_enabled=False,  # If True, use learnable weighted sum of encoder layers
+                 layer_weighted_learnable=True,  # If True, layer weights are learnable; if False, uniform
+                 # Q: Noisy ASR Augmentation
+                 asr_noise_augment_enabled=False,  # If True, add noise to transcription embeddings
+                 asr_noise_prob=0.0,  # Probability of adding noise to each transcription token
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -1162,6 +1191,13 @@ class DeSTA25Config(PretrainedConfig):
         
         # P: ASR Robustness
         self.asr_dropout_prob = asr_dropout_prob
+        
+        # Q: Enhanced Audio Representation
+        self.layer_weighted_sum_enabled = layer_weighted_sum_enabled
+        self.layer_weighted_learnable = layer_weighted_learnable
+        # Q: Noisy ASR Augmentation
+        self.asr_noise_augment_enabled = asr_noise_augment_enabled
+        self.asr_noise_prob = asr_noise_prob
 
         self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
 
@@ -1332,6 +1368,19 @@ class DeSTA25AudioModel(PreTrainedModel):
                 # Probability of dropping is asr_dropout_prob
                 mask_keep = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) > asr_dropout_prob).float().unsqueeze(-1)
                 transcription_embeds = transcription_embeds * mask_keep
+            
+            # Q: Noisy ASR Augmentation (simulate ASR errors)
+            asr_noise_enabled = getattr(self.config, 'asr_noise_augment_enabled', False)
+            asr_noise_prob = getattr(self.config, 'asr_noise_prob', 0.0)
+            if self.training and asr_noise_enabled and asr_noise_prob > 0 and transcription_embeds is not None:
+                # Add Gaussian noise to transcription embeddings to simulate ASR errors
+                # Noise mask: which samples get noise
+                noise_mask = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) < asr_noise_prob).float().unsqueeze(-1)
+                # Generate noise with same scale as embedding std
+                noise_std = transcription_embeds.std() * 0.1  # 10% of embedding std
+                noise = torch.randn_like(transcription_embeds) * noise_std
+                # Apply noise only to selected samples
+                transcription_embeds = transcription_embeds + noise * noise_mask
 
             # Extract target embeddings from labels
             if labels is not None:
@@ -1425,6 +1474,15 @@ class DeSTA25AudioModel(PreTrainedModel):
                         # Only proceed if we have valid transcription embeddings
                         if len(transcription_embeds_list) > 0:
                             transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [N_valid, H]
+                            
+                            # Q: Noisy ASR Augmentation (simulate ASR errors) - struct_orca path
+                            asr_noise_enabled = getattr(self.config, 'asr_noise_augment_enabled', False)
+                            asr_noise_prob = getattr(self.config, 'asr_noise_prob', 0.0)
+                            if self.training and asr_noise_enabled and asr_noise_prob > 0:
+                                noise_mask = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) < asr_noise_prob).float().unsqueeze(-1)
+                                noise_std = transcription_embeds.std() * 0.1
+                                noise = torch.randn_like(transcription_embeds) * noise_std
+                                transcription_embeds = transcription_embeds + noise * noise_mask
                         else:
                             transcription_embeds = None
                     
