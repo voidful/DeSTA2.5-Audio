@@ -13,17 +13,24 @@
 #SBATCH --error=./slurm-report/I1_best_%j.out
 
 # ==========================================
-# I1: Premium Configuration (Updated based on analysis)
-# = G1 (Modality-DPO) - best overall
-# + H1 (Variational) - best Speech (lower weight to avoid Music drop)
-# + F1 (Local Branch) - best multi-speaker handling
-# + D1 (Orthogonal Projection) - stable base
+# I1: Optimal Configuration - All Effective Techniques
+# 
+# 有效技巧整合 (共8項):
+# ✅ J1 (Task-Aware Routing): SAKURA +3.00%, MMAU +1.10%
+# ✅ P1 (ASR Dropout): MMAU +2.50%
+# ✅ M1 (Multi-Scale Local): MMAU +1.90%, Sound 61.56%
+# ✅ G1 (Modality-DPO): MMAU +1.80%
+# ✅ K1 (Temporal Attention): SAKURA +1.50%, Language 90.4%
+# ✅ N1 (Focal Loss): SAKURA +1.28%, MMAU +0.40%
+# ✅ H1 (Variational Grouping): Speech 71.47%
+# ✅ D1 (Orthogonal Projection): 穩定基礎
 #
 # 預期效果:
-# - Speech: ~71% (H1 優勢)
-# - Music: ~54% (G1 優勢)
-# - Sound: ~59% (F1 優勢)
-# - Total: ~62%
+# - SAKURA: ~72% (J1+K1+N1)
+# - MMAU: ~63% (P1+M1+G1)
+# - Speech: ~72% (H1)
+# - Sound: ~62% (M1)
+# - Music: ~56% (G1+N1)
 # ==========================================
 
 # ===== 環境設定 =====
@@ -45,7 +52,7 @@ config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_4b_orca
 
 project=struct_orca_ablation
-name="I1_premium"
+name="I1_all_effective"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -75,10 +82,15 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.modality_dpo_enabled=true \
     ++model.modality_dpo_beta=0.15 \
     ++model.variational_grouping_enabled=true \
-    ++model.variational_kl_weight=0.003 \
-    ++model.orca.local_branch_true=true \
-    ++model.orca.local_ortho_weight=0.05
+    ++model.variational_kl_weight=0.005 \
+    ++model.task_aware_routing_enabled=true \
+    ++model.temporal_attention_enabled=true \
+    ++model.focal_loss_enabled=true \
+    ++model.focal_loss_gamma=2.0 \
+    ++model.asr_dropout_prob=0.3 \
+    ++model.multi_scale_local_enabled=true
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
-./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_I1_premium"
+./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_I1_all_effective"
+
