@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=Q1_enhanced
-#SBATCH --partition=normal2
+#SBATCH --partition=normal
 #SBATCH --account=MST114563
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
