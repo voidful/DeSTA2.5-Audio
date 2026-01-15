@@ -13,15 +13,20 @@
 #SBATCH --error=./slurm-report/R1_lean_%j.out
 
 # ==========================================
-# R1: J1 + P1 組合 (最小有效組合)
+# R1: G1 + H1 + P1 組合 (J1 的真正核心)
 # 
-# 組合兩個王者:
-# ✅ J1 (Task-Aware Routing): SAKURA 70.75% - 最高
-# ✅ P1 (ASR Dropout 0.3): MMAU 61.60% - 最高
+# 發現: J1 的 task_router 未實際使用!
+# J1 效果好是因為它包含 G1 + H1，不是 Task Routing
+#
+# 組合:
+# ✅ G1 (Modality-DPO): MMAU 60.90% - 偏好優化
+# ✅ H1 (Variational Grouping): Speech 71.47% - 概率分組
+# ✅ P1 (ASR Dropout 0.3): MMAU 61.60% - ASR 魯棒性
 #
 # 預期效果:
-# - SAKURA: ~71% (J1 主導)
-# - MMAU: ~61% (P1 主導)
+# - SAKURA: ~70% (G1+H1)
+# - MMAU: ~62% (P1+G1)
+# - Speech: ~71% (H1)
 # ==========================================
 
 # ===== 環境設定 =====
@@ -43,7 +48,7 @@ config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_4b_orca
 
 project=struct_orca_ablation
-name="R1_J1P1"
+name="R1_G1H1P1"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -70,9 +75,11 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.orca.enabled=false \
     ++model.orca.align_weight_local=0.0 \
     ++model.orca.orthogonal_projection=false \
-    ++model.modality_dpo_enabled=false \
-    ++model.variational_grouping_enabled=false \
-    ++model.task_aware_routing_enabled=true \
+    ++model.modality_dpo_enabled=true \
+    ++model.modality_dpo_beta=0.15 \
+    ++model.variational_grouping_enabled=true \
+    ++model.variational_kl_weight=0.005 \
+    ++model.task_aware_routing_enabled=false \
     ++model.temporal_attention_enabled=false \
     ++model.focal_loss_enabled=false \
     ++model.asr_dropout_prob=0.3 \
@@ -82,5 +89,6 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
-./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_R1_J1P1"
+./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_R1_G1H1P1"
+
 
