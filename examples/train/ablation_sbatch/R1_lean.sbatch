@@ -13,28 +13,15 @@
 #SBATCH --error=./slurm-report/R1_lean_%j.out
 
 # ==========================================
-# R1: Lean & Mean Configuration (Resolving Negative Transfer)
+# R1: J1 + P1 組合 (最小有效組合)
 # 
-# 核心理念: Acoustic-First + Structured Disentanglement
-# 去除冗餘的正則化，保留最強效且互不衝突的組件。
-#
-# 保留組件 (The Core 4):
-# 1. ✅ P1 (ASR Dropout): MMAU 王者 (61.60%) - 核心 ASR 魯棒性
-# 2. ✅ M1 (Multi-Scale Local): Sound 王者 (61.56%) - 核心時序特徵
-# 3. ✅ Q1 (Layer-wise Weighted Sum): 提升 SAKURA - 核心層次特徵
-# 4. ✅ J1 (Task-Aware Routing): 提升 SAKURA (70.75%) - 核心語義路由
-#
-# 移除組件 (Removing Conflicts):
-# ❌ D1 (Orthogonal Projection): 可能破壞 M1 特徵結構，導致 Sound 下降
-# ❌ H1 (Variational Grouping): 增加優化難度
-# ❌ N1 (Focal Loss): 可能改變 Loss Landscape 導致不穩定
-# ❌ G1 (Modality-DPO): 避免與 P1 過度疊加
-# ❌ C2 (Align Loss): 去除輔助 Loss 干擾
+# 組合兩個王者:
+# ✅ J1 (Task-Aware Routing): SAKURA 70.75% - 最高
+# ✅ P1 (ASR Dropout 0.3): MMAU 61.60% - 最高
 #
 # 預期效果:
-# - SAKURA: ~71-72% (J1 + Q1)
-# - MMAU: ~62-63% (P1 + M1 無干擾)
-# - Sound: 回升至 ~60% (移除 D1 干擾)
+# - SAKURA: ~71% (J1 主導)
+# - MMAU: ~61% (P1 主導)
 # ==========================================
 
 # ===== 環境設定 =====
@@ -56,7 +43,7 @@ config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_4b_orca
 
 project=struct_orca_ablation
-name="R1_lean"
+name="R1_J1P1"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -89,14 +76,11 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.temporal_attention_enabled=false \
     ++model.focal_loss_enabled=false \
     ++model.asr_dropout_prob=0.3 \
-    ++model.multi_scale_local_enabled=true \
-    ++model.layer_weighted_sum_enabled=true \
-    ++model.layer_weighted_learnable=true \
+    ++model.multi_scale_local_enabled=false \
+    ++model.layer_weighted_sum_enabled=false \
     ++model.asr_noise_augment_enabled=false
-
-# 註: Q1 的 Noisy ASR 也暫時移除，先只用 P1 確認 ASR Dropout 效果，避免過度 augment
-# 註: K1 (Temporal Attention) 也暫時移除，專注於 M1 的時序特徵
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
-./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_R1_lean"
+./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_R1_J1P1"
+
