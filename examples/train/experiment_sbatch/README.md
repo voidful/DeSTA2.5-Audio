@@ -1,6 +1,6 @@
 # Experiment Sbatch Files
 
-Sbatch files for running ORCA paper experiments on SLURM cluster.
+All sbatch files for running ORCA paper experiments on SLURM cluster.
 
 ## 🚀 Quick Start
 
@@ -25,13 +25,13 @@ cd examples/train/experiment_sbatch
 # 1️⃣ P0-3: Divergence Rate (最快完成，1天)
 sbatch P0_3_divergence.sbatch
 
-# 2️⃣ P0-2a: 同時生成 Liar Data (不需 GPU，4小時)
+# 2️⃣ P0-2a: 同時生成 Liar Data (4小時)
 sbatch P0_2_liar_gen.sbatch
 ```
 
 ### Phase 2: Main Experiments (Day 2-5)
 ```bash
-# 3️⃣ P0-1: Match Rate (需要 P0-3 完成後分析，12小時)
+# 3️⃣ P0-1: Match Rate (12小時)
 sbatch P0_1_match_rate.sbatch
 
 # 4️⃣ P0-2b: Liar Eval (需要 P0-2a 生成的資料，8小時)
@@ -46,10 +46,7 @@ sbatch P1_2_refusal.sbatch
 
 ### Phase 3: Ablation Training (Week 2+, if time permits)
 ```bash
-# 這些是訓練 job，需要 48 小時
-cd ../ablation_sbatch
-
-# 7️⃣ 8️⃣ 9️⃣ P2-1: Component Ablation (可平行)
+# 7️⃣ 8️⃣ 9️⃣ P2-1: Component Ablation (可平行，各48小時)
 sbatch P2_ortho_only.sbatch
 sbatch P2_dropout_only.sbatch
 sbatch P2_dpo_only.sbatch
@@ -57,14 +54,14 @@ sbatch P2_dpo_only.sbatch
 
 ---
 
-## 📊 Experiment Files
+## 📊 All Experiment Files
 
 ### P0: Critical (必須在提交前完成)
 
 | # | File | Experiment | GPU | Time | 依賴 |
 |---|------|------------|-----|------|------|
 | 1 | `P0_3_divergence.sbatch` | Divergence Rate | 1 | 24h | - |
-| 2 | `P0_2_liar_gen.sbatch` | Generate Liar Data | 0 | 4h | - |
+| 2 | `P0_2_liar_gen.sbatch` | Generate Liar Data | 1 | 4h | - |
 | 3 | `P0_1_match_rate.sbatch` | Match Rate | 1 | 12h | - |
 | 4 | `P0_2_liar_eval.sbatch` | Liar Eval | 1 | 8h | P0-2a |
 

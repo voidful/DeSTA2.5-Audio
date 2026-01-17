@@ -58,16 +58,14 @@ submit_p2() {
     echo ""
     echo "=== P2: Ablation Training ==="
     
-    ABLATION_DIR="../ablation_sbatch"
-    
     echo "Submitting P2-1a: Ortho Only..."
-    sbatch ${ABLATION_DIR}/P2_ortho_only.sbatch
+    sbatch P2_ortho_only.sbatch
     
     echo "Submitting P2-1b: ASR Dropout Only..."
-    sbatch ${ABLATION_DIR}/P2_dropout_only.sbatch
+    sbatch P2_dropout_only.sbatch
     
     echo "Submitting P2-1c: Modality-DPO Only..."
-    sbatch ${ABLATION_DIR}/P2_dpo_only.sbatch
+    sbatch P2_dpo_only.sbatch
 }
 
 case ${MODE} in
