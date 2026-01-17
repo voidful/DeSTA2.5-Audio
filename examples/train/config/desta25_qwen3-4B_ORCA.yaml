@@ -3,8 +3,8 @@ hydra:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_4b_struct_orca
-name: desta25_qwen3_4b_struct_orca
+project: desta25_qwen3_4b_orca_r1
+name: desta25_qwen3_4b_orca_r1
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,7 +13,7 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_4b_struct_orca
+  project: desta25_qwen3_4b_orca_r1
   log_model: all
 
 trainer:
@@ -41,12 +41,12 @@ model:
     freeze: True
 
   connector:
-    mode: struct_orca
+    mode: orca_r1
     prompt_size: 64
     num_hidden_layers: 6
     use_flash_attention: true  # Use SDPA for faster attention
 
-  struct_orca:
+  orca_r1:
     num_groups: 8
     queries_per_group: 8
     inter_group_weight: 0.1

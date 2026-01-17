@@ -34,7 +34,7 @@ ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-4B_Qformer6L
 dataset_config=DestaAQA-5M_4b_orca
 
-project=struct_orca_ablation
+project=orca_r1_ablation
 name="A0_baseline_qformer"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"

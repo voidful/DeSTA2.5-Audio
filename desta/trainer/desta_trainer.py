@@ -73,7 +73,7 @@ class DeSTA25Trainer(Trainer):
             # Check for ORCA mode using connector_mode
             connector_mode = getattr(config, "connector_mode", "")
             is_orca = connector_mode == "orca_hybrid"
-            is_struct_orca = connector_mode == "struct_orca"
+            is_orca_r1 = connector_mode == "orca_r1"
             
             if is_orca:
                 orca_losses = getattr(outputs, "orca_losses", None)
@@ -89,22 +89,22 @@ class DeSTA25Trainer(Trainer):
                     if orca_total > 0:
                         log_dict["train/orca_total"] = orca_total
             
-            elif is_struct_orca:
-                # Struct-ORCA: losses are already added to outputs.loss in forward()
+            elif is_orca_r1:
+                # ORCA-R1: losses are already added to outputs.loss in forward()
                 # Here we just read the detached values for logging (no gradient flow)
-                orca_loss_log = getattr(actual_model, "_struct_orca_loss_log", None)
-                orca_total = getattr(actual_model, "_struct_orca_loss_total", 0.0)
+                orca_loss_log = getattr(actual_model, "_orca_r1_loss_log", None)
+                orca_total = getattr(actual_model, "_orca_r1_loss_total", 0.0)
                 
                 if orca_loss_log is not None:
                     for name, value in orca_loss_log.items():
                         log_dict[f"train/{name}"] = value
                     
                     if orca_total > 0:
-                        log_dict["train/struct_orca_total"] = orca_total
+                        log_dict["train/orca_r1_total"] = orca_total
                     
                     # Clear after logging
-                    actual_model._struct_orca_loss_log = None
-                    actual_model._struct_orca_loss_total = 0.0
+                    actual_model._orca_r1_loss_log = None
+                    actual_model._orca_r1_loss_total = 0.0
         
         # Log total loss and loss breakdown
         log_dict["train/loss"] = total_loss.item()

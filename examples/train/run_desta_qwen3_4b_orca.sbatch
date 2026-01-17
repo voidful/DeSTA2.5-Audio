@@ -39,7 +39,7 @@ config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_local
 
 project=desta25_qwen3_4b_orca
-name="qwen3-4b-instruct-orca"
+name="qwen3-4b-inorca-r1"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 

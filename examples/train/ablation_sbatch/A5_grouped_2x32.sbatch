@@ -34,7 +34,7 @@ ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_4b_orca
 
-project=struct_orca_ablation
+project=orca_r1_ablation
 name="A5_grouped_2x32"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
@@ -54,11 +54,11 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++exp_dir=${exp_dir} \
     project=${project} \
     name=${name} \
-    ++model.struct_orca.num_groups=2 \
-    ++model.struct_orca.queries_per_group=32 \
-    ++model.struct_orca.inter_group_weight=0 \
-    ++model.struct_orca.intra_group_weight=0 \
-    ++model.struct_orca.iv_weight=0
+    ++model.orca_r1.num_groups=2 \
+    ++model.orca_r1.queries_per_group=32 \
+    ++model.orca_r1.inter_group_weight=0 \
+    ++model.orca_r1.intra_group_weight=0 \
+    ++model.orca_r1.iv_weight=0
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'

@@ -41,7 +41,7 @@ config=desta25_qwen3-0.6b_ORCAHybrid
 dataset_config=DestaAQA-5M_0.6b_orca
 
 project=desta25_qwen3_0.6b_orca
-name="qwen3-0.6b-instruct-orca"
+name="qwen3-0.6b-inorca-r1"
 output_root="/work/voidful2nlp/desta/outputs/${project}"
 
 # ===== 自動檢測並 Resume Checkpoint =====

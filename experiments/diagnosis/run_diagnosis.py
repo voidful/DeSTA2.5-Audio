@@ -255,9 +255,9 @@ def run_full_diagnosis(
     )
     results["attribute_probes"] = attr_probe_results
     
-    # === 5. Group Probing (if Struct-ORCA) ===
-    num_groups = getattr(model.config, 'struct_orca_num_groups', 8)
-    queries_per_group = getattr(model.config, 'struct_orca_queries_per_group', 8)
+    # === 5. Group Probing (if ORCA-R1) ===
+    num_groups = getattr(model.config, 'orca_r1_num_groups', 8)
+    queries_per_group = getattr(model.config, 'orca_r1_queries_per_group', 8)
     
     if data["audio_tokens"].shape[1] == num_groups * queries_per_group:
         print("\n=== Group Specialization Analysis ===")

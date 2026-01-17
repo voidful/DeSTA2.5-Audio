@@ -1,6 +1,6 @@
-# Struct-ORCA Ablation Study
+# ORCA-R1 Ablation Study
 
-Progressive ablation from baseline DeSTA2.5 to full Struct-ORCA.
+Progressive ablation from baseline DeSTA2.5 to full ORCA-R1.
 
 ## Experiment Progression
 

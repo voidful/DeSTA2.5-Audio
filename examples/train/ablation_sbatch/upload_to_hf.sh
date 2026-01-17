@@ -53,7 +53,7 @@ api.upload_folder(
     folder_path='${CKPT_PATH}',
     repo_id=repo_id,
     repo_type='model',
-    commit_message='Upload trained Struct-ORCA model'
+    commit_message='Upload trained ORCA-R1 model'
 )
 print(f'Successfully uploaded to https://huggingface.co/{repo_id}')
 "

@@ -93,7 +93,7 @@ def compute_feature_statistics(features: np.ndarray) -> Dict[str, float]:
 
 
 # =============================================================================
-# Group-Aware Metrics for Struct-ORCA
+# Group-Aware Metrics for ORCA-R1
 # =============================================================================
 
 def compute_group_independence_score(
@@ -325,7 +325,7 @@ def compute_group_aware_metrics(
     queries_per_group: int = 8
 ) -> Dict[str, Any]:
     """
-    Compute all group-aware metrics for Struct-ORCA.
+    Compute all group-aware metrics for ORCA-R1.
     
     Args:
         audio_tokens: [N, total_tokens, hidden_dim] or flattened
@@ -365,7 +365,7 @@ def extract_audio_representations(
         dataloader: DataLoader yielding batches with audio
         device: Device to run inference on
         max_samples: Maximum number of samples to extract
-        return_group_centroids: If True, also return group centroids (for Struct-ORCA)
+        return_group_centroids: If True, also return group centroids (for ORCA-R1)
         
     Returns:
         Dictionary with:

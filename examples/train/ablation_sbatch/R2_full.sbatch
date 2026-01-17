@@ -47,7 +47,7 @@ ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_4b_orca_full  # 使用完整數據集
 
-project=struct_orca_ablation
+project=orca_r1_ablation
 name="R2_full"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
@@ -67,10 +67,10 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++exp_dir=${exp_dir} \
     project=${project} \
     name=${name} \
-    ++model.struct_orca.num_groups=8 \
-    ++model.struct_orca.queries_per_group=8 \
-    ++model.struct_orca.inter_group_weight=0.1 \
-    ++model.struct_orca.intra_group_weight=0.03 \
+    ++model.orca_r1.num_groups=8 \
+    ++model.orca_r1.queries_per_group=8 \
+    ++model.orca_r1.inter_group_weight=0.1 \
+    ++model.orca_r1.intra_group_weight=0.03 \
     ++model.modality_dpo_enabled=true \
     ++model.modality_dpo_beta=0.1 \
     ++model.variational_grouping_enabled=true \

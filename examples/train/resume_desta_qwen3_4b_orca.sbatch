@@ -47,7 +47,7 @@ config=desta25_qwen3-4b_ORCAHybrid
 dataset_config=DestaAQA-5M_local
 
 project=desta25_qwen3_4b_orca
-name="qwen3-4b-instruct-orca"
+name="qwen3-4b-inorca-r1"
 
 # 使用原始實驗目錄
 exp_dir="${RESUME_EXP_DIR}"

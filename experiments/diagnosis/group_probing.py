@@ -191,7 +191,7 @@ def analyze_group_specialization(
     Full analysis of group specialization.
     
     Args:
-        model: DeSTA25AudioModel (must use struct_orca connector)
+        model: DeSTA25AudioModel (must use orca_r1 connector)
         dataloader: DataLoader with audio samples
         attribute_labels: Dict of attribute labels
         device: Device for inference
@@ -229,8 +229,8 @@ def analyze_group_specialization(
     group_tokens = np.concatenate(all_group_tokens, axis=0)[:max_samples]
     
     # Get config
-    num_groups = getattr(model.config, 'struct_orca_num_groups', 8)
-    queries_per_group = getattr(model.config, 'struct_orca_queries_per_group', 8)
+    num_groups = getattr(model.config, 'orca_r1_num_groups', 8)
+    queries_per_group = getattr(model.config, 'orca_r1_queries_per_group', 8)
     
     # Compute centroids
     print("Computing group centroids...")

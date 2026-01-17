@@ -3,8 +3,8 @@ hydra:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_0.6b_struct_orca
-name: desta25_qwen3_0.6b_struct_orca
+project: desta25_qwen3_0.6b_orca_r1
+name: desta25_qwen3_0.6b_orca_r1
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,7 +13,7 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_0.6b_struct_orca
+  project: desta25_qwen3_0.6b_orca_r1
   log_model: all
 
 trainer:
@@ -41,13 +41,13 @@ model:
     freeze: True
 
   connector:
-    mode: struct_orca  # Use Struct-ORCA connector
-    prompt_size: 64    # Not used in struct_orca mode, kept for compatibility
+    mode: orca_r1  # Use ORCA-R1 connector
+    prompt_size: 64    # Not used in orca_r1 mode, kept for compatibility
     num_hidden_layers: 6
     use_flash_attention: true  # Use SDPA for faster attention
 
-  # Struct-ORCA specific configuration
-  struct_orca:
+  # ORCA-R1 specific configuration
+  orca_r1:
     # Group-wise Orthogonal Q-Former settings
     num_groups: 8  # Number of semantic groups (emotion, speaker, prosody, etc.)
     queries_per_group: 8  # Queries per group (total = 64 tokens)

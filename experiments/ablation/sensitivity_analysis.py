@@ -62,8 +62,8 @@ def analyze_group_sensitivity(
         model.eval()
         
         # Extract config
-        num_groups = model.config.struct_orca_num_groups
-        queries_per_group = model.config.struct_orca_queries_per_group
+        num_groups = model.config.orca_r1_num_groups
+        queries_per_group = model.config.orca_r1_queries_per_group
         
         # Run evaluation
         # This would run SAKURA eval - simplified here

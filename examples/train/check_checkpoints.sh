@@ -4,7 +4,7 @@
 # Run this on the cluster to diagnose checkpoint detection issues
 
 output_root="/work/voidful2nlp/desta/outputs/desta25_qwen3_0.6b_orca"
-name="qwen3-0.6b-instruct-orca"
+name="qwen3-0.6b-inorca-r1"
 
 echo "=== Checking checkpoint directories ==="
 echo "Output root: $output_root"

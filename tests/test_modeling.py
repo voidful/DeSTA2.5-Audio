@@ -175,47 +175,47 @@ def test_orca_mixed_precision(orca_config):
     assert global_tokens.dtype == torch.bfloat16
 
 
-# === Struct-ORCA Tests ===
+# === ORCA-R1 Tests ===
 
 @pytest.fixture
-def struct_orca_config():
-    """Config with Struct-ORCA enabled for testing."""
+def orca_r1_config():
+    """Config with ORCA-R1 enabled for testing."""
     return DeSTA25Config(
         llm_model_id="DeSTA-ntu/Llama-3.1-8B-Instruct",
         encoder_model_id="openai/whisper-tiny",
-        connector_mode="struct_orca",
+        connector_mode="orca_r1",
         qformer_num_hidden_layers=2,
         prompt_size=64,
         use_lora=False,
-        struct_orca_num_groups=8,
-        struct_orca_queries_per_group=8,
-        struct_orca_inter_group_weight=0.1,
-        struct_orca_intra_group_weight=0.01,
-        struct_orca_iv_weight=0.1,
-        struct_orca_acd_alpha=0.5,
+        orca_r1_num_groups=8,
+        orca_r1_queries_per_group=8,
+        orca_r1_inter_group_weight=0.1,
+        orca_r1_intra_group_weight=0.01,
+        orca_r1_iv_weight=0.1,
+        orca_r1_acd_alpha=0.5,
     )
 
 
-def test_struct_orca_config_fields():
-    """Test that Struct-ORCA config fields are properly initialized."""
+def test_orca_r1_config_fields():
+    """Test that ORCA-R1 config fields are properly initialized."""
     config = DeSTA25Config(
-        connector_mode="struct_orca",
-        struct_orca_num_groups=8,
-        struct_orca_queries_per_group=8,
-        struct_orca_inter_group_weight=0.1,
+        connector_mode="orca_r1",
+        orca_r1_num_groups=8,
+        orca_r1_queries_per_group=8,
+        orca_r1_inter_group_weight=0.1,
     )
-    assert config.struct_orca_num_groups == 8
-    assert config.struct_orca_queries_per_group == 8
-    assert config.struct_orca_inter_group_weight == 0.1
+    assert config.orca_r1_num_groups == 8
+    assert config.orca_r1_queries_per_group == 8
+    assert config.orca_r1_inter_group_weight == 0.1
     # Check defaults
-    assert config.struct_orca_intra_group_weight == 0.01
-    assert config.struct_orca_iv_weight == 0.1
+    assert config.orca_r1_intra_group_weight == 0.01
+    assert config.orca_r1_iv_weight == 0.1
 
 
-def test_groupwise_orthogonal_connector_initialization(struct_orca_config):
+def test_groupwise_orthogonal_connector_initialization(orca_r1_config):
     """Test GroupwiseOrthogonalConnector initialization."""
     from desta.models.modeling_desta25 import GroupwiseOrthogonalConnector
-    connector = GroupwiseOrthogonalConnector(struct_orca_config)
+    connector = GroupwiseOrthogonalConnector(orca_r1_config)
     
     assert isinstance(connector, torch.nn.Module)
     assert connector.num_groups == 8
@@ -224,10 +224,10 @@ def test_groupwise_orthogonal_connector_initialization(struct_orca_config):
     assert len(connector.group_queries) == 8  # 8 groups
 
 
-def test_groupwise_orthogonal_connector_forward(struct_orca_config):
+def test_groupwise_orthogonal_connector_forward(orca_r1_config):
     """Test GroupwiseOrthogonalConnector forward pass."""
     from desta.models.modeling_desta25 import GroupwiseOrthogonalConnector
-    connector = GroupwiseOrthogonalConnector(struct_orca_config)
+    connector = GroupwiseOrthogonalConnector(orca_r1_config)
     
     batch_size = 2
     seq_len = 100
@@ -239,8 +239,8 @@ def test_groupwise_orthogonal_connector_forward(struct_orca_config):
     global_tokens, group_losses = connector(encoder_hidden_states)
     
     # Check output shapes
-    total_tokens = struct_orca_config.struct_orca_num_groups * struct_orca_config.struct_orca_queries_per_group
-    assert global_tokens.shape == (batch_size, total_tokens, struct_orca_config.llm_config.hidden_size)
+    total_tokens = orca_r1_config.orca_r1_num_groups * orca_r1_config.orca_r1_queries_per_group
+    assert global_tokens.shape == (batch_size, total_tokens, orca_r1_config.llm_config.hidden_size)
     
     # Check group losses are computed
     assert "L_inter_group" in group_losses

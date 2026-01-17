@@ -124,7 +124,7 @@ def extract_representations_from_mmau(
                 with torch.no_grad():
                     outputs = model.perception(input_features=feature)
                     # perception returns:
-                    # - (tokens, lengths) for struct_orca
+                    # - (tokens, lengths) for orca_r1
                     # - (tokens, lengths) for orca_hybrid (now potentially with losses in tuple)
                     # - (tokens, lengths) for qformer_1
                     
@@ -198,7 +198,7 @@ def run_observation1_feature_collapse(audio_tokens, output_dir, num_groups=8, qu
     Measures how much of the representation space is actually utilized.
     High PCA concentration = feature collapse (bad).
     
-    Also includes Group-Aware metrics for Struct-ORCA:
+    Also includes Group-Aware metrics for ORCA-R1:
     - Group Independence Score (GIS)
     - Intra-Group Diversity (IGD)
     - Token Utilization Variance (TUV)
@@ -235,11 +235,11 @@ def run_observation1_feature_collapse(audio_tokens, output_dir, num_groups=8, qu
         "raw_cumulative_variance": cumulative_var[:20].tolist(),
     }
     
-    # Add Group-Aware Metrics (for Struct-ORCA)
+    # Add Group-Aware Metrics (for ORCA-R1)
     total_tokens = num_groups * queries_per_group
     if len(audio_tokens.shape) >= 2 and (audio_tokens.shape[1] == total_tokens or 
                                          audio_tokens.shape[-1] % total_tokens == 0):
-        print("\n--- Group-Aware Metrics (Struct-ORCA) ---")
+        print("\n--- Group-Aware Metrics (ORCA-R1) ---")
         group_metrics = compute_group_aware_metrics(audio_tokens, num_groups, queries_per_group)
         results["group_aware"] = group_metrics
         
@@ -948,9 +948,9 @@ def main():
         
         print(f"\nModel Configuration:")
         print(f"  Connector mode: {model.config.connector_mode}")
-        if model.config.connector_mode == "struct_orca":
-            print(f"  Num groups: {model.config.struct_orca_num_groups}")
-            print(f"  Queries per group: {model.config.struct_orca_queries_per_group}")
+        if model.config.connector_mode == "orca_r1":
+            print(f"  Num groups: {model.config.orca_r1_num_groups}")
+            print(f"  Queries per group: {model.config.orca_r1_queries_per_group}")
         
         results, _ = run_single_model_analysis(model, model_name, dataset, args, device)
         results["dataset"] = DATASET_ID

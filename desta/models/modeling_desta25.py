@@ -139,7 +139,7 @@ class QformerConnector(nn.Module):
 
 class GroupwiseOrthogonalConnector(nn.Module):
     """
-    Struct-ORCA: Group-wise Orthogonal Q-Former Connector.
+    ORCA-R1: Group-wise Orthogonal Q-Former Connector.
     
     Key innovations:
     - Divides queries into semantic groups (e.g., emotion, speaker identity, prosody)
@@ -153,8 +153,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
         self.config = config
         
         # Group settings
-        self.num_groups = getattr(config, 'struct_orca_num_groups', 8)
-        self.queries_per_group = getattr(config, 'struct_orca_queries_per_group', 8)
+        self.num_groups = getattr(config, 'orca_r1_num_groups', 8)
+        self.queries_per_group = getattr(config, 'orca_r1_queries_per_group', 8)
         self.total_queries = self.num_groups * self.queries_per_group
         
         # Determine target layer IDs based on Whisper model
@@ -212,8 +212,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
         )
         
         # Loss weights (configurable)
-        self.inter_group_weight = getattr(config, 'struct_orca_inter_group_weight', 0.1)
-        self.intra_group_weight = getattr(config, 'struct_orca_intra_group_weight', 0.01)
+        self.inter_group_weight = getattr(config, 'orca_r1_inter_group_weight', 0.1)
+        self.intra_group_weight = getattr(config, 'orca_r1_intra_group_weight', 0.01)
         
         # H1: Variational Grouping
         self.variational_enabled = getattr(config, 'variational_grouping_enabled', False)
@@ -402,13 +402,13 @@ class WhisperPerception(nn.Module):
 
         # Create connector based on mode
 
-        elif config.connector_mode == "struct_orca":
+        elif config.connector_mode == "orca_r1":
             self.connector = GroupwiseOrthogonalConnector(config)
         else:
             self.connector = QformerConnector(config)
         
-        # Store group losses for Struct-ORCA (populated during forward)
-        self._struct_orca_losses = None
+        # Store group losses for ORCA-R1 (populated during forward)
+        self._orca_r1_losses = None
         
 
 
@@ -435,17 +435,17 @@ class WhisperPerception(nn.Module):
             if isinstance(result, tuple):
                 global_tokens, losses = result
                 # Store extra losses for logging/training
-                self._struct_orca_losses = losses  # Reuse this field for generic extra losses
+                self._orca_r1_losses = losses  # Reuse this field for generic extra losses
             else:
                 global_tokens = result
             
             speech_feature_lengths = [global_tokens.size(1)] * bs
             return global_tokens, speech_feature_lengths
-        elif self.config.connector_mode == "struct_orca":
+        elif self.config.connector_mode == "orca_r1":
             # result is (global_tokens, group_losses) tuple
             global_tokens, group_losses = result
-            self._struct_orca_losses = group_losses
-            total_queries = self.config.struct_orca_num_groups * self.config.struct_orca_queries_per_group
+            self._orca_r1_losses = group_losses
+            total_queries = self.config.orca_r1_num_groups * self.config.orca_r1_queries_per_group
             speech_feature_lengths = [total_queries] * bs
             return global_tokens, speech_feature_lengths
         else:
@@ -539,7 +539,7 @@ class WhisperPerception(nn.Module):
             result = self.connector(all_layer_outputs)
             return result
 
-        elif self.config.connector_mode == "struct_orca":
+        elif self.config.connector_mode == "orca_r1":
             # Collect all layer hidden states
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = encoder_layer(
@@ -573,11 +573,11 @@ class DeSTA25Config(PretrainedConfig):
                  audio_locator="<|AUDIO|>",
                  placeholder_token="<|reserved_special_token_87|>",
                  
-                 # Struct-ORCA configuration (Core R1)
-                 struct_orca_num_groups=8,
-                 struct_orca_queries_per_group=8,
-                 struct_orca_inter_group_weight=0.1,
-                 struct_orca_intra_group_weight=0.01,
+                 # ORCA-R1 configuration (Core R1)
+                 orca_r1_num_groups=8,
+                 orca_r1_queries_per_group=8,
+                 orca_r1_inter_group_weight=0.1,
+                 orca_r1_intra_group_weight=0.01,
                  
                  # H1: Variational Grouping configuration
                  variational_grouping_enabled=False,
@@ -612,11 +612,11 @@ class DeSTA25Config(PretrainedConfig):
         self.use_lora = use_lora
         self.use_flash_attention = use_flash_attention
 
-        # Struct-ORCA configuration
-        self.struct_orca_num_groups = struct_orca_num_groups
-        self.struct_orca_queries_per_group = struct_orca_queries_per_group
-        self.struct_orca_inter_group_weight = struct_orca_inter_group_weight
-        self.struct_orca_intra_group_weight = struct_orca_intra_group_weight
+        # ORCA-R1 configuration
+        self.orca_r1_num_groups = orca_r1_num_groups
+        self.orca_r1_queries_per_group = orca_r1_queries_per_group
+        self.orca_r1_inter_group_weight = orca_r1_inter_group_weight
+        self.orca_r1_intra_group_weight = orca_r1_intra_group_weight
 
         # H1: Variational Grouping configuration
         self.variational_grouping_enabled = variational_grouping_enabled
@@ -669,10 +669,10 @@ class DeSTA25AudioModel(PreTrainedModel):
         logging.info(f"Loading Audio model from {self.config.encoder_model_id}")
         self.perception = WhisperPerception(self.config)
 
-        # === Struct-ORCA Setup ===
-        is_struct_orca = self.config.connector_mode == "struct_orca"
-        if is_struct_orca:
-            logging.info("Enabling Struct-ORCA components")
+        # === ORCA-R1 Setup ===
+        is_orca_r1 = self.config.connector_mode == "orca_r1"
+        if is_orca_r1:
+            logging.info("Enabling ORCA-R1 components")
 
         self.configure_trainable_parameters()
         
@@ -698,12 +698,12 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_start_positions=batch_start_positions
         )
         
-        # Handle Struct-ORCA mode
-        is_struct_orca_mode = self.config.connector_mode == "struct_orca"
+        # Handle ORCA-R1 mode
+        is_orca_r1_mode = self.config.connector_mode == "orca_r1"
         
-        if is_struct_orca_mode:
-            # Struct-ORCA forward path
-            # prepare_result is just inputs_embeds for struct_orca (same as qformer_1)
+        if is_orca_r1_mode:
+            # ORCA-R1 forward path
+            # prepare_result is just inputs_embeds for orca_r1 (same as qformer_1)
             inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
             
             # Call LLM 
@@ -715,15 +715,15 @@ class DeSTA25AudioModel(PreTrainedModel):
             )
             
             # Collect group losses from perception module (for L_inter_group, L_intra_group)
-            struct_orca_losses = getattr(self.perception, "_struct_orca_losses", None)
+            orca_r1_losses = getattr(self.perception, "_orca_r1_losses", None)
             
             # Initialize loss log dict (detached values for trainer logging)
             orca_loss_log = {}
             orca_total = 0.0
             
             # Add group losses to outputs.loss (in forward, not trainer, to avoid DDP issues)
-            if struct_orca_losses is not None:
-                for name, loss in struct_orca_losses.items():
+            if orca_r1_losses is not None:
+                for name, loss in orca_r1_losses.items():
                     if loss is not None and isinstance(loss, torch.Tensor):
                         outputs.loss = outputs.loss + loss
                         orca_total += loss.item()
@@ -761,7 +761,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             # === P1: ASR Dropout (Robustness) ===
             # Note: This is applied during training in prepare_inputs_for_llm if supported,
             # or we can apply it to transcription embeddings here if we had access to them.
-            # In Struct-ORCA, we might not be explicitly using transcription embeddings in the forward pass yet
+            # In ORCA-R1, we might not be explicitly using transcription embeddings in the forward pass yet
             # unless we add them for some auxiliary loss.
             # Assuming ASR dropout is handled where transcription embeddings are created.
 
@@ -812,7 +812,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                     # Compute contrastive alignment loss
                     if transcription_embeds is not None and target_embeds is not None:
                         # Pool audio tokens: [N_audio, K, H] -> [N_audio, H]
-                        audio_mean = struct_orca_tokens.mean(dim=1)
+                        audio_mean = orca_r1_tokens.mean(dim=1)
                         # Use eps to prevent NaN from zero vectors
                         audio_pooled = F.normalize(audio_mean, dim=-1, eps=1e-8)
                         
@@ -932,15 +932,15 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             # L: Contrastive Audio-Question Alignment
             if getattr(self.config, 'audio_question_contrastive_enabled', False) and labels is not None:
-                struct_orca_tokens = getattr(self, "_struct_orca_audio_tokens", None)
-                if struct_orca_tokens is not None and len(batch_transcription_ids) > 0:
+                orca_r1_tokens = getattr(self, "_orca_r1_audio_tokens", None)
+                if orca_r1_tokens is not None and len(batch_transcription_ids) > 0:
                     # Get question embedding from input_ids (before audio)
                     # Assuming question comes before audio in the sequence
                     with torch.no_grad():
                         question_embed = self.llm_model.model.embed_tokens(input_ids).mean(dim=1)  # [B, d_llm]
                     
                     # Pool audio tokens
-                    audio_pooled = struct_orca_tokens.mean(dim=1)  # [B, d_llm]
+                    audio_pooled = orca_r1_tokens.mean(dim=1)  # [B, d_llm]
                     
                     # Normalize
                     audio_norm = F.normalize(audio_pooled, dim=-1)
@@ -993,8 +993,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                 orca_loss_log["focal_bonus"] = focal_bonus.item()
             
             # Store detached loss values for trainer logging (not for computation)
-            self._struct_orca_loss_log = orca_loss_log
-            self._struct_orca_loss_total = orca_total
+            self._orca_r1_loss_log = orca_loss_log
+            self._orca_r1_loss_total = orca_total
             
             return outputs
         else:
@@ -1007,10 +1007,10 @@ class DeSTA25AudioModel(PreTrainedModel):
                 )
             ) or self.config.connector_mode == "orca_hybrid"
             
-            # FORCE Disable ORCA mode if Struct-ORCA is active (to prevent mixed behaviors/OOM)
-            # This check is redundant here as we are in the `else` branch (not `is_struct_orca_mode`),
+            # FORCE Disable ORCA mode if ORCA-R1 is active (to prevent mixed behaviors/OOM)
+            # This check is redundant here as we are in the `else` branch (not `is_orca_r1_mode`),
             # but included for robustness if logic changes.
-            if self.config.connector_mode == "struct_orca":
+            if self.config.connector_mode == "orca_r1":
                 is_orca_mode = False
 
             # Check if we should compute losses even in Q-Former mode
@@ -1173,18 +1173,18 @@ class DeSTA25AudioModel(PreTrainedModel):
             isinstance(perception_output, tuple) and len(perception_output) == 2 and self.config.connector_mode == "orca_hybrid"
         ) or self.config.connector_mode == "orca_hybrid"
         
-        is_struct_orca = self.config.connector_mode == "struct_orca"
+        is_orca_r1 = self.config.connector_mode == "orca_r1"
         
         if is_orca_output and self.config.connector_mode == "orca_hybrid":
             # perception_output is (global_tokens, lengths)
             batch_global_tokens, batch_audio_feature_lengths = perception_output
             batch_audio_features = batch_global_tokens  # Global tokens are what we splice
-        elif is_struct_orca:
+        elif is_orca_r1:
             # perception_output is (global_tokens, lengths) - same structure
             batch_global_tokens, batch_audio_feature_lengths = perception_output
             batch_audio_features = batch_global_tokens
             # Store audio tokens for discriminator access
-            self._struct_orca_audio_tokens = batch_global_tokens
+            self._orca_r1_audio_tokens = batch_global_tokens
         else:
             # perception_output is (audio_features, lengths)
             batch_audio_features, batch_audio_feature_lengths = perception_output
@@ -1258,8 +1258,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         """
         is_orca = getattr(self.config, 'orca_enabled', False) or self.config.connector_mode == "orca_hybrid"
     
-        # FORCE Disable deep injection for Struct-ORCA to save memory and ensure ablations are clean
-        if self.config.connector_mode == "struct_orca":
+        # FORCE Disable deep injection for ORCA-R1 to save memory and ensure ablations are clean
+        if self.config.connector_mode == "orca_r1":
             return
 
         if not is_orca:
@@ -1703,7 +1703,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         acd_alpha=None
     ):
         """
-        Acoustic-Contrastive Decoding (ACD) for Struct-ORCA.
+        Acoustic-Contrastive Decoding (ACD) for ORCA-R1.
         
         Generates text by emphasizing audio-dependent predictions:
         logits_final = logits_full + alpha * (logits_full - logits_blind)
@@ -1711,13 +1711,13 @@ class DeSTA25AudioModel(PreTrainedModel):
         Where:
         - logits_full: P(y | text, audio) - normal multimodal prediction
         - logits_blind: P(y | text) - text-only prediction (audio zeroed)
-        - alpha: contrast strength (from config.struct_orca_acd_alpha)
+        - alpha: contrast strength (from config.orca_r1_acd_alpha)
         
         This upweights tokens that require listening (e.g., "sarcastic")
         and downweights generic tokens that don't depend on audio.
         """
         if acd_alpha is None:
-            acd_alpha = getattr(self.config, 'struct_orca_acd_alpha', 0.5)
+            acd_alpha = getattr(self.config, 'orca_r1_acd_alpha', 0.5)
         
         input_ids = inputs["context_input_ids"]
         attention_mask = inputs["context_attention_mask"]
@@ -1778,7 +1778,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 inputs_embeds_blind = current_embeds.clone()
                 # Zero out audio token positions (approximation: zero all but keep structure)
                 # A more precise approach would track audio positions, but this is simpler
-                # For Struct-ORCA, we zero the embedded audio tokens
+                # For ORCA-R1, we zero the embedded audio tokens
                 
                 # Compute blind logits
                 outputs_blind = self.llm_model(
@@ -2006,9 +2006,9 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         if self.config.connector_mode == "orca_hybrid":
             audio_token_size = getattr(self.config, 'orca_global_num_tokens', 64)
-        elif self.config.connector_mode == "struct_orca":
-            num_groups = getattr(self.config, 'struct_orca_num_groups', 8)
-            queries_per_group = getattr(self.config, 'struct_orca_queries_per_group', 8)
+        elif self.config.connector_mode == "orca_r1":
+            num_groups = getattr(self.config, 'orca_r1_num_groups', 8)
+            queries_per_group = getattr(self.config, 'orca_r1_queries_per_group', 8)
             audio_token_size = num_groups * queries_per_group
         else:
             audio_token_size = self.config.prompt_size
