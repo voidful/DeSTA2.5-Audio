@@ -97,11 +97,13 @@ MODEL_ORCA="voidful/desta25-4b-R2-full"    # ← 修改為你的 ORCA 模型
 Results saved to:
 ```
 /work/voidful2nlp/desta/experiment_results/
-├── P0_3_divergence/    # divergence_summary.json
-├── P0_1_match_rate/    # desta/, orca/
-├── P0_2_liar/          # data/, eval/
-├── P1_1_linear_probe/  # desta/, orca/
-└── P1_2_refusal/       # desta/, orca/
+├── P0_3_divergence/         # divergence_summary.json
+├── P0_1_match_rate/         # desta/, orca/
+├── P0_2_liar/               # data/, eval/
+├── P1_1_linear_probe/       # desta/, orca/
+├── P1_2_refusal/            # desta/, orca/
+├── P3_benchmark/            # mmau/, mmsu/
+└── %y%m%d-%H%M_P2_*/        # Training checkpoints & eval results
 ```
 
 ---

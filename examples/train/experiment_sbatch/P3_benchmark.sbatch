@@ -33,7 +33,7 @@ export TRANSFORMERS_CACHE=$HF_HOME
 # ===== Variables =====
 # MODEL_PATH passed from submit_all.sh or command line
 : "${MODEL_PATH:=voidful/QAQ_0.6b_orca_all}"  # Default to baseline if not set
-: "${OUTPUT_DIR:=benchmarks}"
+OUTPUT_DIR="/work/voidful2nlp/desta/experiment_results/P3_benchmark"
 
 echo "Benchmarking Model: ${MODEL_PATH}"
 echo "Output Directory: ${OUTPUT_DIR}"

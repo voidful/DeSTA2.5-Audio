@@ -45,7 +45,7 @@ dataset_config=DestaAQA-5M_local
 project=orca_r1_ablation
 name="P2_ortho_only"
 exp_name=$(date +%y%m%d-%H%M)_${name}
-exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
+exp_dir="/work/voidful2nlp/desta/experiment_results/${exp_name}"
 
 mkdir -p ${exp_dir}
 mkdir -p ./slurm-report
