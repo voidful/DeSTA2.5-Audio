@@ -50,6 +50,7 @@ echo "=== Testing DeSTA Baseline ==="
 python experiments/ablation/liar_transcript/liar_eval.py \
     --model ${MODEL_DESTA} \
     --liar-data ${LIAR_DATA} \
+    --batch-size 32 \
     --output-dir ${OUTPUT_DIR}/desta \
     --device cuda
 
@@ -58,6 +59,7 @@ echo "=== Testing ORCA ==="
 python experiments/ablation/liar_transcript/liar_eval.py \
     --model ${MODEL_ORCA} \
     --liar-data ${LIAR_DATA} \
+    --batch-size 32 \
     --output-dir ${OUTPUT_DIR}/orca \
     --device cuda
 

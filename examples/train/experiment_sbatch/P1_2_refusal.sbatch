@@ -49,6 +49,7 @@ echo "=== Testing DeSTA Baseline ==="
 python experiments/diagnosis/refusal_analysis.py \
     --model ${MODEL_DESTA} \
     --samples ${SAMPLES} \
+    --batch-size 32 \
     --output-dir ${OUTPUT_DIR}/desta \
     --device cuda
 
@@ -57,6 +58,7 @@ echo "=== Testing ORCA ==="
 python experiments/diagnosis/refusal_analysis.py \
     --model ${MODEL_ORCA} \
     --samples ${SAMPLES} \
+    --batch-size 32 \
     --output-dir ${OUTPUT_DIR}/orca \
     --device cuda
 

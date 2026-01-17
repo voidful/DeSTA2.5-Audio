@@ -53,6 +53,7 @@ python experiments/ablation/linear_probing.py \
     --task both \
     --samples ${SAMPLES} \
     --cv-folds ${CV_FOLDS} \
+    --batch-size 64 \
     --output-dir ${OUTPUT_DIR}/desta \
     --device cuda
 
@@ -63,6 +64,7 @@ python experiments/ablation/linear_probing.py \
     --task both \
     --samples ${SAMPLES} \
     --cv-folds ${CV_FOLDS} \
+    --batch-size 64 \
     --output-dir ${OUTPUT_DIR}/orca \
     --device cuda
 

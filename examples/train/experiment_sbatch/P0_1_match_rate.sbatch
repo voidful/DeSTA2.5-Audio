@@ -50,6 +50,7 @@ echo "=== Testing DeSTA Baseline ==="
 python experiments/diagnosis/match_rate_analysis.py \
     --model ${MODEL_DESTA} \
     --samples-per-task ${SAMPLES_PER_TASK} \
+    --batch-size 32 \
     --output-dir ${OUTPUT_DIR}/desta \
     --device cuda
 
@@ -58,6 +59,7 @@ echo "=== Testing ORCA ==="
 python experiments/diagnosis/match_rate_analysis.py \
     --model ${MODEL_ORCA} \
     --samples-per-task ${SAMPLES_PER_TASK} \
+    --batch-size 32 \
     --output-dir ${OUTPUT_DIR}/orca \
     --device cuda
 

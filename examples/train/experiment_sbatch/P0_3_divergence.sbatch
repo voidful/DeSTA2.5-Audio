@@ -51,6 +51,7 @@ python experiments/diagnosis/divergence_analysis.py \
     --manifest ${MANIFEST} \
     --model ${MODEL} \
     --samples ${SAMPLES} \
+    --batch-size 64 \
     --output-dir ${OUTPUT_DIR} \
     --device cuda
 

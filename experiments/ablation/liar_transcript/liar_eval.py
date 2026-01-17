@@ -1,5 +1,5 @@
 """
-P0-2: Liar Transcript Evaluation
+P0-2: Liar Transcript Evaluation (Optimized for H100)
 
 Evaluates model performance when given intentionally contradictory transcripts.
 
@@ -22,7 +22,17 @@ from tqdm import tqdm
 import numpy as np
 
 import torch
-from desta import DeSTA25AudioModel
+from torch.utils.data import Dataset, DataLoader
+import torchaudio
+from transformers import AutoTokenizer, AutoProcessor
+
+# Try to import DeSTA
+try:
+    from desta import DeSTA25AudioModel
+except ImportError:
+    import sys
+    sys.path.append(os.getcwd())
+    from desta import DeSTA25AudioModel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +44,7 @@ logger = logging.getLogger(__name__)
 def normalize_answer(answer: str) -> str:
     """Normalize answer for comparison."""
     import re
-    answer = answer.lower().strip()
+    answer = str(answer).lower().strip()
     answer = re.sub(r'^(the |a |an )', '', answer)
     answer = re.sub(r'[.!?,;:]+$', '', answer)
     return answer
@@ -45,19 +55,13 @@ def answer_matches_audio_truth(prediction: str, audio_truth: str) -> bool:
     pred_norm = normalize_answer(prediction)
     truth_norm = normalize_answer(audio_truth)
     
-    # Exact match
     if pred_norm == truth_norm:
         return True
-    
-    # One contains the other
     if truth_norm in pred_norm or pred_norm in truth_norm:
         return True
-    
-    # First word match (for categorical answers)
     if pred_norm.split() and truth_norm.split():
         if pred_norm.split()[0] == truth_norm.split()[0]:
             return True
-    
     return False
 
 
@@ -66,23 +70,115 @@ def answer_matches_liar_transcript(prediction: str, liar_transcript: str) -> boo
     pred_norm = normalize_answer(prediction)
     liar_norm = normalize_answer(liar_transcript)
     
-    # Check for key contradiction words
-    # E.g., if liar says "happy" but audio is "sad", check if model said "happy"
     liar_words = set(liar_norm.split())
     pred_words = set(pred_norm.split())
     
-    # Intersection of key words
+    # Key contradiction words
     key_words = {"happy", "sad", "angry", "calm", "male", "female", 
-                 "man", "woman", "dog", "cat", "bird"}
+                 "man", "woman", "dog", "cat", "bird", "lion", "sheep"}
     
     liar_keys = liar_words & key_words
     pred_keys = pred_words & key_words
     
-    # If prediction shares key words with liar, it was fooled
     if liar_keys & pred_keys:
         return True
-    
     return False
+
+
+class LiarDataset(Dataset):
+    def __init__(self, samples, tokenizer, processor, audio_locator="<|AUDIO|>", inject_transcript=True):
+        self.samples = samples
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.audio_locator = audio_locator
+        self.inject_transcript = inject_transcript
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+    def collate_fn(self, batch):
+        audio_paths = [b.get("audio_path") for b in batch]
+        questions = [b["question"] for b in batch]
+        audio_truths = [b["audio_ground_truth"] for b in batch]
+        liar_transcripts = [b["liar_transcript"] for b in batch]
+        task_types = [b["task_type"] for b in batch]
+        sample_ids = [b.get("sample_id") for b in batch]
+        
+        # Prepare prompts
+        prompts = []
+        for q, l_trans in zip(questions, liar_transcripts):
+            if self.inject_transcript:
+                # Add audio locator and transcript
+                prompts.append(f"{self.audio_locator}\n{q}\n\n[Transcription]: {l_trans}")
+            else:
+                prompts.append(f"{self.audio_locator}\n{q}")
+                
+        # Tokenize prompts (to find start positions)
+        inputs_text = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048
+        )
+        
+        # Determine start positions
+        # Simple heuristic: find first audio_locator token. 
+        # If tokenizer handles special tokens correctly, this works.
+        # Otherwise, need to rely on adding tokens.
+        audio_id = self.tokenizer.convert_tokens_to_ids(self.audio_locator)
+        # If failed to map (returns unknown id usually), we might need logic.
+        
+        batch_start_positions = []
+        for seq in inputs_text.input_ids:
+            indices = (seq == audio_id).nonzero(as_tuple=True)[0]
+            if len(indices) > 0:
+                batch_start_positions.append(indices[0].item())
+            else:
+                batch_start_positions.append(0)
+        
+        return {
+            "audio_paths": audio_paths,
+            "inputs_text": inputs_text,
+            "batch_start_positions": batch_start_positions,
+            "audio_truths": audio_truths,
+            "liar_transcripts": liar_transcripts,
+            "task_types": task_types,
+            "sample_ids": sample_ids
+        }
+
+
+def process_audio_files_batch(audio_paths, processor, device):
+    """Load and process multiple audio files."""
+    audio_arrays = []
+    
+    for path in audio_paths:
+        try:
+            # Load with torchaudio (handles resampling)
+            wav, sr = torchaudio.load(path)
+            if sr != 16000:
+                wav = torchaudio.functional.resample(wav, sr, 16000)
+            
+            # Mix to mono
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+                
+            audio_arrays.append(wav.squeeze().numpy())
+        except Exception as e:
+            # Fallback for missing/erroneous audio
+            audio_arrays.append(np.zeros(16000)) # 1 sec silence
+            
+    input_features = processor(
+        audio_arrays,
+        sampling_rate=16000,
+        return_tensors="pt",
+        padding=True 
+    ).input_features.to(device)
+    
+    return input_features
 
 
 def run_liar_evaluation(
@@ -90,185 +186,127 @@ def run_liar_evaluation(
     liar_data_path: str,
     output_dir: str = "liar_eval_results",
     device: str = "cuda",
-    inject_transcript: bool = True
+    inject_transcript: bool = True,
+    batch_size: int = 32
 ) -> Dict:
-    """Evaluate model on liar transcript test.
-    
-    Args:
-        model_path: Path to DeSTA/ORCA model
-        liar_data_path: Path to liar_samples.jsonl from generator
-        output_dir: Output directory
-        device: Device
-        inject_transcript: If True, inject liar transcript into prompt
-    
-    Returns:
-        Evaluation statistics
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Load model
     logger.info(f"Loading model: {model_path}")
     model = DeSTA25AudioModel.from_pretrained(model_path, device=device)
+    model.eval()
     
-    # Load liar samples
-    logger.info(f"Loading liar samples from: {liar_data_path}")
+    # Load processor and tokenizer
+    logger.info("Loading processor and tokenizer...")
+    processor = AutoProcessor.from_pretrained(model.config.encoder_model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model.config.llm_model_id, padding_side="left")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    # Ensure audio locator in vocab
+    audio_locator = model.config.audio_locator
+    if audio_locator not in tokenizer.get_vocab():
+        tokenizer.add_tokens([audio_locator], special_tokens=True)
+    
+    # Load samples
+    logger.info(f"Loading samples from: {liar_data_path}")
     samples = []
     with open(liar_data_path, 'r') as f:
         for line in f:
             samples.append(json.loads(line))
-    logger.info(f"Loaded {len(samples)} samples")
     
-    # Evaluation
+    # Create Dataset/DataLoader
+    dataset = LiarDataset(samples, tokenizer, processor, audio_locator, inject_transcript)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        collate_fn=dataset.collate_fn,
+        num_workers=4
+    )
+    
     results = []
     task_stats = {}
     
-    for sample in tqdm(samples, desc="Evaluating"):
-        audio_path = sample.get("audio_path")
-        if not audio_path or not os.path.exists(audio_path):
-            logger.warning(f"Audio not found: {audio_path}")
-            continue
-        
-        question = sample["question"]
-        audio_truth = sample["audio_ground_truth"]
-        liar_transcript = sample["liar_transcript"]
-        task_type = sample["task_type"]
-        
-        # Build prompt with liar transcript if requested
-        if inject_transcript:
-            prompt = f"{question}\n\n[Transcription]: {liar_transcript}"
-        else:
-            prompt = question
-        
-        # Get prediction
-        try:
-            prediction = model.chat(
-                wav=audio_path,
-                prompt=prompt,
-                max_new_tokens=64,
-                do_sample=False
-            )
-        except Exception as e:
-            logger.warning(f"Inference failed for {audio_path}: {e}")
-            continue
-        
-        # Evaluate
-        correct = answer_matches_audio_truth(prediction, audio_truth)
-        fooled = answer_matches_liar_transcript(prediction, liar_transcript)
-        
-        # Track stats
-        if task_type not in task_stats:
-            task_stats[task_type] = {"total": 0, "correct": 0, "fooled": 0}
-        task_stats[task_type]["total"] += 1
-        if correct:
-            task_stats[task_type]["correct"] += 1
-        if fooled:
-            task_stats[task_type]["fooled"] += 1
-        
-        results.append({
-            "sample_id": sample["sample_id"],
-            "task_type": task_type,
-            "question": question,
-            "audio_truth": audio_truth,
-            "liar_transcript": liar_transcript,
-            "prediction": prediction,
-            "correct": correct,
-            "fooled_by_transcript": fooled
-        })
+    logger.info(f"Evaluating {len(samples)} samples (Batch {batch_size})...")
     
-    # Calculate overall stats
+    for batch in tqdm(dataloader, desc="Eval Batches"):
+        input_features = process_audio_files_batch(batch["audio_paths"], processor, device)
+        inputs_text = batch["inputs_text"].to(device)
+        
+        with torch.no_grad():
+            outputs = model.llm_model.generate(
+                input_ids=inputs_text.input_ids,
+                attention_mask=inputs_text.attention_mask,
+                batch_features=input_features,
+                batch_start_positions=batch["batch_start_positions"],
+                max_new_tokens=64,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id
+            )
+            
+        # Decode
+        generated_ids = outputs[:, inputs_text.input_ids.shape[1]:]
+        preds = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        
+        # Evaluate stats
+        for i, pred in enumerate(preds):
+            truth = batch["audio_truths"][i]
+            liar = batch["liar_transcripts"][i]
+            task = batch["task_types"][i]
+            sid = batch["sample_ids"][i]
+            
+            correct = answer_matches_audio_truth(pred, truth)
+            fooled = answer_matches_liar_transcript(pred, liar)
+            
+            if task not in task_stats:
+                task_stats[task] = {"total": 0, "correct": 0, "fooled": 0}
+            task_stats[task]["total"] += 1
+            if correct: task_stats[task]["correct"] += 1
+            if fooled: task_stats[task]["fooled"] += 1
+            
+            results.append({
+                "sample_id": sid,
+                "task_type": task,
+                "truth": truth,
+                "liar": liar,
+                "pred": pred,
+                "correct": correct,
+                "fooled": fooled
+            })
+            
+    # Calculate Summary
     total = len(results)
     total_correct = sum(1 for r in results if r["correct"])
-    total_fooled = sum(1 for r in results if r["fooled_by_transcript"])
+    total_fooled = sum(1 for r in results if r["fooled"])
     
     summary = {
-        "model_path": model_path,
-        "inject_transcript": inject_transcript,
-        "total_samples": total,
-        "correct_count": total_correct,
         "accuracy": total_correct / total if total > 0 else 0,
-        "accuracy_pct": f"{(total_correct / total * 100) if total > 0 else 0:.1f}%",
-        "fooled_count": total_fooled,
         "fooled_rate": total_fooled / total if total > 0 else 0,
-        "fooled_rate_pct": f"{(total_fooled / total * 100) if total > 0 else 0:.1f}%",
+        "total": total,
         "per_task": {}
     }
     
     for task, stats in task_stats.items():
-        acc = stats["correct"] / stats["total"] if stats["total"] > 0 else 0
-        fooled = stats["fooled"] / stats["total"] if stats["total"] > 0 else 0
         summary["per_task"][task] = {
-            "total": stats["total"],
-            "accuracy": f"{acc * 100:.1f}%",
-            "fooled_rate": f"{fooled * 100:.1f}%"
+            "accuracy": stats["correct"] / stats["total"] if stats["total"] > 0 else 0,
+            "fooled": stats["fooled"] / stats["total"] if stats["total"] > 0 else 0
         }
-    
-    # Save results
-    results_file = output_path / "liar_eval_details.jsonl"
-    with open(results_file, 'w') as f:
-        for r in results:
-            f.write(json.dumps(r) + '\n')
-    
-    summary_file = output_path / "liar_eval_summary.json"
-    with open(summary_file, 'w') as f:
+        
+    # Save
+    with open(output_path / "liar_eval_summary.json", 'w') as f:
         json.dump(summary, f, indent=2)
-    
-    # Print summary
-    logger.info("\n" + "=" * 60)
-    logger.info("LIAR TRANSCRIPT EVALUATION RESULTS")
-    logger.info("=" * 60)
-    logger.info(f"Model: {model_path}")
-    logger.info(f"Transcript injection: {inject_transcript}")
-    logger.info(f"Total samples: {total}")
-    logger.info(f"Overall accuracy (audio-based): {summary['accuracy_pct']}")
-    logger.info(f"Fooled rate (followed liar): {summary['fooled_rate_pct']}")
-    logger.info("-" * 60)
-    logger.info("Per-Task Results:")
-    for task, stats in summary["per_task"].items():
-        logger.info(f"  {task}: Accuracy={stats['accuracy']}, Fooled={stats['fooled_rate']}")
-    logger.info("-" * 60)
-    logger.info("Interpretation:")
-    logger.info("  Higher accuracy = Better audio utilization (less ASR reliance)")
-    logger.info("  Expected: DeSTA ~35%, ORCA ~70%")
-    logger.info("=" * 60)
-    logger.info(f"Results saved to: {output_path}")
-    
+        
+    logger.info(f"Accuracy: {summary['accuracy']*100:.1f}%, Fooled: {summary['fooled_rate']*100:.1f}%")
     return summary
 
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="P0-2: Evaluate model on liar transcript test"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="Path or HuggingFace ID of model"
-    )
-    parser.add_argument(
-        "--liar-data",
-        type=str,
-        default="liar_transcript_data/liar_samples.jsonl",
-        help="Path to liar samples JSONL"
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="liar_eval_results",
-        help="Output directory"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device"
-    )
-    parser.add_argument(
-        "--no-inject",
-        action="store_true",
-        help="Don't inject liar transcript (baseline)"
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--liar-data", type=str, default="liar_transcript_data/liar_samples.jsonl")
+    parser.add_argument("--output-dir", type=str, default="liar_eval_results")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--no-inject", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=32)
     
     args = parser.parse_args()
     
@@ -277,9 +315,9 @@ def main():
         liar_data_path=args.liar_data,
         output_dir=args.output_dir,
         device=args.device,
-        inject_transcript=not args.no_inject
+        inject_transcript=not args.no_inject,
+        batch_size=args.batch_size
     )
-
 
 if __name__ == "__main__":
     main()

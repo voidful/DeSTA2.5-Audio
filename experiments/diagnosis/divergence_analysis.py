@@ -1,5 +1,5 @@
 """
-P0-3: Divergence Rate Analysis
+P0-3: Divergence Rate Analysis (Optimized for H100)
 
 For DPO training to be effective, we need samples where the audio-conditioned
 response differs from the text-only response. This script analyzes what
@@ -10,7 +10,7 @@ information to get the correct answer?
 
 Method:
 1. Load training data (JSONL with prompt + response)
-2. For each sample, use a text-only LLM to predict the answer
+2. Use text-only LLM to predict answer (BATCHED INFERENCE)
 3. Compare text-only prediction with ground truth response
 4. Calculate divergence rate: % where text-only != ground-truth
 
@@ -26,8 +26,10 @@ from collections import defaultdict
 from typing import Dict, List, Tuple
 from tqdm import tqdm
 import re
+import math
 
 import torch
+from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logging.basicConfig(
@@ -38,27 +40,24 @@ logger = logging.getLogger(__name__)
 
 
 def extract_task_category(sample_id: str) -> str:
-    """Extract task category from sample ID.
-    
-    Sample ID format varies, but typically contains task info.
-    Examples:
-    - "emotion_recognition/sample_001" -> "emotion_recognition"
-    - "gender_det_sample123" -> "gender"
-    - "animal_sounds_0042" -> "animal"
-    """
+    """Extract task category from sample ID."""
     sample_id_lower = sample_id.lower()
     
-    # Try to extract from path
+    # Try to extract from path - common in DESTA data
+    # e.g. "voidful/desta/data/emotion_recognition/sample_001"
     if "/" in sample_id:
         parts = sample_id.split("/")
-        return parts[0]
-    
+        # usually task is at the index before filename or at start
+        for part in parts:
+            if any(k in part.lower() for k in ["emotion", "gender", "animal", "sound", "speech", "music"]):
+                return part.lower()
+
     # Pattern matching for common task types
     task_patterns = {
         "emotion": ["emotion", "emo", "sentiment", "feeling"],
         "gender": ["gender", "sex", "male", "female", "speaker"],
         "animal": ["animal", "creature", "wildlife", "species"],
-        "sound": ["sound", "audio", "noise", "acoustic"],
+        "sound": ["sound", "audio", "noise", "acoustic", "environment"],
         "speech": ["speech", "asr", "transcript", "spoken"],
         "music": ["music", "song", "melody", "instrument"],
     }
@@ -75,10 +74,10 @@ def normalize_answer(answer: str) -> str:
     """Normalize answer for comparison."""
     # Lowercase, strip whitespace
     answer = answer.lower().strip()
-    # Remove punctuation at the end
+    # Remove punctuation at the end and typical generated artifacts
     answer = re.sub(r'[.!?]+$', '', answer)
     # Remove common prefixes
-    for prefix in ["the answer is", "i think", "it sounds like", "this is"]:
+    for prefix in ["the answer is", "i think", "it sounds like", "this is", "predicted answer:", "answer:"]:
         if answer.startswith(prefix):
             answer = answer[len(prefix):].strip()
     return answer
@@ -93,7 +92,7 @@ def answers_match(pred: str, gt: str) -> bool:
     if pred_norm == gt_norm:
         return True
     
-    # One contains the other
+    # One contains the other (robustness for short/long answers)
     if pred_norm in gt_norm or gt_norm in pred_norm:
         return True
     
@@ -106,61 +105,47 @@ def answers_match(pred: str, gt: str) -> bool:
     return False
 
 
-def load_text_only_model(model_id: str, device: str = "cuda"):
-    """Load a text-only LLM for generating predictions."""
-    logger.info(f"Loading text-only model: {model_id}")
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.bfloat16,
-        device_map=device
-    )
-    model.eval()
-    
-    return model, tokenizer
+class DivergenceDataset(Dataset):
+    def __init__(self, samples: List[Dict], tokenizer):
+        self.samples = samples
+        self.tokenizer = tokenizer
 
+    def __len__(self):
+        return len(self.samples)
 
-def generate_text_only_prediction(
-    model, 
-    tokenizer, 
-    prompt: str, 
-    max_new_tokens: int = 50
-) -> str:
-    """Generate prediction using text-only model."""
-    # Remove audio markers from prompt
-    prompt_clean = re.sub(r'<\|AUDIO\|>', '[AUDIO]', prompt)
-    prompt_clean = re.sub(r'<start_audio>.*?<end_audio>', '[AUDIO]', prompt_clean, flags=re.DOTALL)
-    
-    # Apply chat template if available
-    if hasattr(tokenizer, 'apply_chat_template'):
-        messages = [{"role": "user", "content": prompt_clean}]
-        try:
-            input_text = tokenizer.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
-            )
-        except Exception:
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        prompt = sample.get('prompt', '')
+        
+        # Determine task early for tracking
+        sample_id = sample.get('id', str(idx))
+        task = extract_task_category(sample_id)
+        
+        # Clean prompt (remove audio tokens)
+        prompt_clean = re.sub(r'<\|AUDIO\|>', '[AUDIO]', prompt)
+        prompt_clean = re.sub(r'<start_audio>.*?<end_audio>', '[AUDIO]', prompt_clean, flags=re.DOTALL)
+        
+        # Apply chat template
+        if hasattr(self.tokenizer, 'apply_chat_template'):
+            messages = [{"role": "user", "content": prompt_clean}]
+            try:
+                input_text = self.tokenizer.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+            except Exception:
+                input_text = prompt_clean
+        else:
             input_text = prompt_clean
-    else:
-        input_text = prompt_clean
-    
-    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id
-        )
-    
-    # Decode only new tokens
-    new_tokens = outputs[0][inputs['input_ids'].shape[1]:]
-    prediction = tokenizer.decode(new_tokens, skip_special_tokens=True)
-    
-    return prediction.strip()
+            
+        return {
+            "id": sample_id,
+            "input_text": input_text,
+            "ground_truth": sample.get('response', ''),
+            "task": task,
+            "prompt_raw": prompt
+        }
 
 
 def analyze_divergence(
@@ -168,22 +153,11 @@ def analyze_divergence(
     model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
     num_samples: int = None,
     device: str = "cuda",
+    batch_size: int = 32,
     output_dir: str = "divergence_results",
     dry_run: bool = False
 ) -> Dict:
-    """Analyze divergence rate of training data.
-    
-    Args:
-        manifest_path: Path to JSONL training manifest
-        model_id: Text-only model for predictions
-        num_samples: Number of samples to analyze (None = all)
-        device: Device for model
-        output_dir: Directory to save results
-        dry_run: If True, only count samples without running model
-    
-    Returns:
-        Dictionary with divergence statistics
-    """
+    """Analyze divergence rate of training data (optimized)."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -195,11 +169,11 @@ def analyze_divergence(
             samples.append(json.loads(line))
     
     total_samples = len(samples)
-    logger.info(f"Total samples: {total_samples}")
+    logger.info(f"Total samples in manifest: {total_samples}")
     
     if num_samples:
         samples = samples[:num_samples]
-        logger.info(f"Analyzing first {len(samples)} samples")
+        logger.info(f"Analyzing subset of {len(samples)} samples")
     
     if dry_run:
         logger.info("Dry run mode - counting task distribution only")
@@ -209,54 +183,110 @@ def analyze_divergence(
             task = extract_task_category(sample_id)
             task_counts[task] += 1
         
-        return {
-            "total_samples": len(samples),
-            "task_distribution": dict(task_counts),
-            "mode": "dry_run"
-        }
+        return {"mode": "dry_run", "task_counts": dict(task_counts)}
+
+    # Load Model & Tokenizer
+    logger.info(f"Loading text-only model: {model_id}")
+    tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
     
-    # Load model
-    model, tokenizer = load_text_only_model(model_id, device)
+    # Ensure pad token exists
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=torch.bfloat16,
+        device_map=device,
+        attn_implementation="flash_attention_2" if torch.cuda.get_device_capability()[0] >= 8 else "eager"
+    )
+    model.eval()
     
-    # Analyze samples
+    # Compile model for faster generation if supported (optional, can be tricky with dynamic shapes)
+    # if hasattr(torch, "compile"):
+    #     try:
+    #         model = torch.compile(model)
+    #         logger.info("Model compiled with torch.compile")
+    #     except Exception as e:
+    #         logger.warning(f"Failed to compile model: {e}")
+
+    # Create Dataset & DataLoader
+    dataset = DivergenceDataset(samples, tokenizer)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=4,
+        collate_fn=lambda x: x # Simple list collation
+    )
+    
     results = []
     task_stats = defaultdict(lambda: {"total": 0, "divergent": 0})
     
-    for sample in tqdm(samples, desc="Analyzing divergence"):
-        sample_id = sample.get('id', '')
-        prompt = sample.get('prompt', '')
-        ground_truth = sample.get('response', '')
-        task = extract_task_category(sample_id)
-        
-        if not prompt or not ground_truth:
-            continue
-        
-        # Generate text-only prediction
-        prediction = generate_text_only_prediction(model, tokenizer, prompt)
-        
-        # Check if divergent
-        is_match = answers_match(prediction, ground_truth)
-        is_divergent = not is_match
-        
-        task_stats[task]["total"] += 1
-        if is_divergent:
-            task_stats[task]["divergent"] += 1
-        
-        results.append({
-            "id": sample_id,
-            "task": task,
-            "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
-            "ground_truth": ground_truth,
-            "text_only_pred": prediction,
-            "is_divergent": is_divergent
-        })
+    logger.info(f"Starting batched inference with batch_size={batch_size}...")
     
+    # Iterate through batches
+    for batch_items in tqdm(dataloader, desc="Processing batches"):
+        # Prepare batch inputs
+        input_texts = [item["input_text"] for item in batch_items]
+        ground_truths = [item["ground_truth"] for item in batch_items]
+        ids = [item["id"] for item in batch_items]
+        tasks = [item["task"] for item in batch_items]
+        
+        # Tokenize batch
+        inputs = tokenizer(
+            input_texts, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True, 
+            max_length=2048
+        ).to(model.device)
+        
+        input_len = inputs['input_ids'].shape[1]
+        
+        # Generate batch
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=50,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                use_cache=True
+            )
+        
+        # Process outputs
+        for i, output in enumerate(outputs):
+            # Decode only new tokens
+            new_tokens = output[input_len:]
+            prediction = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            
+            gt = ground_truths[i]
+            task = tasks[i]
+            sample_id = ids[i]
+            
+            if not gt:
+                continue
+                
+            is_match = answers_match(prediction, gt)
+            is_divergent = not is_match
+            
+            task_stats[task]["total"] += 1
+            if is_divergent:
+                task_stats[task]["divergent"] += 1
+            
+            results.append({
+                "id": sample_id,
+                "task": task,
+                "ground_truth": gt,
+                "text_only_pred": prediction,
+                "is_divergent": is_divergent
+            })
+
     # Calculate statistics
     total_analyzed = len(results)
     total_divergent = sum(1 for r in results if r["is_divergent"])
     divergence_rate = total_divergent / total_analyzed if total_analyzed > 0 else 0
     
-    # Per-task rates
+    # Per-task summary
     task_rates = {}
     for task, stats in task_stats.items():
         if stats["total"] > 0:
@@ -265,80 +295,42 @@ def analyze_divergence(
                 "divergent": stats["divergent"],
                 "rate": stats["divergent"] / stats["total"]
             }
-    
-    # Summary
+            
     summary = {
-        "total_samples_analyzed": total_analyzed,
+        "model_id": model_id,
+        "total_samples": total_analyzed,
         "total_divergent": total_divergent,
         "divergence_rate": divergence_rate,
         "divergence_rate_pct": f"{divergence_rate * 100:.2f}%",
-        "per_task_rates": task_rates,
-        "model_id": model_id
+        "per_task_stats": task_rates
     }
     
-    # Save detailed results
+    # Save results
     results_file = output_path / "divergence_details.jsonl"
     with open(results_file, 'w') as f:
         for r in results:
             f.write(json.dumps(r) + '\n')
-    
+            
     summary_file = output_path / "divergence_summary.json"
     with open(summary_file, 'w') as f:
         json.dump(summary, f, indent=2)
-    
+        
     logger.info("=" * 60)
-    logger.info("DIVERGENCE ANALYSIS RESULTS")
+    logger.info(f"Overall Divergence Rate: {divergence_rate*100:.2f}%")
     logger.info("=" * 60)
-    logger.info(f"Total samples analyzed: {total_analyzed}")
-    logger.info(f"Divergent samples (text-only != ground-truth): {total_divergent}")
-    logger.info(f"Overall divergence rate: {divergence_rate * 100:.2f}%")
-    logger.info("-" * 60)
-    logger.info("Per-Task Divergence Rates:")
-    for task, stats in sorted(task_rates.items()):
-        logger.info(f"  {task}: {stats['rate']*100:.1f}% ({stats['divergent']}/{stats['total']})")
-    logger.info("=" * 60)
-    logger.info(f"Results saved to: {output_path}")
     
     return summary
 
 
 def main():
-    parser = argparse.ArgumentParser(description="P0-3: Divergence Rate Analysis")
-    parser.add_argument(
-        "--manifest", 
-        type=str, 
-        default="/work/voidful2nlp/desta/qwen3_4b_desta_fixed.jsonl",
-        help="Path to training JSONL manifest"
-    )
-    parser.add_argument(
-        "--model", 
-        type=str, 
-        default="Qwen/Qwen3-4B-Instruct-2507",
-        help="Text-only model for predictions"
-    )
-    parser.add_argument(
-        "--samples", 
-        type=int, 
-        default=None,
-        help="Number of samples to analyze (default: all)"
-    )
-    parser.add_argument(
-        "--device", 
-        type=str, 
-        default="cuda",
-        help="Device (cuda/cpu)"
-    )
-    parser.add_argument(
-        "--output-dir", 
-        type=str, 
-        default="divergence_results",
-        help="Output directory"
-    )
-    parser.add_argument(
-        "--dry-run", 
-        action="store_true",
-        help="Only count samples, don't run model"
-    )
+    parser = argparse.ArgumentParser(description="P0-3: Divergence Rate (Batched)")
+    parser.add_argument("--manifest", type=str, required=True, help="Path to JSONL manifest")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-4B-Instruct-2507", help="Model ID")
+    parser.add_argument("--samples", type=int, default=None, help="Num samples")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--output-dir", type=str, default="divergence_results")
+    parser.add_argument("--dry-run", action="store_true")
     
     args = parser.parse_args()
     
@@ -347,10 +339,10 @@ def main():
         model_id=args.model,
         num_samples=args.samples,
         device=args.device,
+        batch_size=args.batch_size,
         output_dir=args.output_dir,
         dry_run=args.dry_run
     )
-
 
 if __name__ == "__main__":
     main()
