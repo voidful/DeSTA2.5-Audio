@@ -23,82 +23,7 @@ from desta.models.helper_modules import GradientReversal, TranscriptionDiscrimin
 
 
 
-def compute_rope_freqs(
-    seq_len: int,
-    dim: int,
-    rope_theta: float = 10000.0,
-    device: torch.device = None,
-    positions: torch.Tensor = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute RoPE cos and sin frequencies.
-    
-    Args:
-        seq_len: Sequence length
-        dim: Head dimension (will compute for dim/2 pairs)
-        rope_theta: Base frequency (from LLM config)
-        device: Device for tensors
-        positions: Optional custom positions [B, T] or [T], can be fractional for interpolation
-        
-    Returns:
-        (cos, sin) tensors each of shape [1, T, dim] or [B, T, dim]
-    """
-    half_dim = dim // 2
-    freq_seq = torch.arange(half_dim, dtype=torch.float, device=device)
-    inv_freq = 1.0 / (rope_theta ** (freq_seq / half_dim))
-    
-    if positions is None:
-        positions = torch.arange(seq_len, dtype=torch.float, device=device)
-    
-    # Handle both 1D and 2D position tensors
-    if positions.dim() == 1:
-        # [T] x [half_dim] -> [T, half_dim]
-        freqs = positions.unsqueeze(-1) * inv_freq.unsqueeze(0)
-        # Duplicate for pairs: [T, half_dim] -> [T, dim]
-        freqs = torch.cat([freqs, freqs], dim=-1)
-        cos = freqs.cos().unsqueeze(0)  # [1, T, dim]
-        sin = freqs.sin().unsqueeze(0)  # [1, T, dim]
-    else:
-        # [B, T] x [half_dim] -> [B, T, half_dim]
-        freqs = positions.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
-        # Duplicate for pairs: [B, T, half_dim] -> [B, T, dim]
-        freqs = torch.cat([freqs, freqs], dim=-1)
-        cos = freqs.cos()  # [B, T, dim]
-        sin = freqs.sin()  # [B, T, dim]
-    
-    return cos, sin
 
-
-def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """
-    Apply RoPE rotation to a tensor.
-    This is the same rotation used in LLM's attention.
-    
-    Args:
-        x: Input tensor [B, T, D] or [B, num_heads, T, head_dim]
-        cos: Cosine frequencies [1, T, D] or [B, T, D]
-        sin: Sine frequencies [1, T, D] or [B, T, D]
-        
-    Returns:
-        Rotated tensor with same shape as input
-    """
-    # Ensure correct dtype
-    cos = cos.to(x.dtype)
-    sin = sin.to(x.dtype)
-    
-    # RoPE rotation: pair-wise rotation
-    # Split into pairs and rotate
-    x_half1 = x[..., : x.shape[-1] // 2]
-    x_half2 = x[..., x.shape[-1] // 2 :]
-    
-    # Rotate: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
-    cos_half = cos[..., : cos.shape[-1] // 2]
-    sin_half = sin[..., : sin.shape[-1] // 2]
-    
-    rotated_half1 = x_half1 * cos_half - x_half2 * sin_half
-    rotated_half2 = x_half1 * sin_half + x_half2 * cos_half
-    
-    return torch.cat([rotated_half1, rotated_half2], dim=-1)
 
 def _prepare_audio_context_and_start_positions(
                                              token_list,
@@ -209,197 +134,7 @@ class QformerConnector(nn.Module):
         return output
 
 
-class ORCAHybridConnector(nn.Module):
-    """
-    ORCA Connector with global branch only (Q-Former style cross-attention).
-    
-    Returns global_tokens tensor.
-    """
-    def __init__(self, config: 'DeSTA25Config'):
-        super().__init__()
-        self.config = config
-        
-        # Determine target layer IDs based on configuration
-        if getattr(config, 'orca_use_all_layers', False):
-            # Use all encoder layers
-            num_encoder_layers = config.encoder_config.num_hidden_layers
-            self.target_layer_ids = list(range(num_encoder_layers))
-        else:
-            # Use selected layers based on Whisper model
-            if config.encoder_model_id == "openai/whisper-medium":
-                self.target_layer_ids = [5, 11, 17, 23]
-            elif config.encoder_model_id == "openai/whisper-small":
-                self.target_layer_ids = [2, 5, 8, 11]
-            elif config.encoder_model_id == "openai/whisper-tiny":
-                self.target_layer_ids = [0, 1, 2, 3]
-            elif config.encoder_model_id in ["openai/whisper-large-v3", "openai/whisper-large-v3-turbo"]:
-                self.target_layer_ids = [7, 15, 23, 31]
-            else:
-                raise NotImplementedError(f"model_id {config.encoder_model_id} not implemented")
-        
-        d_encoder = config.encoder_config.d_model
-        d_llm = config.llm_config.hidden_size
-        
-        # === Global Branch (Q-Former style) ===
-        # Learnable queries for each target layer
-        self.global_queries = nn.ParameterList([
-            nn.Parameter(torch.randn(1, config.orca_global_num_tokens, d_encoder))
-            for _ in range(len(self.target_layer_ids))
-        ])
-        self.global_layer_weights = nn.Parameter(
-            torch.zeros(config.orca_global_num_tokens, len(self.target_layer_ids), dtype=torch.float)
-        )
-        
-        # Q-Former for global branch
-        qformer_config = BertConfig()
-        qformer_config.num_hidden_layers = config.qformer_num_hidden_layers
-        qformer_config.num_attention_heads = config.encoder_config.encoder_attention_heads
-        qformer_config.hidden_size = d_encoder
-        qformer_config.add_cross_attention = True
-        qformer_config.is_decoder = True
-        qformer_config._attn_implementation = "sdpa" if getattr(config, 'use_flash_attention', False) else "eager"
-        
-        self.global_qformer = BertEncoder(qformer_config)
-        self.global_proj = nn.Sequential(
-            nn.LayerNorm(d_encoder),
-            nn.Linear(d_encoder, d_llm)
-        )
-        
-        # === Local Branch (Ablation F) ===
-        self.local_enabled = getattr(config, 'orca_local_branch_true', False)
-        if self.local_enabled:
-            # Weighted sum weights for local branch
-            self.local_layer_weights = nn.Parameter(
-                torch.zeros(len(self.target_layer_ids), dtype=torch.float)
-            )
-            
-            # 4x Downsampling: Kernel 4, Stride 4 (or similar to achieve 4x)
-            # User request: "CNN downsample 4倍"
-            # Using Conv1d with stride 4
-            self.local_downsampler = nn.Sequential(
-                nn.Conv1d(d_encoder, d_encoder, kernel_size=4, stride=4, padding=0),
-                nn.GELU(),
-                nn.LayerNorm(d_encoder)  # LayerNorm on channels (requires permutation in forward)
-            )
-            
-            self.local_proj = nn.Sequential(
-                nn.Linear(d_encoder, d_llm),
-                nn.LayerNorm(d_llm)
-            )
-            
-            self.local_ortho_weight = getattr(config, 'orca_local_ortho_weight', 0.0)
-    
-    def forward(
-        self, 
-        encoder_hidden_states: List[torch.Tensor],
-        audio_attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Forward pass of ORCAHybridConnector.
-        
-        Args:
-            encoder_hidden_states: List of hidden states from Whisper encoder layers
-            audio_attention_mask: Optional attention mask for audio [B, T]
-            
-        Returns:
-            If local_enabled=False:
-                global_tokens: [B, K_global, d_llm]
-            If local_enabled=True:
-                (combined_tokens, loss_dict):
-                    - combined_tokens: [B, K+T_local, d_llm]
-                    - loss_dict: {'L_local_ortho': ...}
-        """
-        batch_size = encoder_hidden_states[0].size(0)
-        
-        target_dtype = self.global_proj[1].weight.dtype
-        target_device = self.global_proj[1].weight.device
-        
-        # Collect target layer outputs
-        target_layer_outputs = []
-        for idx, hidden_state in enumerate(encoder_hidden_states):
-            if idx in self.target_layer_ids:
-                # Ensure input hidden states match module dtype
-                target_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
-        
-        # === Global Branch ===
-        global_outputs = []
-        for layer_idx, hidden_state in enumerate(target_layer_outputs):
-            queries = self.global_queries[layer_idx].expand(batch_size, -1, -1).to(dtype=target_dtype, device=target_device)
-            
-            qformer_out = self.global_qformer(
-                hidden_states=queries,
-                encoder_hidden_states=hidden_state,
-            )
-            global_outputs.append(qformer_out.last_hidden_state)
-        
-        # Weighted sum across layers
-        global_outputs = torch.stack(global_outputs, dim=0)  # [L, B, K, D]
-        global_outputs = global_outputs.permute(1, 2, 0, 3)  # [B, K, L, D]
-        weights = torch.softmax(self.global_layer_weights, dim=-1).unsqueeze(-1)  # [K, L, 1]
-        global_tokens = (global_outputs * weights).sum(dim=2)  # [B, K, D]
-        global_tokens = self.global_proj(global_tokens)  # [B, K, d_llm]
-        
-        global_tokens = self.global_proj(global_tokens)  # [B, K, d_llm]
-        
-        if self.local_enabled:
-            # === Local Branch Processing ===
-            # global_outputs shape: [B, K, L, D] -> We need [B, L, T_src, D]
-            # But wait, global_outputs is the Q-Former output.
-            # We need the RAW layer outputs for the local branch.
-            
-            # target_layer_outputs is list of [B, T_src, D]
-            # Stack: [B, L, T_src, D]
-            local_input = torch.stack(target_layer_outputs, dim=1)
-            
-            # Weighted sum across layers
-            # We want to learn which layer provides best local info
-            # Weights: [L]
-            norm_local_weights = torch.softmax(self.local_layer_weights, dim=0).view(1, -1, 1, 1) # [1, L, 1, 1]
-            local_features = (local_input * norm_local_weights).sum(dim=1) # [B, T_src, D]
-            
-            # Downsample
-            # Conv1d expects [B, D, T]
-            local_features = local_features.permute(0, 2, 1) # [B, D, T_src]
-            
-            # Apply padding if needed to match stride 4
-            if local_features.size(2) % 4 != 0:
-                pad_len = 4 - (local_features.size(2) % 4)
-                local_features = F.pad(local_features, (0, pad_len))
-                
-            local_features = self.local_downsampler[0](local_features) # Conv [B, D, T_new]
-            local_features = self.local_downsampler[1](local_features) # GELU
-            
-            # Restore to [B, T_new, D] for LayerNorm and Projection
-            local_features = local_features.permute(0, 2, 1) # [B, T_new, D]
-            local_features = self.local_downsampler[2](local_features) # LayerNorm
-            
-            local_tokens = self.local_proj(local_features) # [B, T_new, d_llm]
-            
-            # === Orthogonality Loss ===
-            loss_dict = {}
-            if self.local_ortho_weight > 0 and self.training:
-                # Global Centroids (mean of global tokens per sample)
-                # global_tokens: [B, K, D]
-                global_centroid = global_tokens.mean(dim=1) # [B, D]
-                
-                # Local Centroid (mean of local tokens per sample)
-                # local_tokens: [B, T_new, D]
-                local_centroid = local_tokens.mean(dim=1) # [B, D]
-                
-                # Normalize
-                g_norm = F.normalize(global_centroid, dim=-1)
-                l_norm = F.normalize(local_centroid, dim=-1)
-                
-                # Cosine Similarity squared (maximize orthogonality -> minimize cosine squared)
-                ortho_loss = (F.cosine_similarity(g_norm, l_norm, dim=-1) ** 2).mean()
-                loss_dict['L_local_ortho'] = ortho_loss * self.local_ortho_weight
-            
-            # Concatenate: Global first, then Local
-            combined_tokens = torch.cat([global_tokens, local_tokens], dim=1)
-            
-            return combined_tokens, loss_dict
-            
-        return global_tokens
+
 
 
 class GroupwiseOrthogonalConnector(nn.Module):
@@ -488,36 +223,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
             self.mu_proj = nn.Linear(d_llm, d_llm)
             self.logvar_proj = nn.Linear(d_llm, d_llm)
         
-        # J: Task-Aware Routing
-        self.task_aware_routing_enabled = getattr(config, 'task_aware_routing_enabled', False)
-        if self.task_aware_routing_enabled:
-            # Classifier takes question embedding and outputs group weights
-            self.task_router = nn.Sequential(
-                nn.Linear(d_llm, d_llm // 4),
-                nn.GELU(),
-                nn.Linear(d_llm // 4, self.num_groups)
-            )
-        
-        # K: Temporal Attention
-        self.temporal_attention_enabled = getattr(config, 'temporal_attention_enabled', False)
-        if self.temporal_attention_enabled:
-            self.temporal_attn = nn.MultiheadAttention(d_encoder, num_heads=8, batch_first=True)
-            self.temporal_norm = nn.LayerNorm(d_encoder)
-        
-        # M: Multi-Scale Local Features
-        self.multi_scale_local_enabled = getattr(config, 'multi_scale_local_enabled', False)
-        if self.multi_scale_local_enabled:
-            # 4x and 16x downsampling
-            self.local_downsample_4x = nn.Conv1d(d_encoder, d_encoder, kernel_size=4, stride=4)
-            self.local_downsample_16x = nn.Conv1d(d_encoder, d_encoder, kernel_size=16, stride=16)
-            self.local_proj = nn.Linear(d_encoder * 2, d_llm)  # Concatenated
-        
-        # O: Acoustic Scene Prior
-        self.scene_prior_enabled = getattr(config, 'scene_prior_enabled', False)
-        if self.scene_prior_enabled:
-            num_scenes = getattr(config, 'scene_prior_num_classes', 10)
-            self.scene_classifier = nn.Linear(d_llm, num_scenes)
-            self.scene_embed = nn.Embedding(num_scenes, d_llm)
+
     
     def forward(
         self, 
@@ -604,48 +310,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
         # Concatenate all groups: [B, num_groups * queries_per_group, d_llm]
         global_tokens = torch.cat(all_group_tokens, dim=1)
         
-        # K: Temporal Attention on layer outputs before projection
-        # (This would need to be applied earlier - simplified here as post-hoc attention)
-        
-        # M: Multi-Scale Local Features
-        if self.multi_scale_local_enabled:
-            # Use the last target layer output for multi-scale processing
-            last_hidden = target_layer_outputs[-1]  # [B, T, D]
-            last_hidden_t = last_hidden.permute(0, 2, 1)  # [B, D, T]
-            
-            # Pad if needed
-            if last_hidden_t.size(2) % 4 != 0:
-                pad_4 = 4 - (last_hidden_t.size(2) % 4)
-                last_hidden_t = F.pad(last_hidden_t, (0, pad_4))
-            if last_hidden_t.size(2) % 16 != 0:
-                pad_16 = 16 - (last_hidden_t.size(2) % 16)
-                last_hidden_16 = F.pad(last_hidden_t, (0, pad_16))
-            else:
-                last_hidden_16 = last_hidden_t
-            
-            local_4x = self.local_downsample_4x(last_hidden_t).permute(0, 2, 1)  # [B, T/4, D]
-            local_16x = self.local_downsample_16x(last_hidden_16).permute(0, 2, 1)  # [B, T/16, D]
-            
-            # Repeat 16x to match 4x length, then concatenate
-            repeat_factor = local_4x.size(1) // local_16x.size(1)
-            local_16x_expanded = local_16x.repeat_interleave(repeat_factor, dim=1)[:, :local_4x.size(1), :]
-            
-            multi_scale = torch.cat([local_4x, local_16x_expanded], dim=-1)  # [B, T/4, 2D]
-            multi_scale_tokens = self.local_proj(multi_scale)  # [B, T/4, d_llm]
-            
-            # Append to global tokens
-            global_tokens = torch.cat([global_tokens, multi_scale_tokens], dim=1)
-        
-        # O: Acoustic Scene Prior
-        if self.scene_prior_enabled:
-            # Classify scene from pooled global tokens
-            pooled = global_tokens.mean(dim=1)  # [B, d_llm]
-            scene_logits = self.scene_classifier(pooled)  # [B, num_scenes]
-            scene_idx = scene_logits.argmax(dim=-1)  # [B]
-            scene_emb = self.scene_embed(scene_idx).unsqueeze(1)  # [B, 1, d_llm]
-            
-            # Add scene embedding to all tokens
-            global_tokens = global_tokens + scene_emb
+
         
         # Compute group losses
         group_losses = self._compute_group_losses(all_group_tokens, group_centroids)
@@ -717,138 +382,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
         return losses
 
 
-class ORCAGatedCrossAttention(nn.Module):
-    """
-    Gated cross-attention module for deep injection of audio tokens into LLM decoder layers.
-    Uses data-dependent gating (following Audio Flamingo 3 design).
-    Also computes per-layer alignment loss for layer-wise supervision.
-    
-    hidden_out = hidden + gate(hidden) * LayerNorm(CrossAttn(hidden, audio))
-    """
-    def __init__(self, hidden_size: int, num_heads: int, gate_init: float = 0.1,
-                 rope_theta: float = 10000.0, audio_position_scale: float = 5.0):
-        super().__init__()
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden_size,
-            num_heads=num_heads,
-            batch_first=True,
-        )
-        # Data-dependent gate: projects hidden state to gate value
-        self.gate_proj = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 4),
-            nn.GELU(),
-            nn.Linear(hidden_size // 4, 1),
-        )
-        # Initialize to small values for stable training
-        nn.init.zeros_(self.gate_proj[-1].weight)
-        nn.init.constant_(self.gate_proj[-1].bias, gate_init)
-        
-        self.ln = nn.LayerNorm(hidden_size)
-        
-        # RoPE config for audio position encoding
-        self.rope_theta = rope_theta
-        self.audio_position_scale = audio_position_scale
-        self.hidden_size = hidden_size
-        
-        # Per-layer loss storage (populated during forward, cleared after collection)
-        self.layer_align_loss = None
-    
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        audio_local: torch.Tensor,
-        audio_local_mask: Optional[torch.Tensor] = None,
-        transcription_positions: Optional[List[Tuple[int, int, int]]] = None,
-    ) -> torch.Tensor:
-        """
-        Apply gated cross-attention with data-dependent gating.
-        Also computes per-layer alignment loss if in training mode.
-        
-        Args:
-            hidden_states: LLM hidden states [B, T_text, H]
-            audio_local: Audio tokens [B, T_audio, H]
-            audio_local_mask: Optional mask [B, T_audio], True for valid positions
-            transcription_positions: List of (batch_idx, start, end) for transcription in hidden_states
-            
-        Returns:
-            Updated hidden states [B, T_text, H]
-        """
-        if audio_local is None or audio_local.shape[1] == 0:
-            self.layer_align_loss = None
-            return hidden_states
-        
-        # Ensure audio_local has same dtype and device as hidden_states
-        audio_local = audio_local.to(dtype=hidden_states.dtype, device=hidden_states.device)
-        
-        # Apply RoPE rotation to audio tokens with interpolated positions
-        batch_size, seq_len, _ = audio_local.shape
-        
-        # Generate fractional positions for compression: [0, 1/scale, 2/scale, ...]
-        positions = torch.arange(seq_len, dtype=torch.float, device=audio_local.device) / self.audio_position_scale
-        
-        # Compute RoPE cos/sin
-        cos, sin = compute_rope_freqs(
-            seq_len=seq_len,
-            dim=self.hidden_size,
-            rope_theta=self.rope_theta,
-            device=audio_local.device,
-            positions=positions,
-        )
-        
-        # Apply RoPE rotation to audio tokens (like LLM does for text)
-        audio_local = apply_rotary_pos_emb(audio_local, cos, sin)
-        
-        # Build key_padding_mask: True for positions to IGNORE
-        if audio_local_mask is not None:
-            key_padding_mask = ~audio_local_mask.bool()
-        else:
-            key_padding_mask = None
-        
-        # Apply cross-attention
-        cross_out, _ = self.cross_attn(
-            query=hidden_states,
-            key=audio_local,
-            value=audio_local,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
-        )
-        cross_out = self.ln(cross_out)
-        
-        # Data-dependent gate: compute gate from hidden states
-        gate = torch.sigmoid(self.gate_proj(hidden_states))  # [B, T, 1]
-        
-        # Compute per-layer alignment loss: audio tokens should be close to transcription hidden states
-        if self.training:
-            with torch.no_grad():
-                audio_pooled = F.normalize(audio_local.mean(dim=1), dim=-1)  # [B, H]
-            
-            # Use transcription positions if available, else fallback to full hidden states
-            if transcription_positions is not None and len(transcription_positions) > 0:
-                # Extract transcription hidden states and pool per sample
-                trans_pooled_list = []
-                for batch_idx, start, end in transcription_positions:
-                    if start < end and end <= hidden_states.size(1):
-                        trans_hidden = hidden_states[batch_idx, start:end, :]  # [trans_len, H]
-                        trans_pooled_list.append(trans_hidden.mean(dim=0))  # [H]
-                
-                if len(trans_pooled_list) > 0:
-                    trans_pooled = torch.stack(trans_pooled_list, dim=0)  # [N, H]
-                    trans_pooled = F.normalize(trans_pooled, dim=-1)
-                    # audio_pooled may have different batch size, align by taking first N
-                    n = min(audio_pooled.size(0), trans_pooled.size(0))
-                    cos_sim = F.cosine_similarity(audio_pooled[:n], trans_pooled[:n], dim=-1)
-                    self.layer_align_loss = (1 - cos_sim).mean()
-                else:
-                    self.layer_align_loss = None
-            else:
-                # Fallback: use full hidden states
-                text_pooled = F.normalize(hidden_states.mean(dim=1), dim=-1)  # [B, H]
-                cos_sim = F.cosine_similarity(audio_pooled, text_pooled, dim=-1)  # [B]
-                self.layer_align_loss = (1 - cos_sim).mean()
-        else:
-            self.layer_align_loss = None
-        
-        return hidden_states + gate * cross_out
+
 
 @dataclass
 class GenerationOutput():
@@ -867,8 +401,7 @@ class WhisperPerception(nn.Module):
             self.config.encoder_model_id, cache_dir=os.getenv("HF_HOME"))
 
         # Create connector based on mode
-        if config.connector_mode == "orca_hybrid":
-            self.connector = ORCAHybridConnector(config)
+
         elif config.connector_mode == "struct_orca":
             self.connector = GroupwiseOrthogonalConnector(config)
         else:
@@ -877,16 +410,7 @@ class WhisperPerception(nn.Module):
         # Store group losses for Struct-ORCA (populated during forward)
         self._struct_orca_losses = None
         
-        # Q: Layer-wise Weighted Sum
-        # Get number of encoder layers from Whisper config
-        num_layers = self.whisper.model.encoder.config.encoder_layers
-        if getattr(config, 'layer_weighted_sum_enabled', False):
-            if getattr(config, 'layer_weighted_learnable', True):
-                # Learnable weights for each layer, initialized uniformly
-                self.layer_weights = nn.Parameter(torch.ones(num_layers) / num_layers)
-            else:
-                # Fixed uniform weights
-                self.register_buffer('layer_weights', torch.ones(num_layers) / num_layers)
+
 
 
     def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, **kwargs) -> Union[Tuple[torch.Tensor, List[int]], Tuple[torch.Tensor, torch.Tensor, List[int]]]:
@@ -1027,18 +551,6 @@ class WhisperPerception(nn.Module):
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
             
-            # Q: Layer-wise Weighted Sum
-            # If enabled, combine layer outputs with learnable weights
-            if getattr(self.config, 'layer_weighted_sum_enabled', False) and hasattr(self, 'layer_weights'):
-                # Stack all layer outputs: [num_layers, B, T, H]
-                stacked_outputs = torch.stack(all_layer_outputs, dim=0)
-                # Apply softmax to get normalized weights
-                norm_weights = F.softmax(self.layer_weights, dim=0)  # [num_layers]
-                # Weighted sum: [B, T, H]
-                weighted_output = torch.einsum('lbth,l->bth', stacked_outputs, norm_weights)
-                # Use weighted output as the final layer output for connector
-                all_layer_outputs = [weighted_output]  # Pass as single combined representation
-            
             # Pass all layer outputs to GroupwiseOrthogonalConnector
             global_tokens, group_losses = self.connector(all_layer_outputs)
             return global_tokens, group_losses
@@ -1047,8 +559,6 @@ class WhisperPerception(nn.Module):
             raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
     
     
-
-
 
 class DeSTA25Config(PretrainedConfig):
     model_type = "desta25"
@@ -1062,61 +572,27 @@ class DeSTA25Config(PretrainedConfig):
                  use_lora=False,
                  audio_locator="<|AUDIO|>",
                  placeholder_token="<|reserved_special_token_87|>",
-                 # ORCA-DeSTA configuration fields
-                 orca_enabled=False,
-                 orca_use_all_layers=False,  # If True, use all encoder layers; if False, use selected layers
-                 orca_local_enabled=True,  # If False, only global tokens are used (no local downsample)
-                 orca_global_cross_attn=False,  # If True, global tokens also use cross-attention instead of concat
-                 orca_deep_injection_enabled=True, # If False, disable gated cross-attention in all LLM layers
-                 orca_deep_injection_stride=1,  # Stride for injection: inject every N layers
-                 orca_audio_position_scale=2.5,  # Position interpolation scale for audio tokens (adjusted for 4x downsample)
-                 orca_global_num_tokens=4,
-                 orca_local_downsample=4,
-                 orca_local_kernel_size=5,
-                 orca_gate_init=0.1,
-                 orca_ortho_weight_global=0.01,
-                 orca_ortho_diversity_weight=0.01,
-                 orca_ortho_weight_qformer_local=0.01,  # Orthogonality between Q-Former global and local tokens
-                 orca_align_weight_local=0.05,  # Alignment loss to bring local tokens closer to text embeddings
-                 orca_orthogonal_projection=False,  # If True, project audio tokens to be orthogonal to transcription
-                 orca_adversarial_erasure=False,  # If True, use adversarial training to erase ASR content
-                 orca_adversarial_weight=0.0,  # Weight for adversarial loss
-                 orca_local_branch_true=False,  # Ablation F: Enable true local branch with weighted sum + CNN
-                 orca_local_ortho_weight=0.0,  # Weight for orthogonality between Global and Local branch
-                 struct_orca_num_groups=8,  # Number of semantic groups for queries
-                 struct_orca_queries_per_group=8,  # Queries per group (total = num_groups * queries_per_group)
-                 struct_orca_inter_group_weight=0.1,  # Weight for inter-group orthogonality loss
-                 struct_orca_intra_group_weight=0.01,  # Weight for intra-group diversity loss
-                 struct_orca_acd_alpha=0.5,  # Alpha for Acoustic-Contrastive Decoding
-                 # G1: Modality-DPO configuration
-                 modality_dpo_enabled=False,  # If True, add Modality-DPO loss
-                 modality_dpo_beta=0.1,  # Beta for DPO log-sigmoid scaling
+                 
+                 # Struct-ORCA configuration (Core R1)
+                 struct_orca_num_groups=8,
+                 struct_orca_queries_per_group=8,
+                 struct_orca_inter_group_weight=0.1,
+                 struct_orca_intra_group_weight=0.01,
+                 
                  # H1: Variational Grouping configuration
-                 variational_grouping_enabled=False,  # If True, use variational groups with KL regularization
-                 variational_kl_weight=0.01,  # Weight for KL divergence loss
-                 # J: Task-Aware Routing
-                 task_aware_routing_enabled=False,
-                 # K: Temporal Attention
-                 temporal_attention_enabled=False,
-                 # L: Contrastive Audio-Question Alignment
-                 audio_question_contrastive_enabled=False,
-                 audio_question_contrastive_weight=0.1,
-                 # M: Multi-Scale Local Features
-                 multi_scale_local_enabled=False,
-                 # N: Difficulty-Aware Training (Focal Loss)
-                 focal_loss_enabled=False,
-                 focal_loss_gamma=2.0,
-                 # O: Acoustic Scene Prior
-                 scene_prior_enabled=False,
-                 scene_prior_num_classes=10,
-                 # P: ASR Robustness
+                 variational_grouping_enabled=False,
+                 variational_kl_weight=0.01,
+                 
+                 # G1: Modality-DPO configuration
+                 modality_dpo_enabled=False,
+                 modality_dpo_beta=0.1,
+                 
+                 # P1: ASR Robustness configuration
                  asr_dropout_prob=0.0,
-                 # Q: Enhanced Audio Representation
-                 layer_weighted_sum_enabled=False,  # If True, use learnable weighted sum of encoder layers
-                 layer_weighted_learnable=True,  # If True, layer weights are learnable; if False, uniform
-                 # Q: Noisy ASR Augmentation
-                 asr_noise_augment_enabled=False,  # If True, add noise to transcription embeddings
-                 asr_noise_prob=0.0,  # Probability of adding noise to each transcription token
+                 
+                 # Optimization flags
+                 use_flash_attention=True,
+                 
                  **kwargs):
         
         super().__init__(**kwargs)
@@ -1134,72 +610,26 @@ class DeSTA25Config(PretrainedConfig):
         self.encoder_config = AutoConfig.from_pretrained(self.encoder_model_id)
 
         self.use_lora = use_lora
-
-        # ORCA-DeSTA configuration
-        self.orca_enabled = orca_enabled
-        self.orca_use_all_layers = orca_use_all_layers
-        self.orca_local_enabled = orca_local_enabled
-        self.orca_global_cross_attn = orca_global_cross_attn
-        self.orca_global_cross_attn = orca_global_cross_attn
-        self.orca_deep_injection_enabled = orca_deep_injection_enabled
-        self.orca_deep_injection_stride = orca_deep_injection_stride
-        self.orca_audio_position_scale = orca_audio_position_scale
-        self.orca_global_num_tokens = orca_global_num_tokens
-        self.orca_local_downsample = orca_local_downsample
-        self.orca_local_kernel_size = orca_local_kernel_size
-        self.orca_gate_init = orca_gate_init
-        self.orca_ortho_weight_global = orca_ortho_weight_global
-        self.orca_ortho_diversity_weight = orca_ortho_diversity_weight
-        self.orca_ortho_weight_qformer_local = orca_ortho_weight_qformer_local
-        self.orca_align_weight_local = orca_align_weight_local
-        self.orca_orthogonal_projection = orca_orthogonal_projection
-        self.orca_adversarial_erasure = orca_adversarial_erasure
-        self.orca_adversarial_weight = orca_adversarial_weight
-        self.orca_local_branch_true = orca_local_branch_true
-        self.orca_local_ortho_weight = orca_local_ortho_weight
+        self.use_flash_attention = use_flash_attention
 
         # Struct-ORCA configuration
         self.struct_orca_num_groups = struct_orca_num_groups
         self.struct_orca_queries_per_group = struct_orca_queries_per_group
         self.struct_orca_inter_group_weight = struct_orca_inter_group_weight
         self.struct_orca_intra_group_weight = struct_orca_intra_group_weight
-        self.struct_orca_acd_alpha = struct_orca_acd_alpha
-
-        # G1: Modality-DPO configuration
-        self.modality_dpo_enabled = modality_dpo_enabled
-        self.modality_dpo_beta = modality_dpo_beta
 
         # H1: Variational Grouping configuration
         self.variational_grouping_enabled = variational_grouping_enabled
         self.variational_kl_weight = variational_kl_weight
-
-        # J: Task-Aware Routing
-        self.task_aware_routing_enabled = task_aware_routing_enabled
-        # K: Temporal Attention
-        self.temporal_attention_enabled = temporal_attention_enabled
-        # L: Contrastive Audio-Question Alignment
-        self.audio_question_contrastive_enabled = audio_question_contrastive_enabled
-        self.audio_question_contrastive_weight = audio_question_contrastive_weight
-        # M: Multi-Scale Local Features
-        self.multi_scale_local_enabled = multi_scale_local_enabled
-        # N: Difficulty-Aware Training (Focal Loss)
-        self.focal_loss_enabled = focal_loss_enabled
-        self.focal_loss_gamma = focal_loss_gamma
-        # O: Acoustic Scene Prior
-        self.scene_prior_enabled = scene_prior_enabled
-        self.scene_prior_num_classes = scene_prior_num_classes
         
-        # P: ASR Robustness
+        # G1: Modality-DPO configuration
+        self.modality_dpo_enabled = modality_dpo_enabled
+        self.modality_dpo_beta = modality_dpo_beta
+        
+        # P1: ASR Dropout
         self.asr_dropout_prob = asr_dropout_prob
-        
-        # Q: Enhanced Audio Representation
-        self.layer_weighted_sum_enabled = layer_weighted_sum_enabled
-        self.layer_weighted_learnable = layer_weighted_learnable
-        # Q: Noisy ASR Augmentation
-        self.asr_noise_augment_enabled = asr_noise_augment_enabled
-        self.asr_noise_prob = asr_noise_prob
 
-        self.info = "Ｄｅｓｔａ２。５ Ａｕｄｉｏ"
+        self.info = "ORCA-R1: Acoustic-First Audio-LLM"
 
 
 
@@ -1239,41 +669,10 @@ class DeSTA25AudioModel(PreTrainedModel):
         logging.info(f"Loading Audio model from {self.config.encoder_model_id}")
         self.perception = WhisperPerception(self.config)
 
-        # === ORCA-DeSTA Setup ===
-        # Check both orca_enabled and connector_mode for robust detection
-        is_orca = getattr(self.config, 'orca_enabled', False) or self.config.connector_mode == "orca_hybrid"
-        if is_orca:
-            logging.info("Enabling ORCA-DeSTA components")
-            
-            # Enable deep cross-attention injection (if enabled in config)
-            if getattr(self.config, 'orca_deep_injection_enabled', True):
-                self._enable_orca_deep_injection()
-            else:
-                logging.info("ORCA deep injection explicitly disabled via config")
-            
-            # Storage for audio_local during forward (set before LLM call, cleared after)
-            self._orca_audio_local = None
-            self._orca_audio_local_mask = None
-            
-            # Ensure ORCA modules are in correct dtype (align with LLM)
-            if hasattr(self, "orca_cross_attns"):
-                self.orca_cross_attns.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
-            if hasattr(self.perception, "connector") and self.config.connector_mode == "orca_hybrid":
-                self.perception.connector.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
-        
         # === Struct-ORCA Setup ===
         is_struct_orca = self.config.connector_mode == "struct_orca"
         if is_struct_orca:
             logging.info("Enabling Struct-ORCA components")
-
-        # === Adversarial Erasure Setup ===
-        if getattr(self.config, 'orca_adversarial_erasure', False):
-            logging.info("Enabling Adversarial Erasure components")
-            self.discriminator = TranscriptionDiscriminator(
-                hidden_size=self.config.llm_config.hidden_size,
-                output_size=self.config.llm_config.hidden_size  # Predicts transcription embedding
-            )
-            self.discriminator.to(dtype=self.llm_model.dtype, device=self.llm_model.device)
 
         self.configure_trainable_parameters()
         
@@ -1299,140 +698,20 @@ class DeSTA25AudioModel(PreTrainedModel):
             batch_start_positions=batch_start_positions
         )
         
-        # Handle ORCA mode - check based on result type or connector_mode
-        is_orca_mode = (
-            isinstance(prepare_result, tuple) and len(prepare_result) >= 2
-        ) and self.config.connector_mode == "orca_hybrid"
-        
         # Handle Struct-ORCA mode
         is_struct_orca_mode = self.config.connector_mode == "struct_orca"
         
-        if is_orca_mode:
-            if len(prepare_result) == 3:
-                inputs_embeds, global_audio_tokens, transcription_positions = prepare_result
-            else:
-                inputs_embeds, global_audio_tokens = prepare_result
-                transcription_positions = None
-            
-            # Store transcription positions for cross-attention alignment loss
-            self._orca_transcription_positions = transcription_positions
-            
-            # Set audio tokens for deep injection (accessed by wrapped decoder layers)
-            # Only set if deep injection is enabled in ablation config
-            if getattr(self.config, 'orca_deep_injection_enabled', True):
-                # Use global tokens for cross-attention injection
-                self._orca_audio_local = global_audio_tokens
-            else:
-                self._orca_audio_local = None
-                
-            self._orca_audio_local_mask = None
-            
-            # Call LLM with output_hidden_states to get text hidden states for orthogonality loss
-            outputs = self.llm_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-                output_hidden_states=True,
-            )
-            
-            # Clear audio tokens after LLM forward
-            self._orca_audio_local = None
-            self._orca_audio_local_mask = None
-            
-            # Collect per-layer alignment losses from cross-attention modules
-            layer_align_losses = self._collect_layer_align_losses()
-            
-            # Compute ORCA auxiliary losses
-            text_hidden = outputs.hidden_states[-1] if outputs.hidden_states else None
-            
-            # Extract transcription and target embeddings for contrastive alignment
-            transcription_embeds = None
-            target_embeds = None
-            
-            if len(batch_transcription_ids) > 0:
-                # Get transcription embeddings
-                with torch.no_grad():
-                    transcription_embeds_list = []
-                    for trans_ids in batch_transcription_ids:
-                        trans_ids = trans_ids.squeeze(0)
-                        if trans_ids.device != inputs_embeds.device:
-                            trans_ids = trans_ids.to(inputs_embeds.device)
-                        trans_emb = self.llm_model.model.embed_tokens(trans_ids)
-                        transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
-                    transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [B, H]
-            
-            # P: ASR Dropout (Robustness)
-            asr_dropout_prob = getattr(self.config, 'asr_dropout_prob', 0.0)
-            if self.training and asr_dropout_prob > 0 and transcription_embeds is not None:
-                # Create mask: 1 = keep, 0 = drop
-                # Probability of dropping is asr_dropout_prob
-                mask_keep = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) > asr_dropout_prob).float().unsqueeze(-1)
-                transcription_embeds = transcription_embeds * mask_keep
-            
-            # Q: Noisy ASR Augmentation (simulate ASR errors)
-            asr_noise_enabled = getattr(self.config, 'asr_noise_augment_enabled', False)
-            asr_noise_prob = getattr(self.config, 'asr_noise_prob', 0.0)
-            if self.training and asr_noise_enabled and asr_noise_prob > 0 and transcription_embeds is not None:
-                # Add Gaussian noise to transcription embeddings to simulate ASR errors
-                # Noise mask: which samples get noise
-                noise_mask = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) < asr_noise_prob).float().unsqueeze(-1)
-                # Generate noise with same scale as embedding std
-                noise_std = transcription_embeds.std() * 0.1  # 10% of embedding std
-                noise = torch.randn_like(transcription_embeds) * noise_std
-                # Apply noise only to selected samples
-                transcription_embeds = transcription_embeds + noise * noise_mask
-
-            # Extract target embeddings from labels
-            if labels is not None:
-                with torch.no_grad():
-                    # Get target positions (where labels != -100)
-                    target_mask = labels != -100  # [B, T]
-                    if target_mask.any():
-                        # Get embeddings for target tokens
-                        target_ids = labels.clone()
-                        target_ids[~target_mask] = 0  # Mask out non-target positions
-                        target_emb_full = self.llm_model.model.embed_tokens(target_ids)  # [B, T, H]
-                        
-                        # Pool only target positions
-                        target_embeds_list = []
-                        for b in range(target_mask.size(0)):
-                            if target_mask[b].any():
-                                target_emb = target_emb_full[b, target_mask[b], :]  # [num_targets, H]
-                                target_embeds_list.append(target_emb.mean(dim=0))  # Pool
-                            else:
-                                target_embeds_list.append(torch.zeros(target_emb_full.size(-1), device=target_emb_full.device))
-                        target_embeds = torch.stack(target_embeds_list, dim=0)  # [B, H]
-
-            # Compute ORCA losses (only global tokens now)
-            orca_losses = self.compute_orca_losses(
-                global_tokens=global_audio_tokens,
-                local_tokens=None,
-                text_hidden=text_hidden,
-                layer_align_losses=layer_align_losses,
-                transcription_embeds=transcription_embeds,
-                target_embeds=target_embeds,
-            )
-            
-            # Attach losses to outputs
-            outputs.orca_losses = orca_losses
-            outputs.audio_global = global_audio_tokens
-            
-            return outputs
-        elif is_struct_orca_mode:
+        if is_struct_orca_mode:
             # Struct-ORCA forward path
             # prepare_result is just inputs_embeds for struct_orca (same as qformer_1)
             inputs_embeds = prepare_result if not isinstance(prepare_result, tuple) else prepare_result[0]
-            
-            # Check if we need to compute contrastive alignment loss or adversarial erasure
-            compute_align_loss = getattr(self.config, 'orca_align_weight_local', 0.0) > 0
-            compute_adversarial = getattr(self.config, 'orca_adversarial_erasure', False)
             
             # Call LLM 
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 labels=labels,
-                output_hidden_states=False,  # Struct-ORCA alignment loss doesn't need hidden states
+                output_hidden_states=False,
             )
             
             # Collect group losses from perception module (for L_inter_group, L_intra_group)
@@ -1450,34 +729,59 @@ class DeSTA25AudioModel(PreTrainedModel):
                         orca_total += loss.item()
                         orca_loss_log[name] = loss.item()  # Detached for logging
             
-            # Compute contrastive alignment/adversarial loss if enabled
-            if (compute_align_loss or compute_adversarial) and labels is not None and len(batch_transcription_ids) > 0:
-                # Get Q-Former tokens from model (stored in _prepare_inputs_for_llm)
-                struct_orca_tokens = getattr(self, "_struct_orca_audio_tokens", None)
+            # === G1: Modality-DPO Loss ===
+            # Make the model prefer predictions WITH audio over predictions WITHOUT audio
+            if getattr(self.config, 'modality_dpo_enabled', False) and labels is not None:
+                beta = getattr(self.config, 'modality_dpo_beta', 0.1)
                 
-                if struct_orca_tokens is not None:
-                    # Get transcription embeddings (negative samples)
-                    with torch.no_grad():
-                        transcription_embeds_list = []
-                        for trans_ids in batch_transcription_ids:
-                            trans_ids = trans_ids.squeeze(0)
-                            if trans_ids.device != inputs_embeds.device:
-                                trans_ids = trans_ids.to(inputs_embeds.device)
-                            # Skip empty transcriptions
-                            if trans_ids.numel() == 0:
-                                continue
-                            trans_emb = self.llm_model.model.embed_tokens(trans_ids)
-                            # Check for empty embeddings
-                            if trans_emb.size(0) > 0:
-                                transcription_embeds_list.append(trans_emb.mean(dim=0))  # Pool
-                        
-                        # Only proceed if we have valid transcription embeddings
-                        if len(transcription_embeds_list) > 0:
-                            transcription_embeds = torch.stack(transcription_embeds_list, dim=0)  # [N_valid, H]
-                            
-                            # Q: Noisy ASR Augmentation (simulate ASR errors) - struct_orca path
-                            asr_noise_enabled = getattr(self.config, 'asr_noise_augment_enabled', False)
-                            asr_noise_prob = getattr(self.config, 'asr_noise_prob', 0.0)
+                # Get log probs from full model (with audio) - already computed above
+                logits_full = outputs.logits
+                log_probs_full = self._get_target_log_probs(logits_full, labels)
+                
+                # Forward pass WITHOUT audio (blind)
+                # Create blind inputs by replacing audio tokens with zeros
+                blind_embeds = self.llm_model.model.embed_tokens(input_ids)
+                
+                with torch.no_grad():
+                    outputs_blind = self.llm_model(
+                        inputs_embeds=blind_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+                    log_probs_blind = self._get_target_log_probs(outputs_blind.logits, labels)
+                
+                # DPO Loss: -log_sigmoid(beta * (log_probs_full - log_probs_blind))
+                logits_diff = log_probs_full - log_probs_blind
+                loss_dpo = -F.logsigmoid(beta * logits_diff).mean()
+                
+                outputs.loss = outputs.loss + loss_dpo
+                orca_total += loss_dpo.item()
+                orca_loss_log["L_dpo"] = loss_dpo.item()
+            
+            # === P1: ASR Dropout (Robustness) ===
+            # Note: This is applied during training in prepare_inputs_for_llm if supported,
+            # or we can apply it to transcription embeddings here if we had access to them.
+            # In Struct-ORCA, we might not be explicitly using transcription embeddings in the forward pass yet
+            # unless we add them for some auxiliary loss.
+            # Assuming ASR dropout is handled where transcription embeddings are created.
+
+            # Attach losses to outputs
+            outputs.orca_losses = orca_loss_log
+            outputs.orca_total_loss = orca_total
+            
+            return outputs
+            
+        else:
+            # Baseline (Q-Former) or other modes
+            is_tuple = isinstance(prepare_result, tuple)
+            inputs_embeds = prepare_result[0] if is_tuple else prepare_result
+            
+            outputs = self.llm_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            return outputs
                             if self.training and asr_noise_enabled and asr_noise_prob > 0:
                                 noise_mask = (torch.rand(transcription_embeds.size(0), device=transcription_embeds.device) < asr_noise_prob).float().unsqueeze(-1)
                                 noise_std = transcription_embeds.std() * 0.1

@@ -71,21 +71,11 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.struct_orca.queries_per_group=8 \
     ++model.struct_orca.inter_group_weight=0.1 \
     ++model.struct_orca.intra_group_weight=0.03 \
-    ++model.struct_orca.iv_weight=0 \
-    ++model.orca.enabled=false \
-    ++model.orca.align_weight_local=0.0 \
-    ++model.orca.orthogonal_projection=false \
     ++model.modality_dpo_enabled=true \
     ++model.modality_dpo_beta=0.1 \
     ++model.variational_grouping_enabled=true \
     ++model.variational_kl_weight=0.01 \
-    ++model.task_aware_routing_enabled=false \
-    ++model.temporal_attention_enabled=true \
-    ++model.focal_loss_enabled=false \
-    ++model.asr_dropout_prob=0.2 \
-    ++model.multi_scale_local_enabled=false \
-    ++model.layer_weighted_sum_enabled=false \
-    ++model.asr_noise_augment_enabled=false
+    ++model.asr_dropout_prob=0.2
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'

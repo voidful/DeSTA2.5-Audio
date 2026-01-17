@@ -51,7 +51,7 @@ model:
     queries_per_group: 8
     inter_group_weight: 0.1
     intra_group_weight: 0.01
-    acd_alpha: 0.5
+
 
   placeholder_token: "<|video_pad|>"
   audio_locator: "<|AUDIO|>"

@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=R1_lean
-#SBATCH --partition=normal1
+#SBATCH --partition=normal
 #SBATCH --account=MST114563
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=3
-#SBATCH --cpus-per-task=48
+#SBATCH --gpus-per-node=2
+#SBATCH --cpus-per-task=24
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
 #SBATCH --exclude=hgpn21
