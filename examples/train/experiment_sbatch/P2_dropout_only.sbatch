@@ -69,6 +69,19 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     ++model.variational_grouping_enabled=false \
     ++model.asr_dropout_prob=0.2
 
+# ===== 評估 =====
+echo "Starting MMAU Evaluation..."
+python examples/evaluation/mmau_eval.py \
+    --model_id ${exp_dir} \
+    --output_dir ${exp_dir}/eval_results/mmau \
+    --split test_mini
+
+echo "Starting MMSU Evaluation..."
+python examples/evaluation/mmsu_eval.py \
+    --model_id ${exp_dir} \
+    --output_dir ${exp_dir}/eval_results/mmsu \
+    --split test
+
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
 ./examples/train/ablation_sbatch/upload_to_hf.sh ${exp_dir} "desta25_4b_P2_dropout_only"

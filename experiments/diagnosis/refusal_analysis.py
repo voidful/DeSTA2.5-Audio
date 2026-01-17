@@ -90,10 +90,24 @@ class RefusalDataset(Dataset):
         ground_truths = [b.get("answer", "") for b in batch]
         raw_items = batch
         
-        prompts = [f"{self.audio_locator}\n{q}" for q in questions]
+        texts = []
+        for q in questions:
+            content = f"{self.audio_locator}\n{q}"
+            if hasattr(self.tokenizer, 'apply_chat_template'):
+                try:
+                    txt = self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": content}],
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                except:
+                    txt = content
+            else:
+                txt = content
+            texts.append(txt)
         
         inputs_text = self.tokenizer(
-            prompts,
+            texts,
             return_tensors="pt",
             padding=True,
             truncation=True,

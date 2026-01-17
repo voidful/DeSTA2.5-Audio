@@ -208,19 +208,39 @@ def run_match_rate_analysis(
         # 2. Audio Inference
         input_features = process_audio_batch(desta_model, processor, batch["raw_items"], device)
         
-        audio_locator = desta_model.config.audio_locator
-        prompts_audio = [f"{audio_locator}\n{q}" for q in questions]
+        # Prepare Audio Prompts using Chat Template
+        texts_audio = []
+        for q in questions:
+            # Construct message with audio locator
+            # Note: We assume audio_locator is handled by tokenizer if present in string
+            content = f"{desta_model.config.audio_locator}\n{q}"
+            if hasattr(tokenizer, 'apply_chat_template'):
+                try:
+                    txt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": content}],
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                except:
+                    txt = content
+            else:
+                txt = content
+            texts_audio.append(txt)
         
         inputs_audio = tokenizer(
-            prompts_audio,
+            texts_audio,
             return_tensors="pt",
             padding=True,
             truncation=True
         ).to(device)
         
-        if audio_locator not in tokenizer.get_vocab():
-            tokenizer.add_tokens([audio_locator], special_tokens=True)
-        audio_token_id = tokenizer.convert_tokens_to_ids(audio_locator)
+        # Ensure audio_locator is in vocab for ID search
+        if desta_model.config.audio_locator not in tokenizer.get_vocab():
+            tokenizer.add_tokens([desta_model.config.audio_locator], special_tokens=True)
+            # IMPORTANT: resizing embeddings might be needed if added new token, 
+            # but DeSTA should have it. We just ensure our tokenizer wrapper knows it.
+        
+        audio_token_id = tokenizer.convert_tokens_to_ids(desta_model.config.audio_locator)
         
         batch_start_positions = []
         for seq in inputs_audio.input_ids:

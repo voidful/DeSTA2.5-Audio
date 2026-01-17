@@ -108,17 +108,29 @@ class LiarDataset(Dataset):
         sample_ids = [b.get("sample_id") for b in batch]
         
         # Prepare prompts
-        prompts = []
+        texts = []
         for q, l_trans in zip(questions, liar_transcripts):
             if self.inject_transcript:
-                # Add audio locator and transcript
-                prompts.append(f"{self.audio_locator}\n{q}\n\n[Transcription]: {l_trans}")
+                content = f"{self.audio_locator}\n{q}\n\n[Transcription]: {l_trans}"
             else:
-                prompts.append(f"{self.audio_locator}\n{q}")
+                content = f"{self.audio_locator}\n{q}"
+            
+            if hasattr(self.tokenizer, 'apply_chat_template'):
+                try:
+                    txt = self.tokenizer.apply_chat_template(
+                        [{"role": "user", "content": content}],
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                except:
+                    txt = content
+            else:
+                txt = content
+            texts.append(txt)
                 
         # Tokenize prompts (to find start positions)
         inputs_text = self.tokenizer(
-            prompts,
+            texts,
             return_tensors="pt",
             padding=True,
             truncation=True,

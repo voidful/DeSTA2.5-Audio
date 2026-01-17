@@ -68,6 +68,13 @@ submit_p2() {
     sbatch P2_dpo_only.sbatch
 }
 
+submit_p3() {
+    echo ""
+    echo "=== P3: Benchmark (MMAU/MMSU) ==="
+    echo "Submitting P3 Benchmark..."
+    sbatch P3_benchmark.sbatch
+}
+
 case ${MODE} in
     p0)
         submit_p0
@@ -78,9 +85,13 @@ case ${MODE} in
     p2)
         submit_p2
         ;;
+    p3)
+        submit_p3
+        ;;
     eval)
         submit_p0
         submit_p1
+        submit_p3
         ;;
     train)
         submit_p2
@@ -89,10 +100,11 @@ case ${MODE} in
         submit_p0
         submit_p1
         submit_p2
+        submit_p3
         ;;
     *)
         echo "Unknown mode: ${MODE}"
-        echo "Usage: $0 [all|p0|p1|p2|eval|train]"
+        echo "Usage: $0 [all|p0|p1|p2|p3|eval|train]"
         exit 1
         ;;
 esac
