@@ -4,7 +4,6 @@
 #SBATCH --account=MST114563
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=0
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=4:00:00
