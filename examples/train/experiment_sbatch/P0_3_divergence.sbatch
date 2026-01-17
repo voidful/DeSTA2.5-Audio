@@ -25,8 +25,7 @@ source activate desta25 2>/dev/null || conda activate desta25 2>/dev/null || tru
 conda activate desta25-qwen3
 
 cd /work/voidful2nlp/DeSTA2.5-Audio
-pip install "numpy<2.0" -q 2>/dev/null || true
-pip install torch torchaudio soundfile --upgrade --force-reinstall -q 2>/dev/null || true
+pip install torch torchaudio soundfile "numpy<2.0" --upgrade --force-reinstall
 
 export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 export HF_HOME=/work/voidful2nlp/.cache/huggingface
