@@ -60,6 +60,8 @@ REFUSAL_PATTERNS = [
     r"insufficient (information|audio|data)",
     r"hard to (tell|say|determine)",
     r"(audio|sound) (is )?(too )?(unclear|noisy|distorted)",
+    r"sorry",
+    r"i cannot",
 ]
 
 def is_refusal(response: str) -> bool:
@@ -88,7 +90,6 @@ class RefusalDataset(Dataset):
         ground_truths = [b.get("answer", "") for b in batch]
         raw_items = batch
         
-        # Prepare prompts
         prompts = [f"{self.audio_locator}\n{q}" for q in questions]
         
         inputs_text = self.tokenizer(
@@ -99,7 +100,6 @@ class RefusalDataset(Dataset):
             max_length=2048
         )
         
-        # Determine start positions
         audio_id = self.tokenizer.convert_tokens_to_ids(self.audio_locator)
         batch_start_positions = []
         for seq in inputs_text.input_ids:
@@ -119,9 +119,7 @@ class RefusalDataset(Dataset):
 
 def process_audio_batch(processor, raw_items, device):
     audio_arrays = [item["audio"]["array"] for item in raw_items]
-    sampling_rates = [item["audio"]["sampling_rate"] for item in raw_items]
     
-    # Assume 16k or processor handles it
     input_features = processor(
         audio_arrays,
         sampling_rate=16000,
@@ -145,7 +143,6 @@ def run_refusal_analysis(
     model = DeSTA25AudioModel.from_pretrained(model_path, device=device)
     model.eval()
     
-    logger.info("Loading tokenizer and processor...")
     processor = AutoProcessor.from_pretrained(model.config.encoder_model_id)
     tokenizer = AutoTokenizer.from_pretrained(model.config.llm_model_id, padding_side="left")
     if tokenizer.pad_token is None:
@@ -155,15 +152,23 @@ def run_refusal_analysis(
     if audio_locator not in tokenizer.get_vocab():
         tokenizer.add_tokens([audio_locator], special_tokens=True)
         
-    logger.info("Loading SAKURA Animal Recognition dataset...")
+    logger.info("Loading SLLM-multi-hop/AnimalQA dataset...")
     try:
-        ds = load_dataset("MERLab/SAKURA", "single_AnimalRecognition", split="test")
+        ds = load_dataset("SLLM-multi-hop/AnimalQA", split="test")
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
         return {}
         
     indices = np.random.choice(len(ds), min(num_samples, len(ds)), replace=False)
-    samples = [ds[int(i)] for i in indices]
+    
+    samples = []
+    for idx in indices:
+        item = ds[int(idx)]
+        samples.append({
+            "question": item["single_instruction"], # Use single hop
+            "answer": item["single_answer"],
+            "audio": item["audio"]
+        })
     
     dataset = RefusalDataset(samples, tokenizer, processor, audio_locator)
     dataloader = DataLoader(
@@ -176,7 +181,7 @@ def run_refusal_analysis(
     results = []
     refusal_count = 0
     
-    logger.info(f"Analyzing {len(samples)} samples (Batch {batch_size})...")
+    logger.info(f"Analyzing {len(samples)} samples...")
     
     for batch in tqdm(dataloader, desc="Eval Batches"):
         input_features = process_audio_batch(processor, batch["raw_items"], device)
@@ -208,13 +213,10 @@ def run_refusal_analysis(
                 "is_refusal": is_refused
             })
             
-    # Calculate stats
     total = len(results)
     rate = refusal_count / total if total > 0 else 0
     
     example_refusals = [r for r in results if r["is_refusal"]][:5]
-    example_answers = [r for r in results if not r["is_refusal"]][:5]
-
     summary = {
         "model_path": model_path,
         "total": total,
@@ -224,11 +226,10 @@ def run_refusal_analysis(
         "example_refusals": example_refusals
     }
     
-    # Save
     with open(output_path / "refusal_summary.json", 'w') as f:
         json.dump(summary, f, indent=2)
         
-    logger.info(f"Refusal Rate: {rate*100:.1f}% ({refusal_count}/{total})")
+    logger.info(f"Refusal Rate: {rate*100:.1f}%")
     return summary
 
 def main():
@@ -240,7 +241,6 @@ def main():
     parser.add_argument("--output-dir", type=str, default="refusal_analysis_results")
     
     args = parser.parse_args()
-    
     run_refusal_analysis(
         model_path=args.model,
         num_samples=args.samples,

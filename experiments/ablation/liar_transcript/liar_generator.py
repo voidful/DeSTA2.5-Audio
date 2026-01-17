@@ -30,8 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# SAKURA dataset
-SAKURA_HUB_ID = "MERLab/SAKURA"
 
 # Mapping for generating contradictory information
 EMOTION_CONTRADICTIONS = {
@@ -100,7 +98,6 @@ def get_emotion_liar_text(true_emotion: str) -> str:
     if true_emotion in emotion_phrases:
         return np.random.choice(emotion_phrases[true_emotion])
     
-    # Fallback: generate opposite
     opposite = EMOTION_CONTRADICTIONS.get(true_emotion, ["happy"])[0]
     return f"I'm feeling very {opposite} right now."
 
@@ -121,7 +118,6 @@ def get_animal_liar_text(true_animal: str) -> str:
     """Generate transcript that contradicts the true animal sound."""
     true_animal = true_animal.lower()
     
-    # Get a contradictory animal
     if true_animal in ANIMAL_CONTRADICTIONS:
         fake_animal = np.random.choice(ANIMAL_CONTRADICTIONS[true_animal])
     else:
@@ -138,22 +134,13 @@ def get_animal_liar_text(true_animal: str) -> str:
 
 
 def generate_liar_sample(
-    item: dict,
-    task_type: str
+    question: str,
+    ground_truth: str,
+    task_type: str,
+    original_id: str
 ) -> Dict:
-    """Generate a liar sample with contradictory transcript.
+    """Generate a liar sample with contradictory transcript."""
     
-    Args:
-        item: Original SAKURA sample with question, answer, audio
-        task_type: "emotion", "gender", or "animal"
-    
-    Returns:
-        Dict with original info plus liar_transcript
-    """
-    question = item.get("question", "")
-    ground_truth = item.get("answer", "")
-    
-    # Generate contradictory transcript
     if task_type == "emotion":
         liar_transcript = get_emotion_liar_text(ground_truth)
     elif task_type == "gender":
@@ -168,7 +155,7 @@ def generate_liar_sample(
         "question": question,
         "audio_ground_truth": ground_truth,
         "liar_transcript": liar_transcript,
-        "original_item_id": item.get("id", "unknown"),
+        "original_item_id": original_id,
     }
 
 
@@ -195,16 +182,6 @@ def generate_liar_dataset(
     output_dir: str = "liar_transcript_data",
     save_audio: bool = True
 ) -> Dict:
-    """Generate liar transcript dataset from SAKURA.
-    
-    Args:
-        samples_per_task: Samples per task type (emotion/gender/animal)
-        output_dir: Output directory
-        save_audio: Whether to save audio files
-    
-    Returns:
-        Summary statistics
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -212,36 +189,46 @@ def generate_liar_dataset(
         audio_dir = output_path / "audio"
         audio_dir.mkdir(exist_ok=True)
     
-    # Task mapping
-    task_configs = [
-        ("single_EmotionRecognition", "emotion"),
-        ("single_Gender", "gender"),
-        ("single_AnimalRecognition", "animal"),
-    ]
+    # Updated Dataset Mapping using SLLM-multi-hop
+    task_map = {
+        "emotion": "SLLM-multi-hop/EmotionQA",
+        "gender": "SLLM-multi-hop/GenderQA",
+        "animal": "SLLM-multi-hop/AnimalQA"
+    }
     
     all_samples = []
     stats = {}
     
-    for dataset_name, task_type in task_configs:
+    for task_type, dataset_name in task_map.items():
         logger.info(f"Loading {dataset_name} for {task_type} task...")
         
         try:
-            dataset = load_dataset(SAKURA_HUB_ID, dataset_name, split="test")
+            dataset = load_dataset(dataset_name, split="test")
         except Exception as e:
             logger.warning(f"Failed to load {dataset_name}: {e}")
             continue
         
-        # Sample
         num_samples = min(samples_per_task, len(dataset))
         indices = np.random.choice(len(dataset), num_samples, replace=False)
         
         task_samples = []
         for idx in tqdm(indices, desc=f"Generating {task_type}"):
             item = dataset[int(idx)]
-            liar_sample = generate_liar_sample(item, task_type)
+            
+            # Extract fields for Single Hop
+            # Note: SLLM datasets have both single_instruction and multi_instruction
+            # Liar test focuses on simple contradictions, so use single hop
+            question = item.get("single_instruction", "")
+            if not question: # Fallback
+                question = item.get("multi_instruction", "")
+                
+            answer = item.get("single_answer", "")
+            if not answer:
+                answer = item.get("multi_answer", "")
+                
+            liar_sample = generate_liar_sample(question, answer, task_type, str(idx))
             liar_sample["sample_id"] = f"{task_type}_{idx:04d}"
             
-            # Save audio
             if save_audio:
                 audio_path = audio_dir / f"{liar_sample['sample_id']}.wav"
                 write_wav_from_item(item, str(audio_path))
@@ -253,11 +240,9 @@ def generate_liar_dataset(
         all_samples.extend(task_samples)
         logger.info(f"  Generated {len(task_samples)} {task_type} samples")
     
-    # Save samples
     samples_file = output_path / "liar_samples.jsonl"
     with open(samples_file, 'w') as f:
         for sample in all_samples:
-            # Remove audio data before saving (keep only path)
             f.write(json.dumps(sample) + '\n')
     
     summary = {
@@ -278,40 +263,17 @@ def generate_liar_dataset(
         logger.info(f"  {task}: {count}")
     logger.info(f"Saved to: {output_path}")
     logger.info(f"{'='*60}")
-    
     return summary
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="P0-2: Generate liar transcripts for audio-text conflict testing"
-    )
-    parser.add_argument(
-        "--samples-per-task",
-        type=int,
-        default=150,
-        help="Samples per task type (default: 150, total ~450)"
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="liar_transcript_data",
-        help="Output directory"
-    )
-    parser.add_argument(
-        "--no-audio",
-        action="store_true",
-        help="Don't save audio files (just metadata)"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed"
-    )
+    parser = argparse.ArgumentParser(description="P0-2: Generate liar transcripts")
+    parser.add_argument("--samples-per-task", type=int, default=150)
+    parser.add_argument("--output-dir", type=str, default="liar_transcript_data")
+    parser.add_argument("--no-audio", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
     
     args = parser.parse_args()
-    
     np.random.seed(args.seed)
     
     generate_liar_dataset(
@@ -319,7 +281,6 @@ def main():
         output_dir=args.output_dir,
         save_audio=not args.no_audio
     )
-
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@ P0-1: Match Rate Quantification (Optimized for H100)
 Measures ASR reliance by comparing predictions with/without audio.
 
 Method:
-1. Load SAKURA test samples
+1. Load SAKURA test samples (SLLM-multi-hop/*QA)
 2. BATCHED Inference:
    - With audio (DeSTA)
    - Text only (LLM backbone)
@@ -22,13 +22,14 @@ from typing import Dict, List
 from tqdm import tqdm
 import numpy as np
 import math
+import re
 
 import torch
 from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoProcessor
 
-# Try to import DeSTA, handling potential path issues
+# Try to import DeSTA
 try:
     from desta import DeSTA25AudioModel
 except ImportError:
@@ -42,12 +43,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SAKURA_HUB_ID = "MERLab/SAKURA"
+# SLLM Datasets
 SAKURA_TASKS = {
-    "single_hop": ["AnimalRecognition", "EmotionRecognition", "Gender", "SoundRecognition"],
-    "multi_hop": ["MultiAnimalRecognition", "MultiEmotionRecognition", "MultiGender", "MultiSoundRecognition"]
+    "AnimalQA": "SLLM-multi-hop/AnimalQA",
+    "GenderQA": "SLLM-multi-hop/GenderQA",
+    "EmotionQA": "SLLM-multi-hop/EmotionQA",
+    # "LanguageQA": "SLLM-multi-hop/LanguageQA" # Optional, sticking to 3 main tasks for consistency
 }
-
 
 class MatchRateDataset(Dataset):
     def __init__(self, samples, tokenizer, processor=None, audio_locator="<|AUDIO|>"):
@@ -60,18 +62,18 @@ class MatchRateDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        item = self.samples[idx]
-        return item
+        return self.samples[idx]
 
     def collate_fn(self, batch):
         questions = [b["question"] for b in batch]
         ground_truths = [b.get("answer", "") for b in batch]
         task_names = [b.get("task_name", "") for b in batch]
         
-        # 1. Text Only Batching
-        # Apply chat template for text-only model
+        # Text Only Batching
         text_inputs = []
         for q in questions:
+            # Apply basic chat template if possible, or just raw
+            # DeSTA usually expects: <|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n
             if hasattr(self.tokenizer, 'apply_chat_template'):
                 try:
                     txt = self.tokenizer.apply_chat_template(
@@ -99,19 +101,12 @@ class MatchRateDataset(Dataset):
             "task_names": task_names,
             "input_ids_text": inputs_text.input_ids,
             "attention_mask_text": inputs_text.attention_mask,
-            "raw_items": batch  # For audio processing which needs raw audio array
+            "raw_items": batch
         }
 
-
 def process_audio_batch(model, processor, batch_items, device):
-    """Process audio batch for DeSTA model."""
     audio_arrays = [item["audio"]["array"] for item in batch_items]
     sampling_rates = [item["audio"]["sampling_rate"] for item in batch_items]
-    
-    # Resample if needed (assuming 16k target)
-    # Ideally use torchaudio but minimal dependency approach:
-    # If processor handles it, great. WhisperProcessor usually creates features directly.
-    # We assume input is reasonably close or processor handles it.
     
     input_features = processor(
         audio_arrays, 
@@ -121,29 +116,12 @@ def process_audio_batch(model, processor, batch_items, device):
     
     return input_features
 
-
-def prepare_desta_inputs(model, questions, device, audio_locator="<|AUDIO|>"):
-    """Prepare inputs for DeSTA (text + audio markers)."""
-    # DeSTA expects prompt with audio locator
-    prompts = [f"{audio_locator}\n{q}" for q in questions]
-    
-    tokenizer = model.llm_model.model.embed_tokens if hasattr(model.llm_model, 'model') else None 
-    # Actually we need the tokenizer used by the model. 
-    # DeSTA doesn't store tokenizer in model class usually, we need to load it.
-    # But we passed tokenizer to dataset. Use that.
-    
-    # We need to construct input_ids and find start_positions
-    # This is tricky without the exact tokenizer DeSTA uses.
-    # But we loaded tokenizer in main.
-    pass
-
-
 def run_match_rate_analysis(
     model_path: str,
     samples_per_task: int = 250,
     output_dir: str = "match_rate_results",
     device: str = "cuda",
-    hop_type: str = "single_hop",
+    hop_type: str = "single_hop", # single_hop or multi_hop
     batch_size: int = 32
 ) -> Dict:
     output_path = Path(output_dir)
@@ -153,15 +131,12 @@ def run_match_rate_analysis(
     desta_model = DeSTA25AudioModel.from_pretrained(model_path, device=device)
     desta_model.eval()
     
-    # Load LLM backbone (text-only)
-    llm_model_id = desta_model.config.llm_model_id # check config attribute name
-    # config.llm_model_id is standard in DeSTA
-    
+    llm_model_id = desta_model.config.llm_model_id
     logger.info(f"Loading LLM backbone: {llm_model_id}")
     tokenizer = AutoTokenizer.from_pretrained(llm_model_id, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        
+    
     llm_model = AutoModelForCausalLM.from_pretrained(
         llm_model_id,
         torch_dtype=torch.bfloat16,
@@ -169,26 +144,37 @@ def run_match_rate_analysis(
     )
     llm_model.eval()
     
-    # Audio Processor
     processor = AutoProcessor.from_pretrained(desta_model.config.encoder_model_id)
     
     # Prepare Data
     all_samples = []
-    tasks = SAKURA_TASKS[hop_type]
-    hop_prefix = "single_" if hop_type == "single_hop" else "multi_"
+    
+    hop_key_instruction = "single_instruction" if hop_type == "single_hop" else "multi_instruction"
+    hop_key_answer = "single_answer" if hop_type == "single_hop" else "multi_answer"
 
-    for task_name in tasks:
-        dataset_name = f"{hop_prefix}{task_name}"
+    for task_name, dataset_id in SAKURA_TASKS.items():
         try:
-            ds = load_dataset(SAKURA_HUB_ID, dataset_name, split="test")
-            # Subsample
+            ds = load_dataset(dataset_id, split="test")
             indices = np.random.choice(len(ds), min(samples_per_task, len(ds)), replace=False)
             for idx in indices:
                 item = ds[int(idx)]
-                item["task_name"] = task_name
-                all_samples.append(item)
+                
+                q = item.get(hop_key_instruction)
+                a = item.get(hop_key_answer)
+                
+                if q and a:
+                    # Create a consolidated item dict
+                    sample = {
+                        "question": q,
+                        "answer": a,
+                        "audio": item["audio"], # Keep raw audio dict
+                        "task_name": task_name,
+                        "id": f"{task_name}_{idx}"
+                    }
+                    all_samples.append(sample)
+                    
         except Exception as e:
-            logger.warning(f"Failed to load {dataset_name}: {e}")
+            logger.warning(f"Failed to load {dataset_id}: {e}")
 
     dataset = MatchRateDataset(all_samples, tokenizer, processor)
     dataloader = DataLoader(
@@ -199,14 +185,13 @@ def run_match_rate_analysis(
     )
 
     results = []
-    task_stats = {}
     
-    logger.info(f"Running inference on {len(all_samples)} samples (Batch {batch_size})...")
+    logger.info(f"Running inference on {len(all_samples)} samples...")
     
     for batch in tqdm(dataloader, desc="Processing"):
         questions = batch["questions"]
         
-        # 1. Text-Only Inference (Batched)
+        # 1. Text-Only Inference
         input_ids_text = batch["input_ids_text"].to(device)
         attention_mask_text = batch["attention_mask_text"].to(device)
         
@@ -218,24 +203,14 @@ def run_match_rate_analysis(
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id
             )
+        preds_text = tokenizer.batch_decode(outputs_text[:, input_ids_text.shape[1]:], skip_special_tokens=True)
             
-        preds_text = []
-        for i, out in enumerate(outputs_text):
-            pred = tokenizer.decode(out[input_ids_text.shape[1]:], skip_special_tokens=True).strip()
-            preds_text.append(pred)
-            
-        # 2. Audio Inference (Batched)
-        # Prepare Inputs
-        # Audio
+        # 2. Audio Inference
         input_features = process_audio_batch(desta_model, processor, batch["raw_items"], device)
         
-        # Text with <|AUDIO|>
         audio_locator = desta_model.config.audio_locator
         prompts_audio = [f"{audio_locator}\n{q}" for q in questions]
         
-        # Manual Tokenization for DeSTA to find start positions
-        # We need to tokenize such that we know where audio_locator is
-        # Simple approach: tokenize, find id of audio_locator
         inputs_audio = tokenizer(
             prompts_audio,
             return_tensors="pt",
@@ -243,47 +218,20 @@ def run_match_rate_analysis(
             truncation=True
         ).to(device)
         
-        # Find start positions (index of audio_locator)
-        # Assuming audio_locator is a single token or we find the first token of it?
-        # Usually it's added as a special token.
-        # Let's check token id:
-        # If it's not in tokenizer, might be issue. DeSTA usually adds it.
-        # But we loaded tokenizer from base LLM. We might need to add special tokens if not present.
-        
-        # Robust way: 
-        # Actually DeSTA model handles input preparation in `generate` if we use `chat`?
-        # No, `chat` is single item.
-        # We must construct `batch_start_positions`.
-        
-        # Hack: find the token ID corresponding to audio_locator
-        # If it's split, finding it is hard.
-        # Let's assume it's tokenized as special token if we added it.
-        # But we didn't add it to this tokenizer instance yet!
-        
-        # Add special token
         if audio_locator not in tokenizer.get_vocab():
             tokenizer.add_tokens([audio_locator], special_tokens=True)
-            # Resize model embeddings not needed if we don't train, but for valid id we might need it
-            # But DeSTA model already has resized embeddings.
-            
         audio_token_id = tokenizer.convert_tokens_to_ids(audio_locator)
         
         batch_start_positions = []
         for seq in inputs_audio.input_ids:
-            # Find index
             indices = (seq == audio_token_id).nonzero(as_tuple=True)[0]
             if len(indices) > 0:
                 batch_start_positions.append(indices[0].item())
             else:
-                batch_start_positions.append(0) # Fallback
+                batch_start_positions.append(0)
                 
-        # Now generate with DeSTA
         with torch.no_grad():
-            outputs_audio = desta_model.llm_model.generate( # call LLM generate directly? No, need DeSTA generate wrapper or forward hooks
-                # DeSTA overrides forward. If we call llm_model directly, it won't inject audio.
-                # Use DeSTA model generate.
-                # Does DeSTA inherit GenerationMixin? Yes via PreTrainedModel.
-                # But we need to pass arguments that forward expects.
+            outputs_audio = desta_model.llm_model.generate(
                 input_ids=inputs_audio.input_ids,
                 attention_mask=inputs_audio.attention_mask,
                 batch_features=input_features,
@@ -292,18 +240,13 @@ def run_match_rate_analysis(
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id
             )
+        preds_audio = tokenizer.batch_decode(outputs_audio[:, inputs_audio.input_ids.shape[1]:], skip_special_tokens=True)
             
-        preds_audio = []
-        for i, out in enumerate(outputs_audio):
-            pred = tokenizer.decode(out[inputs_audio.input_ids.shape[1]:], skip_special_tokens=True).strip()
-            preds_audio.append(pred)
-            
-        # Compare
         for i in range(len(questions)):
-            p_audio = preds_audio[i]
-            p_text = preds_text[i]
+            p_audio = preds_audio[i].strip()
+            p_text = preds_text[i].strip()
             
-            is_match = normalize_answer(p_audio) == normalize_answer(p_text) # Simple norm
+            is_match = normalize_answer(p_audio) == normalize_answer(p_text)
             
             results.append({
                 "task": batch["task_names"][i],
@@ -313,13 +256,6 @@ def run_match_rate_analysis(
                 "is_match": is_match
             })
 
-    # Summary logic (same as before)
-    # ...
-    
-    # Calculate stats
-    # ...
-    # (Simplified for brevity, similar to original script)
-    
     total = len(results)
     matches = sum(1 for r in results if r["is_match"])
     rate = matches / total if total > 0 else 0
@@ -327,10 +263,21 @@ def run_match_rate_analysis(
     summary = {
         "overall_match_rate": rate,
         "total": total,
-        "matches": matches
+        "matches": matches,
+        "per_task": {}
     }
     
-    # Save results
+    # Per task stats
+    task_groups = {}
+    for r in results:
+        t = r["task"]
+        if t not in task_groups: task_groups[t] = {"total": 0, "matches": 0}
+        task_groups[t]["total"] += 1
+        if r["is_match"]: task_groups[t]["matches"] += 1
+        
+    for t, s in task_groups.items():
+        summary["per_task"][t] = s["matches"] / s["total"] if s["total"] > 0 else 0
+    
     with open(output_path / "match_rate_summary.json", 'w') as f:
         json.dump(summary, f, indent=2)
         
@@ -338,8 +285,7 @@ def run_match_rate_analysis(
     return summary
 
 def normalize_answer(text):
-    import re
-    text = text.lower().strip()
+    text = str(text).lower().strip()
     text = re.sub(r'[^\w\s]', '', text)
     return text
 
@@ -350,6 +296,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output-dir", type=str, default="match_rate_results")
+    parser.add_argument("--hop-type", type=str, default="single_hop", choices=["single_hop", "multi_hop"])
     
     args = parser.parse_args()
     
@@ -358,7 +305,8 @@ def main():
         samples_per_task=args.samples_per_task,
         batch_size=args.batch_size,
         device=args.device,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        hop_type=args.hop_type
     )
 
 if __name__ == "__main__":
