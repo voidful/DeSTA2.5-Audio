@@ -36,7 +36,6 @@ conda activate desta25-qwen3
 
 cd /work/voidful2nlp/DeSTA2.5-Audio
 pip install "numpy<2.0" -q 2>/dev/null || true
-pip install torch torchaudio soundfile --upgrade --force-reinstall -q 2>/dev/null || true
 
 export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 export HF_HOME=/work/voidful2nlp/.cache/huggingface
@@ -51,13 +50,13 @@ dataset_config=DestaAQA-5M_4b_orca
 project=orca_r1_ablation
 name="R1v2_robust"
 exp_name=$(date +%y%m%d-%H%M)_${name}
-exp_dir="/work/voidful2nlp/desta/experiment_results/${exp_name}"
+exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
 mkdir -p ${exp_dir}
 mkdir -p ./slurm-report
 
 # ===== 啟動訓練 =====
-NUM_GPUS=2
+NUM_GPUS=3
 MASTER_PORT=$((29500 + RANDOM % 1000))
 
 torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
