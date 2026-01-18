@@ -39,7 +39,7 @@ export PYTHONNOUSERSITE=1
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-4B_ORCA
-dataset_config=DestaAQA-5M_local
+dataset_config=DestaAQA-5M_4b_orca
 
 project=orca_r1_ablation
 name="P2_ortho_only"
