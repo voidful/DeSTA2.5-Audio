@@ -34,8 +34,8 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 # 修改這裡的 MODEL 來測試不同模型
-MODEL_DESTA="voidful/desta25-qwen3-4b"
-MODEL_ORCA="voidful/desta25-4b-R2-full"  # 修改為實際的 ORCA 模型路徑
+MODEL_DESTA="voidful/QAQ_4b"
+MODEL_ORCA="voidful/desta25_4b_R1v2_robust"  # 修改為實際的 ORCA 模型路徑
 SAMPLES_PER_TASK=250
 
 OUTPUT_DIR="/work/voidful2nlp/desta/experiment_results/P0_1_match_rate"

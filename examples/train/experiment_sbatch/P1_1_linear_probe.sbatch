@@ -34,8 +34,8 @@ export TRANSFORMERS_CACHE=$HF_HOME
 export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
-MODEL_DESTA="voidful/desta25-qwen3-4b"
-MODEL_ORCA="voidful/desta25-4b-R2-full"  # 修改為實際的 ORCA 模型路徑
+MODEL_DESTA="voidful/QAQ_4b"
+MODEL_ORCA="voidful/desta25_4b_R1v2_robust"
 SAMPLES=1000
 CV_FOLDS=5
 
