@@ -29,6 +29,9 @@ source activate desta25 2>/dev/null || conda activate desta25 2>/dev/null || tru
 conda activate desta25-qwen3
 
 cd /work/voidful2nlp/DeSTA2.5-Audio
+# Manually remove corrupted installation
+SP_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
+rm -rf $SP_DIR/torch $SP_DIR/torch-* $SP_DIR/torchaudio $SP_DIR/torchaudio-* $SP_DIR/soundfile $SP_DIR/soundfile-*
 pip install torch torchaudio soundfile "numpy<2.0" --upgrade --ignore-installed
 
 export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
