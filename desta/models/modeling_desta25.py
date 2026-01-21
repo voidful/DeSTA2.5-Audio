@@ -459,7 +459,7 @@ class WhisperPerception(nn.Module):
             self.config.encoder_model_id, cache_dir=os.getenv("HF_HOME"))
 
         # Create connector based on mode
-        if config.connector_mode == "orca_r1":
+        if config.connector_mode in ("orca_r1", "orca_hybrid"):
             self.connector = GroupwiseOrthogonalConnector(config)
         else:
             self.connector = QformerConnector(config)
