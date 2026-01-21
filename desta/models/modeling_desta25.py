@@ -218,17 +218,29 @@ class GroupwiseOrthogonalConnector(nn.Module):
         # H1: Variational Grouping
         self.variational_enabled = getattr(config, 'variational_grouping_enabled', False)
         self.variational_kl_weight = getattr(config, 'variational_kl_weight', 0.01)
+        
+        # S1: Enhanced Variational Learning
+        self.s1_kl_annealing_enabled = getattr(config, 's1_kl_annealing_enabled', False)
+        self.s1_kl_annealing_warmup_steps = getattr(config, 's1_kl_annealing_warmup_steps', 2000)
+        self.s1_kl_annealing_cycle_steps = getattr(config, 's1_kl_annealing_cycle_steps', 0)
+        self.s1_free_bits = getattr(config, 's1_free_bits', 0.0)
+        self.s1_mu_invariance_enabled = getattr(config, 's1_mu_invariance_enabled', False)
+        
         if self.variational_enabled:
             # Project from d_llm to mu and logvar
             self.mu_proj = nn.Linear(d_llm, d_llm)
             self.logvar_proj = nn.Linear(d_llm, d_llm)
+        
+        # Cache for μ (used by S1 μ invariance)
+        self._cached_mu = None
         
 
     
     def forward(
         self, 
         encoder_hidden_states: List[torch.Tensor],
-        audio_attention_mask: Optional[torch.Tensor] = None
+        audio_attention_mask: Optional[torch.Tensor] = None,
+        global_step: Optional[int] = None
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass of GroupwiseOrthogonalConnector.
@@ -315,7 +327,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
         # Compute group losses
         group_losses = self._compute_group_losses(all_group_tokens, group_centroids)
         
-        # H1: Variational Grouping - Reparameterization and KL Loss
+        # H1/S1: Variational Grouping - Reparameterization and KL Loss with Enhanced Training
         if self.variational_enabled:
             # Predict mu and logvar from global_tokens
             mu = self.mu_proj(global_tokens)  # [B, total_queries, d_llm]
@@ -329,15 +341,61 @@ class GroupwiseOrthogonalConnector(nn.Module):
             else:
                 z = mu  # Use mean at inference
             
-            # KL Divergence: D_KL(q(z|x) || N(0,I))
-            # = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-            kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-            kl_loss = kl_loss / (z.shape[0] * z.shape[1])  # Normalize by batch and tokens
-            group_losses['L_kl'] = kl_loss * self.variational_kl_weight
+            # KL Divergence per dimension: D_KL(q(z|x) || N(0,I))
+            # = -0.5 * (1 + log(sigma^2) - mu^2 - sigma^2) per dimension
+            kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+            
+            # S1: Free Bits - clamp minimum KL per dimension to prevent σ collapse
+            if self.s1_free_bits > 0:
+                kl_per_dim = torch.clamp(kl_per_dim, min=self.s1_free_bits)
+            
+            # Aggregate KL loss (normalized by batch and tokens)
+            kl_loss = kl_per_dim.sum() / (z.shape[0] * z.shape[1] * z.shape[2])
+            
+            # S1: KL Annealing - compute weight based on global_step
+            kl_weight = self._get_annealed_kl_weight(global_step)
+            group_losses['L_kl'] = kl_loss * kl_weight
+            
+            # Log effective KL weight for debugging
+            if self.training:
+                group_losses['kl_weight_effective'] = torch.tensor(kl_weight, device=z.device)
+            
+            # S1: Cache μ for contrastive invariance loss (computed in main model)
+            if self.training and self.s1_mu_invariance_enabled:
+                self._cached_mu = mu
             
             return z, group_losses
         
         return global_tokens, group_losses
+    
+    def _get_annealed_kl_weight(self, global_step: Optional[int] = None) -> float:
+        """
+        Compute KL weight with optional linear warmup and cyclical annealing.
+        
+        S1 Enhancement:
+        - Linear warmup: Gradually increase KL weight from 0 to target over warmup_steps
+        - Cyclical annealing: Repeat warmup pattern every cycle_steps (if > 0)
+        
+        This prevents early posterior collapse by letting the model learn reconstruction first.
+        """
+        base_weight = self.variational_kl_weight
+        
+        if not self.s1_kl_annealing_enabled:
+            return base_weight
+        
+        if global_step is None:
+            return base_weight
+        
+        warmup = self.s1_kl_annealing_warmup_steps
+        cycle = self.s1_kl_annealing_cycle_steps
+        
+        if cycle > 0:
+            # Cyclical annealing: repeating warmup pattern
+            step_in_cycle = global_step % cycle
+            return base_weight * min(1.0, step_in_cycle / max(warmup, 1))
+        else:
+            # Linear warmup only
+            return base_weight * min(1.0, global_step / max(warmup, 1))
     
     def _compute_group_losses(
         self, 
@@ -412,7 +470,7 @@ class WhisperPerception(nn.Module):
 
 
 
-    def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, **kwargs) -> Union[Tuple[torch.Tensor, List[int]], Tuple[torch.Tensor, torch.Tensor, List[int]]]:
+    def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, global_step: Optional[int] = None, **kwargs) -> Union[Tuple[torch.Tensor, List[int]], Tuple[torch.Tensor, torch.Tensor, List[int]]]:
         """
         Forward pass of the WhisperPerception.
 
@@ -427,7 +485,7 @@ class WhisperPerception(nn.Module):
         """
         bs = input_features.size(0)
 
-        result = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list)
+        result = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list, global_step=global_step)
         
         if self.config.connector_mode == "orca_hybrid":
             # Check if we got a tuple (tokens, loss) or just tokens
@@ -454,7 +512,7 @@ class WhisperPerception(nn.Module):
             return audio_features, speech_feature_lengths
 
 
-    def forward_whisper(self, input_features, attention_mask=None, transcription_embeddings_list=None, **kwargs):
+    def forward_whisper(self, input_features, attention_mask=None, transcription_embeddings_list=None, global_step=None, **kwargs):
         """
         Forward through Whisper encoder layers.
         """
@@ -551,7 +609,8 @@ class WhisperPerception(nn.Module):
                 all_layer_outputs.append(hidden_states)
             
             # Pass all layer outputs to GroupwiseOrthogonalConnector
-            global_tokens, group_losses = self.connector(all_layer_outputs)
+            # S1: Pass global_step for KL annealing
+            global_tokens, group_losses = self.connector(all_layer_outputs, global_step=global_step)
             return global_tokens, group_losses
 
         else:
@@ -588,6 +647,16 @@ class DeSTA25Config(PretrainedConfig):
                  
                  # P1: ASR Robustness configuration
                  asr_dropout_prob=0.0,
+                 
+                 # S1: Enhanced Variational Learning configuration
+                 s1_kl_annealing_enabled=False,
+                 s1_kl_annealing_warmup_steps=2000,
+                 s1_kl_annealing_cycle_steps=0,  # 0 = no cycling, just linear warmup
+                 s1_free_bits=0.0,  # Minimum KL per dimension to prevent σ collapse
+                 s1_mu_invariance_enabled=False,  # Enable μ invariance loss
+                 s1_mu_invariance_weight=0.1,     # Weight for μ invariance loss
+                 s1_augment_freq_mask=0.1,        # SpecAugment frequency mask ratio
+                 s1_augment_time_mask=0.1,        # SpecAugment time mask ratio
                  
                  # Optimization flags
                  use_flash_attention=True,
@@ -627,6 +696,16 @@ class DeSTA25Config(PretrainedConfig):
         
         # P1: ASR Dropout
         self.asr_dropout_prob = asr_dropout_prob
+        
+        # S1: Enhanced Variational Learning
+        self.s1_kl_annealing_enabled = s1_kl_annealing_enabled
+        self.s1_kl_annealing_warmup_steps = s1_kl_annealing_warmup_steps
+        self.s1_kl_annealing_cycle_steps = s1_kl_annealing_cycle_steps
+        self.s1_free_bits = s1_free_bits
+        self.s1_mu_invariance_enabled = s1_mu_invariance_enabled
+        self.s1_mu_invariance_weight = s1_mu_invariance_weight
+        self.s1_augment_freq_mask = s1_augment_freq_mask
+        self.s1_augment_time_mask = s1_augment_time_mask
 
         self.info = "ORCA-R1: Acoustic-First Audio-LLM"
 
@@ -686,6 +765,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 batch_transcription_ids,
                 batch_start_positions,
                 labels=None,
+                global_step=None,  # S1: For KL annealing
                 **kwargs):
         
         # Prepare inputs, which handles both ORCA and non-ORCA paths
@@ -694,7 +774,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             attention_mask=attention_mask, 
             batch_features=batch_features,
             batch_transcription_ids=batch_transcription_ids, 
-            batch_start_positions=batch_start_positions
+            batch_start_positions=batch_start_positions,
+            global_step=global_step  # S1: Pass global_step
         )
         
         # Handle ORCA-R1 mode
@@ -757,6 +838,29 @@ class DeSTA25AudioModel(PreTrainedModel):
                 orca_total += loss_dpo.item()
                 orca_loss_log["L_dpo"] = loss_dpo.item()
             
+            # === S1: Contrastive μ Invariance Loss ===
+            # Force μ(x) ≈ μ(x_aug) to make μ encode semantic-invariant information
+            if getattr(self.config, 's1_mu_invariance_enabled', False) and self.training:
+                # Get cached μ from original forward
+                mu_orig = getattr(self.perception.connector, '_cached_mu', None)
+                
+                if mu_orig is not None:
+                    # Apply SpecAugment to mel features and forward again
+                    aug_features = self._apply_spec_augment(batch_features.clone())
+                    
+                    # Forward augmented features through perception
+                    with torch.no_grad():
+                        # We only need μ, not the full forward
+                        mu_aug = self._get_mu_from_features(aug_features, batch_transcription_ids)
+                    
+                    # L_mu_inv: MSE loss to encourage μ invariance
+                    L_mu_inv = F.mse_loss(mu_orig, mu_aug.detach())
+                    weight = getattr(self.config, 's1_mu_invariance_weight', 0.1)
+                    
+                    outputs.loss = outputs.loss + L_mu_inv * weight
+                    orca_total += (L_mu_inv.item() * weight)
+                    orca_loss_log["L_mu_inv"] = L_mu_inv.item()
+            
             # === P1: ASR Dropout (Robustness) ===
             # Note: This is applied during training in prepare_inputs_for_llm if supported,
             # or we can apply it to transcription embeddings here if we had access to them.
@@ -788,7 +892,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                                attention_mask,
                                batch_features,
                                batch_transcription_ids,
-                               batch_start_positions
+                               batch_start_positions,
+                               global_step=None  # S1: For KL annealing
         ):
         """
         Prepare the embeddings input for the LLM.
@@ -828,8 +933,10 @@ class DeSTA25AudioModel(PreTrainedModel):
                 transcription_embeddings_list.append(transcription_embeddings)
 
         # Forward speech encoder and connector
+        # S1: Pass global_step for KL annealing
         perception_output = self.perception(
-            input_features=batch_features, transcription_embeddings_list=transcription_embeddings_list
+            input_features=batch_features, transcription_embeddings_list=transcription_embeddings_list,
+            global_step=global_step
         )
         
         # Handle ORCA mode output - check based on tuple length or connector_mode
@@ -1100,6 +1207,69 @@ class DeSTA25AudioModel(PreTrainedModel):
                 losses["sim_target"] = sim_target.mean()
         
         return losses
+    
+    def _apply_spec_augment(self, mel_features: torch.Tensor) -> torch.Tensor:
+        """
+        Apply SpecAugment-style augmentation to mel spectrograms.
+        
+        Args:
+            mel_features: [B, F, T] mel spectrogram features
+            
+        Returns:
+            Augmented mel features with same shape
+        """
+        B, F, T = mel_features.shape
+        aug_features = mel_features.clone()
+        
+        freq_mask_ratio = getattr(self.config, 's1_augment_freq_mask', 0.1)
+        time_mask_ratio = getattr(self.config, 's1_augment_time_mask', 0.1)
+        
+        # Frequency masking
+        freq_mask_size = max(1, int(F * freq_mask_ratio))
+        freq_start = torch.randint(0, max(1, F - freq_mask_size), (B,), device=mel_features.device)
+        for b in range(B):
+            end_idx = min(freq_start[b] + freq_mask_size, F)
+            aug_features[b, freq_start[b]:end_idx, :] = 0
+        
+        # Time masking
+        time_mask_size = max(1, int(T * time_mask_ratio))
+        time_start = torch.randint(0, max(1, T - time_mask_size), (B,), device=mel_features.device)
+        for b in range(B):
+            end_idx = min(time_start[b] + time_mask_size, T)
+            aug_features[b, :, time_start[b]:end_idx] = 0
+        
+        return aug_features
+    
+    def _get_mu_from_features(self, batch_features: torch.Tensor, batch_transcription_ids: List) -> torch.Tensor:
+        """
+        Get μ (mean) from audio features without full forward pass.
+        
+        Used for S1 μ invariance loss computation.
+        
+        Args:
+            batch_features: [B, F, T] mel spectrogram features
+            batch_transcription_ids: List of transcription token ids
+            
+        Returns:
+            μ tensor from variational encoding
+        """
+        # Get transcription embeddings
+        device = next(self.llm_model.parameters()).device
+        transcription_embeddings_list = []
+        for trans_ids in batch_transcription_ids:
+            trans_ids = trans_ids.squeeze(0).to(device)
+            transcription_embeddings = self.llm_model.model.embed_tokens(trans_ids)
+            transcription_embeddings_list.append(transcription_embeddings)
+        
+        # Forward through perception (connector will cache μ)
+        self.perception(
+            input_features=batch_features,
+            transcription_embeddings_list=transcription_embeddings_list,
+            global_step=None  # Don't need annealing for augmented pass
+        )
+        
+        # Return the cached μ
+        return self.perception.connector._cached_mu
     
     def _get_target_log_probs(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """

@@ -53,6 +53,9 @@ class DeSTA25Trainer(Trainer):
             zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
             return (zero_loss, None) if return_outputs else zero_loss
         
+        # S1: Inject global_step for KL annealing
+        inputs["global_step"] = self.state.global_step
+        
         outputs = model(**inputs)
         lm_loss = outputs.loss
         total_loss = lm_loss
