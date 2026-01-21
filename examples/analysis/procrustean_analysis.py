@@ -14,8 +14,8 @@ Analyses:
 # ============================================================
 # 1. 設定 (請修改這裡)
 # ============================================================
-BASELINE_MODEL = "DeSTA-ntu/DeSTA2-Qwen2.5-1.5B"  # 你的 baseline model
-ORCA_MODEL = "DeSTA-ntu/DeSTA2-Qwen2.5-1.5B-ORCA"  # 你的 ORCA model
+BASELINE_MODEL = "voidful/QAQ_4b"
+ORCA_MODEL = "voidful/desta25_4b_R2_full"
 NUM_SAMPLES = 100  # 分析的樣本數
 OUTPUT_DIR = "./procrustean_analysis"
 
@@ -88,12 +88,19 @@ class ProcrusteanAnalyzer:
         self.orca_model = None
     
     def load_model(self, model_id: str):
-        """Load a DeSTA model."""
+        """Load a DeSTA model with processor."""
         from desta.models.modeling_desta25 import DeSTA25AudioModel
+        from transformers import AutoFeatureExtractor
+        
         print(f"🔄 Loading model: {model_id}")
         model = DeSTA25AudioModel.from_pretrained(model_id)
         model.to(self.device)
         model.eval()
+        
+        # Load processor separately
+        encoder_model_id = getattr(model.config, 'encoder_model_id', 'openai/whisper-large-v3')
+        model.processor = AutoFeatureExtractor.from_pretrained(encoder_model_id)
+        
         print(f"✅ Loaded: {model_id}")
         return model
     
