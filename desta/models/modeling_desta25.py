@@ -334,12 +334,14 @@ class GroupwiseOrthogonalConnector(nn.Module):
             logvar = self.logvar_proj(global_tokens)  # [B, total_queries, d_llm]
             
             # Reparameterization trick
+            std = torch.exp(0.5 * logvar)
             if self.training:
-                std = torch.exp(0.5 * logvar)
                 eps = torch.randn_like(std)
                 z = mu + eps * std
             else:
-                z = mu  # Use mean at inference
+                # Inference: use μ + σ to preserve acoustic info in σ
+                # (μ = semantic, σ = acoustic details)
+                z = mu + std
             
             # KL Divergence per dimension: D_KL(q(z|x) || N(0,I))
             # = -0.5 * (1 + log(sigma^2) - mu^2 - sigma^2) per dimension
