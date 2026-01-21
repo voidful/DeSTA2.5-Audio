@@ -178,14 +178,27 @@ def extract_qwen2_audio_embeddings(model, audio_samples, device) -> Dict[str, to
                 )
                 input_features = inputs.input_features.to(device).to(model.dtype)
                 
-                # Get audio encoder outputs directly from audio_tower
-                audio_tower = model.model.audio_tower
-                audio_embeds = audio_tower(input_features)
+                # Get audio encoder outputs - try different attribute paths
+                audio_tower = None
+                for attr_path in ['audio_tower', 'audio_encoder', 'encoder']:
+                    if hasattr(model, attr_path):
+                        audio_tower = getattr(model, attr_path)
+                        break
                 
-                if hasattr(audio_embeds, 'last_hidden_state'):
-                    audio_embeds = audio_embeds.last_hidden_state
+                if audio_tower is None:
+                    # Try to find it in submodules
+                    for name, module in model.named_children():
+                        if 'audio' in name.lower():
+                            audio_tower = module
+                            break
                 
-                embeddings['audio_tokens'].append(audio_embeds.float().cpu())
+                if audio_tower is not None:
+                    audio_embeds = audio_tower(input_features)
+                    if hasattr(audio_embeds, 'last_hidden_state'):
+                        audio_embeds = audio_embeds.last_hidden_state
+                    embeddings['audio_tokens'].append(audio_embeds.float().cpu())
+                else:
+                    print(f"⚠️ Could not find audio tower. Available: {[n for n, _ in model.named_children()]}")
                 
         except Exception as e:
             print(f"⚠️ Error: {e}")
