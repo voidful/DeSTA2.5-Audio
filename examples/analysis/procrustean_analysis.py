@@ -165,20 +165,35 @@ def extract_qwen2_audio_embeddings(model, audio_samples, device) -> Dict[str, to
                     import librosa
                     audio_array = librosa.resample(audio_array, orig_sr=sr, target_sr=16000)
                 
-                # Qwen2-Audio uses different input format
+                # Qwen2-Audio requires both text and audio
+                # Use a dummy conversation format
+                conversation = [
+                    {"role": "user", "content": [
+                        {"type": "audio", "audio_url": "dummy"},
+                        {"type": "text", "text": "Describe this audio."},
+                    ]}
+                ]
+                text = model.processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+                
                 inputs = model.processor(
+                    text=text,
                     audios=[audio_array],
                     sampling_rate=16000,
-                    return_tensors="pt"
+                    return_tensors="pt",
+                    padding=True
                 )
-                inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+                inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
                 
-                # Get audio encoder outputs
-                audio_embeds = model.model.audio_tower(inputs.get("input_features"))
-                if hasattr(audio_embeds, 'last_hidden_state'):
-                    audio_embeds = audio_embeds.last_hidden_state
-                
-                embeddings['audio_tokens'].append(audio_embeds.float().cpu())
+                # Get audio encoder outputs directly
+                if hasattr(model, 'audio_tower') or hasattr(model.model, 'audio_tower'):
+                    audio_tower = getattr(model, 'audio_tower', None) or model.model.audio_tower
+                    # Get input_features for audio
+                    input_features = inputs.get("input_features")
+                    if input_features is not None:
+                        audio_embeds = audio_tower(input_features)
+                        if hasattr(audio_embeds, 'last_hidden_state'):
+                            audio_embeds = audio_embeds.last_hidden_state
+                        embeddings['audio_tokens'].append(audio_embeds.float().cpu())
                 
         except Exception as e:
             print(f"⚠️ Error: {e}")
