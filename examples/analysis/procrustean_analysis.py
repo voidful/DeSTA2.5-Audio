@@ -348,9 +348,16 @@ class ProcrusteanAnalyzer:
         # Summary
         self.print_summary()
         
-        # Save results
+        # Save results (convert numpy floats to Python floats)
+        def convert_floats(obj):
+            if isinstance(obj, dict):
+                return {k: convert_floats(v) for k, v in obj.items()}
+            elif isinstance(obj, (np.floating, np.float32, np.float64)):
+                return float(obj)
+            return obj
+        
         with open(self.output_dir / "results.json", "w") as f:
-            json.dump(self.results, f, indent=2)
+            json.dump(convert_floats(self.results), f, indent=2)
         print(f"\n💾 Results saved to: {self.output_dir}")
         
         return self.results
