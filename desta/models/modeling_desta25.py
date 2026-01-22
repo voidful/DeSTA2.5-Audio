@@ -225,6 +225,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
         self.s1_kl_annealing_cycle_steps = getattr(config, 's1_kl_annealing_cycle_steps', 0)
         self.s1_free_bits = getattr(config, 's1_free_bits', 0.0)
         self.s1_mu_invariance_enabled = getattr(config, 's1_mu_invariance_enabled', False)
+        self.s1_inference_alpha = getattr(config, 's1_inference_alpha', 0.5)  # σ scaling for inference
         
         if self.variational_enabled:
             # Project from d_llm to mu and logvar
@@ -335,13 +336,13 @@ class GroupwiseOrthogonalConnector(nn.Module):
             
             # Reparameterization trick
             std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
             if self.training:
-                eps = torch.randn_like(std)
                 z = mu + eps * std
             else:
-                # Inference: use μ + σ to preserve acoustic info in σ
-                # (μ = semantic, σ = acoustic details)
-                z = mu + std
+                # Inference: use z = μ + α σ ⊙ ε for stochastic sampling
+                # α controls variance injection (α=0 → deterministic, α=1 → full sampling)
+                z = mu + self.s1_inference_alpha * std * eps
             
             # KL Divergence per dimension: D_KL(q(z|x) || N(0,I))
             # = -0.5 * (1 + log(sigma^2) - mu^2 - sigma^2) per dimension
@@ -657,6 +658,7 @@ class DeSTA25Config(PretrainedConfig):
                  s1_free_bits=0.0,  # Minimum KL per dimension to prevent σ collapse
                  s1_mu_invariance_enabled=False,  # Enable μ invariance loss
                  s1_mu_invariance_weight=0.1,     # Weight for μ invariance loss
+                 s1_inference_alpha=0.5,          # σ scaling for inference (0=deterministic, 1=full sampling)
                  s1_augment_freq_mask=0.1,        # SpecAugment frequency mask ratio
                  s1_augment_time_mask=0.1,        # SpecAugment time mask ratio
                  
@@ -706,6 +708,7 @@ class DeSTA25Config(PretrainedConfig):
         self.s1_free_bits = s1_free_bits
         self.s1_mu_invariance_enabled = s1_mu_invariance_enabled
         self.s1_mu_invariance_weight = s1_mu_invariance_weight
+        self.s1_inference_alpha = s1_inference_alpha
         self.s1_augment_freq_mask = s1_augment_freq_mask
         self.s1_augment_time_mask = s1_augment_time_mask
 
