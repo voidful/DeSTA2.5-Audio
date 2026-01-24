@@ -42,7 +42,7 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-4B  # 使用標準 Q-Former 配置 (不是 ORCA)
+config=desta25_qwen3-4B_Qformer6L  # 標準 Q-Former 6層配置
 dataset_config=DestaAQA-5M_4b_orca_full  # 使用完整數據集
 
 project=orca_r1_ablation
@@ -64,11 +64,7 @@ torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
     +dataset=${dataset_config} \
     ++exp_dir=${exp_dir} \
     project=${project} \
-    name=${name} \
-    ++model.connector_mode=qformer_1 \
-    ++model.modality_dpo_enabled=false \
-    ++model.variational_grouping_enabled=false \
-    ++model.asr_dropout_prob=0.0
+    name=${name}
 
 # ===== 上傳到 HuggingFace =====
 echo 'Training complete. Uploading to HuggingFace...'
