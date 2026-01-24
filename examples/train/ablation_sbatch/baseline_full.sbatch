@@ -4,7 +4,7 @@
 #SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=6
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
@@ -54,7 +54,7 @@ mkdir -p ${exp_dir}
 mkdir -p ./slurm-report
 
 # ===== 啟動訓練 =====
-NUM_GPUS=6
+NUM_GPUS=4
 MASTER_PORT=$((29500 + RANDOM % 1000))
 
 torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} \
