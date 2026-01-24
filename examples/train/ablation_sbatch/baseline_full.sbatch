@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=baseline_full
+#SBATCH --job-name=S1_4
 #SBATCH --partition=normal
-#SBATCH --account=MST114563
+#SBATCH --account=MST111038
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=2
-#SBATCH --cpus-per-task=24
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH --time=48:00:00
 #SBATCH --exclude=hgpn21
