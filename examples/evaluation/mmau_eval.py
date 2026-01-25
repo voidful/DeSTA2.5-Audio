@@ -141,7 +141,19 @@ def string_match(answer, prediction, choices):
 
     return cond1 and cond2
 
-    return cond1 and cond2
+def build_prompt(instr, choices):
+    """
+    Standard robust prompt for MCQ.
+    """
+    if choices and len(choices) > 0:
+        cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
+        return (
+            f"Question: {instr.strip()}\n"
+            f"Options:\n{cs}\n\n"
+            "Final Answer: The correct answer is"
+        )
+    return f"Question: {instr.strip()}\n\nFinal Answer: The correct answer is"
+
 
 # =====================
 # DeSTA 推論
@@ -153,10 +165,10 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    system_prompt = "You are a helpful audio assistant. Select the correct option."
+    system_prompt = "You are a helpful audio assistant. Give a concise answer to the question based on the audio."
 
-    # Use robust prompt builder
-    prompt = build_prompt(item['question'], item['choices'])
+    # Build question with choices
+    prompt = build_prompt(item['question'], item.get('choices', []))
 
     messages = [
         {
@@ -179,7 +191,8 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
                 do_sample=False,
                 top_p=0.85,
                 temperature=0.0,
-                max_new_tokens=128,
+                max_new_tokens=64, # Reduced to force conciseness 
+                repetition_penalty=1.5 # Increased to prevent loops
             )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
@@ -190,14 +203,11 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         # 2) Extract answer following "The correct answer is:"
         match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
         if match:
-            cleaned_pred = match.group(1).strip()
+            pred = match.group(1).strip()
         else:
-            # Fallback: if no prefix found, just use the think-stripped version
-            cleaned_pred = pred_no_think
-            
-        # Remove surrounding quotes if any
-        cleaned_pred = cleaned_pred.strip('"').strip("'")
-        return cleaned_pred
+            pred = pred_no_think
+        
+        return pred.strip('"').strip("'")
     return str(pred)
 
 # =====================
