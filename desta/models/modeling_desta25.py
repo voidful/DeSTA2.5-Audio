@@ -37,7 +37,8 @@ def _prepare_audio_context_and_start_positions(
         result = []
         start_positions = []
         for x in token_list:
-            if x == audio_locator:
+            # Robust check for audio locator (handles tokenizer prefixes like Ġ<|AUDIO|>)
+            if audio_locator in x:
                 # start_positions.append(len(result))
                 transcription_size = transcription_size_list.pop(0)
                 audio_size = audio_size_list.pop(0)
