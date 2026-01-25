@@ -2077,9 +2077,19 @@ class DeSTA25AudioModel(PreTrainedModel):
             for i, transcription in zip(asr_indices, transcriptions):
                 all_transcriptions[i] = transcription.strip()
                     
-            transcription_size_list = [
-                len(self.tokenizer.tokenize(text, add_special_tokens=False)) for text in all_transcriptions
-            ]
+            # DEBUG: Print sizes
+            print(f"[DEBUG] connector_mode: {self.config.connector_mode}")
+            if self.config.connector_mode == 'orca_r1':
+                print(f"[DEBUG] config.orca_r1_num_groups: {getattr(self.config, 'orca_r1_num_groups', 'N/A')}")
+                print(f"[DEBUG] config.orca_r1_queries_per_group: {getattr(self.config, 'orca_r1_queries_per_group', 'N/A')}")
+            print(f"[DEBUG] Calculated audio_token_size: {audio_token_size}")
+
+            transcription_size_list = []
+            for i, text in enumerate(all_transcriptions):
+                tokenized_len = len(self.tokenizer.tokenize(text, add_special_tokens=False))
+                # encoded_len = self.tokenizer.encode(text, add_special_tokens=False, return_tensors="pt").size(1)
+                print(f"[DEBUG] Trans {i}: tokenized_len={tokenized_len}")
+                transcription_size_list.append(tokenized_len)
 
 
             audio_context_list = []
