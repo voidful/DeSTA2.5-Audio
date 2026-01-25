@@ -107,8 +107,11 @@ def build_prompt(instr, choices):
             "Answer the question directly and concisely."
         )
 
+
+
+
 # =====================
-# Scoring Logic (from mmau_evaluate.py)
+# Scoring Logic
 # =====================
 
 def string_match(answer, prediction, choices):
@@ -141,18 +144,40 @@ def string_match(answer, prediction, choices):
 
     return cond1 and cond2
 
-def build_prompt(instr, choices):
+def extract_answer_choice(response):
     """
-    Standard robust prompt for MCQ.
+    Extract answer choice (A/B/C/D) from model response.
     """
-    if choices and len(choices) > 0:
-        cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
-        return (
-            f"Question: {instr.strip()}\n"
-            f"Options:\n{cs}\n\n"
-            "Final Answer: The correct answer is"
-        )
-    return f"Question: {instr.strip()}\n\nFinal Answer: The correct answer is"
+    if not response:
+        return None
+    
+    response = response.strip().replace('\n', '')
+    
+    # Try first character
+    if response and response[0] in ['A', 'B', 'C', 'D']:
+        return response[0]
+    
+    # Try last character/second last
+    if len(response) > 1:
+        if response[-2] in ['A', 'B', 'C', 'D']:
+            return response[-2]
+        if response[-1] in ['A', 'B', 'C', 'D']:
+            return response[-1]
+    
+    # Try to find "Answer: X" or "(X)" patterns
+    patterns = [
+        r'answer[:\s]+([ABCD])',
+        r'([ABCD])\)',
+        r'\(([ABCD])\)',
+        r'option\s+([ABCD])',
+        r'correct answer is\s*([ABCD])',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, response, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    
+    return None
 
 
 # =====================
@@ -165,20 +190,16 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    # Match training format: "Question <|AUDIO|>" and NO system prompt
-    # system_prompt = "You are a helpful audio assistant. Give a concise answer to the question based on the audio."
-
     # Build question with choices
+    # Using the first build_prompt definition which has clear instructions
     prompt = build_prompt(item['question'], item.get('choices', []))
 
     messages = [
-        # {
-        #     "role": "system",
-        #     "content": system_prompt
-        # },
         {
             "role": "user",
-            "content": f"{prompt} <|AUDIO|>", # Audio at the end matches training
+            # Audio at the end matches training
+            # We append <|AUDIO|> to the prompt which already contains instructions
+            "content": f"{prompt} <|AUDIO|>", 
             "audios": [{
                 "audio": wav_path
             }]
@@ -192,23 +213,15 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
                 do_sample=False,
                 top_p=0.85,
                 temperature=0.0,
-                max_new_tokens=64, # Reduced to force conciseness 
-                repetition_penalty=1.5 # Increased to prevent loops
+                max_new_tokens=128, # Enough for some reasoning if needed
+                repetition_penalty=1.2
             )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
     if isinstance(pred, str):
         # 1) Clean thinking process
         pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
-        
-        # 2) Extract answer following "The correct answer is:"
-        match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
-        if match:
-            pred = match.group(1).strip()
-        else:
-            pred = pred_no_think
-        
-        return pred.strip('"').strip("'")
+        return pred_no_think
     return str(pred)
 
 # =====================
