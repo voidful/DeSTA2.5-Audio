@@ -2102,12 +2102,6 @@ class DeSTA25AudioModel(PreTrainedModel):
                 audio_context = audio_context.replace(self.audio_locator, f"<start_audio>{self.audio_locator}<end_audio>")
 
                 audio_context, start_positions = _prepare_audio_context_and_start_positions(
-
-                # <start_audio><|AUDIO|><end_audio> is a indicator used in the training stage
-                # We replace <|AUDIO|> with <start_audio><|AUDIO|><end_audio> here
-                audio_context = audio_context.replace(self.audio_locator, f"<start_audio>{self.audio_locator}<end_audio>")
-
-                audio_context, start_positions = _prepare_audio_context_and_start_positions(
                         token_list=self.tokenizer.tokenize(audio_context), 
                         audio_locator=self.audio_locator,
                         audio_size_list=audio_size_list,
