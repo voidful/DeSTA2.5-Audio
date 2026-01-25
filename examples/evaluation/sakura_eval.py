@@ -131,17 +131,20 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     question = item[instruction_key]
     choices = item.get("choices")
 
-    # remove System Prompt (Training does not use it)
-    # system_prompt = ...
-
+    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: "___" " where ___ is the exact choice from the list.'
+    
     # Use robust prompt builder
     prompt = build_prompt(question, choices)
 
     messages = [
         {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
             "role": "user",
             # Audio First: <|AUDIO|>\n\n{text}
-            "content": f"<|AUDIO|>\n\n{prompt.replace('<|AUDIO|>', '')}", 
+            "content": f"<|AUDIO|>\n\n{question}", # Simpler prompt construction might be better suited here if build_prompt is complex, but sticking to pattern
             "audios": [{
                 "audio": wav_path
             }]
@@ -150,18 +153,6 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if ACD_ENABLED:
-                # Use ACD for paralinguistic tasks
-                outputs = model.generate_with_acd(
-                    messages=messages,
-                    acd_alpha=ACD_ALPHA,
-                    do_sample=False,
-                    top_p=0.85,
-                    temperature=0.0,
-                    max_new_tokens=64, # Force conciseness
-                    repetition_penalty=1.5 # Prevent loops
-                )
-            else:
                 outputs = model.generate(
                     messages=messages,
                     do_sample=False,

@@ -539,11 +539,10 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         else:
              user_content = f"<|AUDIO|>\n\n{question.strip().replace('<|AUDIO|>', '')}"
     
-    # remove System Prompt (Training does not use it)
-    # system_prompt = ...
+    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: "___" " where ___ is the exact choice from the list.'
 
     messages = [
-        # {"role": "system", "content": system_prompt},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content, "audios": [{"audio": wav_path}]}
     ]
 

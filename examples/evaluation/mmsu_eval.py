@@ -147,13 +147,16 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    # remove System Prompt (Training does not use it)
-    # system_prompt = ...
+    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: "___" " where ___ is the exact choice from the list.'
 
     # Build question with choices
     prompt = build_prompt(item.get('question', ''), item.get('options', []))
 
     messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        },
         {
             "role": "user",
             # Audio First: <|AUDIO|>\n\n{text}
@@ -174,9 +177,20 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
     if isinstance(pred, str):
-        # Clean thinking process
+        # 1) Clean thinking process
         pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
-        return pred_no_think
+        
+        # 2) Extract answer following "The correct answer is:"
+        match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
+        if match:
+            cleaned_pred = match.group(1).strip()
+        else:
+            # Fallback: if no prefix found, just use the think-stripped version
+            cleaned_pred = pred_no_think
+            
+        # Remove surrounding quotes if any
+        cleaned_pred = cleaned_pred.strip('"').strip("'")
+        return cleaned_pred
     return str(pred)
 
 
