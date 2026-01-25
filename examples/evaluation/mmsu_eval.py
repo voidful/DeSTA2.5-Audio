@@ -156,8 +156,8 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     messages = [
         {
             "role": "user",
-            # Training Logic: "{text} <|AUDIO|>"
-            "content": f"{prompt.replace('<|AUDIO|>', '')} <|AUDIO|>", 
+            # Audio First: <|AUDIO|>\n\n{text}
+            "content": f"<|AUDIO|>\n\n{prompt.replace('<|AUDIO|>', '')}", 
             "audios": [{
                 "audio": wav_path
             }]

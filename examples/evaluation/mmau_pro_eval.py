@@ -535,9 +535,9 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
                     choice_text += ", "
             choice_text = choice_text.rstrip(", ")
             
-            user_content = f"{question.strip().replace('<|AUDIO|>', '')} {choice_text} <|AUDIO|>"
+            user_content = f"<|AUDIO|>\n\n{question.strip().replace('<|AUDIO|>', '')} {choice_text}"
         else:
-             user_content = f"{question.strip().replace('<|AUDIO|>', '')} <|AUDIO|>"
+             user_content = f"<|AUDIO|>\n\n{question.strip().replace('<|AUDIO|>', '')}"
     
     # remove System Prompt (Training does not use it)
     # system_prompt = ...
