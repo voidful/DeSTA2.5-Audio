@@ -1018,9 +1018,19 @@ class DeSTA25AudioModel(PreTrainedModel):
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
             
-            # # replace the input_embeds with the audio features
-            # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
-            inputs_embeds[text_batch_idx, audio_start_position:audio_start_position + audio_embeddings.size(0)] = audio_embeddings
+            # Safety check: calculate available placeholder space
+            seq_len = inputs_embeds.size(1)
+            available_space = seq_len - audio_start_position
+            target_len = audio_embeddings.size(0)
+            
+            # Truncate if audio_embeddings is too long
+            if target_len > available_space:
+                logging.warning(f"Audio embedding length {target_len} > available space {available_space}. Truncating.")
+                audio_embeddings = audio_embeddings[:available_space]
+                target_len = available_space
+            
+            target_slice = slice(audio_start_position, audio_start_position + target_len)
+            inputs_embeds[text_batch_idx, target_slice] = audio_embeddings
             
 
             # clean GPU memory
@@ -2074,7 +2084,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 all_transcriptions[i] = transcription.strip()
                     
             transcription_size_list = [
-                len(self.tokenizer.tokenize(text, add_special_tokens=False)) for text in all_transcriptions
+                len(self.tokenizer.encode(text, add_special_tokens=False)) for text in all_transcriptions
             ]
 
 
