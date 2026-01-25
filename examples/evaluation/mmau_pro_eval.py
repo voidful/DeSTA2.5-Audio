@@ -535,9 +535,9 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
                     choice_text += ", "
             choice_text = choice_text.rstrip(", ")
             
-            user_content = f"<|AUDIO|>\n\n{question.strip()} {choice_text}"
+            user_content = f"<|AUDIO|>\n\n{question.strip().replace('<|AUDIO|>', '')} {choice_text}"
         else:
-             user_content = f"<|AUDIO|>\n\n{question.strip()}"
+             user_content = f"<|AUDIO|>\n\n{question.strip().replace('<|AUDIO|>', '')}"
     
     # Reference System Prompt
     system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'

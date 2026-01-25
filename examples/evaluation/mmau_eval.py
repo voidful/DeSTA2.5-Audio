@@ -84,26 +84,25 @@ def write_wav_from_dataset_item(item, wav_path):
     return write_wav_from_array(y, sr, wav_path)
 
 def build_prompt(instr, choices):
-    """
-    Robust prompt construction consistently used across evals.
-    """
-    # Handle stringified choices if necessary
-    if isinstance(choices, str):
-        try:
-             choices = json.loads(choices)
-        except:
-             pass
-
-    if choices and len(choices) > 0:
-        cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
-        return (
-        return (
-            f"Question: {instr.strip()}\n"
-            "<|AUDIO|>\n"
-            f"Options:\n{cs}\n"
-            "Answer:"
-        )
-    return f"Question: {instr.strip()}\n<|AUDIO|>\nAnswer:"
+    # Reference Implementation format
+    prompt = f"{instr.strip()} "
+    prompt += "Choose from the following options: "
+    if choices:
+        # Handle stringified choices if necessary
+        if isinstance(choices, str):
+            try:
+                 choices = json.loads(choices)
+            except:
+                 pass
+        
+        for i, option in enumerate(choices):
+            prompt += f'"{option}"'
+            if i == len(choices) - 2:
+                prompt += " or "
+            else:
+                prompt += ", "
+    prompt = prompt.rstrip(", ")
+    return prompt
 
 
 
@@ -198,7 +197,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         {
             "role": "user",
             # Reference: <|AUDIO|>\n\n{question}
-            "content": f"<|AUDIO|>\n\n{prompt}", 
+            "content": f"<|AUDIO|>\n\n{prompt.replace('<|AUDIO|>', '')}", 
             "audios": [{
                 "audio": wav_path
             }]
