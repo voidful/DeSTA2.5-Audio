@@ -131,16 +131,17 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     # Use robust prompt builder
     prompt = build_prompt(question, choices)
 
-    system_prompt = "You are a helpful audio assistant. Select the correct option."
+    # Match training format: "Question <|AUDIO|>" and NO system prompt
+    # system_prompt = "You are a helpful audio assistant. Select the correct option."
 
     messages = [
-        {
-            "role": "system",
-            "content": system_prompt
-        },
+        # {
+        #     "role": "system",
+        #     "content": system_prompt
+        # },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n\n{prompt}",
+            "content": f"{prompt} <|AUDIO|>", # Audio at the end matches training
             "audios": [{
                 "audio": wav_path
             }]

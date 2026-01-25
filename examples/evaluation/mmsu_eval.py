@@ -144,19 +144,20 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    system_prompt = "You are a helpful audio assistant. Select the correct option."
+    # Match training format: "Question <|AUDIO|>" and NO system prompt
+    # system_prompt = "You are a helpful audio assistant. Select the correct option."
 
     # Build question with choices
     prompt = build_prompt(item.get('question', ''), item.get('options', []))
 
     messages = [
-        {
-            "role": "system",
-            "content": system_prompt
-        },
+        # {
+        #     "role": "system",
+        #     "content": system_prompt
+        # },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n\n{prompt}",
+            "content": f"{prompt} <|AUDIO|>", # Audio at the end matches training
             "audios": [{
                 "audio": wav_path
             }]

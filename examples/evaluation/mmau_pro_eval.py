@@ -512,13 +512,16 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
             choices = []
 
     # Build prompt based on category
+    # Build prompt based on category
     if category in ["open", "instruction following"]:
         # Open-ended or instruction following: direct question
-        system_prompt = "You are a helpful audio assistant. Focus on the audio and provide a helpful, complete answer."
-        user_content = f"<|AUDIO|>\n\nQuestion: {question.strip()}"
+        # Match training format: NO system prompt
+        # system_prompt = "You are a helpful audio assistant. Focus on the audio and provide a helpful, complete answer."
+        user_content = f"Question: {question.strip()} <|AUDIO|>"
     else:
         # Closed-ended (MCQ) alignment
-        system_prompt = "You are a helpful audio assistant. Select the correct option."
+        # Match training format: NO system prompt
+        # system_prompt = "You are a helpful audio assistant. Select the correct option."
         
         # Format choices robustly
         choice_text = ""
@@ -526,14 +529,25 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
             choice_text = "\nOptions:\n" + "\n".join([f'"{opt}"' for opt in choices])
         
         user_content = (
-            f"<|AUDIO|>\n\n"
             f"Question: {question.strip()}\n"
             f"{choice_text}\n\n"
-            "Answer with the text corresponding to the correct answer. The correct answer is"
+            "Answer with the text corresponding to the correct answer. The correct answer is <|AUDIO|>" 
+            # Note: Putting <|AUDIO|> at the very end might be tricky if "The correct answer is" expects immediate completion.
+            # But training was [Prompt] <|AUDIO|>.
+            # If Prompt includes "The correct answer is", then <|AUDIO|> comes AFTER it.
+            # Actually, training data usually is "Describe... <|AUDIO|>" -> Response "It is..."
+            # So <|AUDIO|> is roughly where the "thinking" happens or context is provided.
+            # Let's try appending it to the full prompt text.
+        )
+        # Re-doing user_content for MCQ to be safer
+        user_content = (
+             f"Question: {question.strip()}\n"
+             f"{choice_text}\n\n"
+             f"Answer with the text corresponding to the correct answer. The correct answer is <|AUDIO|>"
         )
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        # {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content}
     ]
 
