@@ -1532,7 +1532,6 @@ class DeSTA25AudioModel(PreTrainedModel):
                 temperature=temperature,
                 top_p=top_p,
                 max_new_tokens=max_new_tokens,
-                max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
                 **kwargs
             )
@@ -2154,7 +2153,6 @@ class DeSTA25AudioModel(PreTrainedModel):
                 pad_token_id=self.tokenizer.pad_token_id,
                 temperature=temperature,
                 top_p=top_p,
-                max_new_tokens=max_new_tokens,
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
                 **kwargs)
