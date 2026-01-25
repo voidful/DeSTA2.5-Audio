@@ -37,7 +37,8 @@ def _prepare_audio_context_and_start_positions(
         result = []
         start_positions = []
         for x in token_list:
-            if x == audio_locator:
+            # Robust check for audio locator (handles tokenizer prefixes like Ġ<|AUDIO|>)
+            if audio_locator in x:
                 # start_positions.append(len(result))
                 transcription_size = transcription_size_list.pop(0)
                 audio_size = audio_size_list.pop(0)
@@ -1025,7 +1026,6 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             # Truncate if audio_embeddings is too long
             if target_len > available_space:
-                logging.warning(f"Audio embedding length {target_len} > available space {available_space}. Truncating.")
                 audio_embeddings = audio_embeddings[:available_space]
                 target_len = available_space
             
@@ -1903,6 +1903,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                 tokenize=False,
                 add_generation_prompt=True,
             )
+            # Restore explicit wrapping for robustness (matches old working version)
+            audio_context = audio_context.replace(self.audio_locator, f"<start_audio>{self.audio_locator}<end_audio>")
 
             audio_context, start_positions = _prepare_audio_context_and_start_positions(
                 token_list=self.tokenizer.tokenize(audio_context), 
@@ -2084,7 +2086,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 all_transcriptions[i] = transcription.strip()
                     
             transcription_size_list = [
-                len(self.tokenizer.encode(text, add_special_tokens=False)) for text in all_transcriptions
+                len(self.tokenizer.tokenize(text, add_special_tokens=False)) for text in all_transcriptions
             ]
 
 
@@ -2096,6 +2098,10 @@ class DeSTA25AudioModel(PreTrainedModel):
                     tokenize=False,
                     add_generation_prompt=True,
                 )
+                # Restore explicit wrapping for robustness (matches old working version)
+                audio_context = audio_context.replace(self.audio_locator, f"<start_audio>{self.audio_locator}<end_audio>")
+
+                audio_context, start_positions = _prepare_audio_context_and_start_positions(
 
                 # <start_audio><|AUDIO|><end_audio> is a indicator used in the training stage
                 # We replace <|AUDIO|> with <start_audio><|AUDIO|><end_audio> here
