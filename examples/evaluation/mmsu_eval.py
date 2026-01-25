@@ -129,9 +129,9 @@ def build_prompt(question, options):
     choices_text = '\n'.join([f"({choice_labels[i]}) {opt}" for i, opt in enumerate(options[:4])])
     
     return (
-        f"Question: {question.strip()}\n"
-        f"Options:\n{choices_text}\n\n"
-        "Answer with the option letter and text corresponding to the correct answer."
+        f"Question: {question.strip()} <|AUDIO|>\n"
+        f"Options:\n{choices_text}\n"
+        "Answer with the option letter and text corresponding to the correct answer.\nAnswer:"
     )
 
 
@@ -158,7 +158,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         # },
         {
             "role": "user",
-            "content": f"{prompt} <|AUDIO|>\nAnswer:", # Audio at the end matches training, trigger added
+            "content": prompt, # Audio at the end matches training, trigger added
             "audios": [{
                 "audio": wav_path
             }]

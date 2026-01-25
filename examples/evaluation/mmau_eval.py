@@ -97,11 +97,11 @@ def build_prompt(instr, choices):
     if choices and len(choices) > 0:
         cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
         return (
-            f"Question: {instr.strip()}\n"
-            f"Options:\n{cs}\n\n"
-            "Answer with the option letter and text corresponding to the correct answer."
+            f"Question: {instr.strip()} <|AUDIO|>\n"
+            f"Options:\n{cs}\n"
+            "Answer with the option letter and text corresponding to the correct answer.\nAnswer:"
         )
-    return f"Question: {instr.strip()}\n\nAnswer the question directly and concisely."
+    return f"Question: {instr.strip()} <|AUDIO|>\nAnswer the question directly and concisely.\nAnswer:"
 
 
 
@@ -195,7 +195,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
             "role": "user",
             # Audio at the end matches training
             # Append \nAnswer: to force generation mode
-            "content": f"{prompt} <|AUDIO|>\nAnswer:", 
+            "content": prompt, 
             "audios": [{
                 "audio": wav_path
             }]
