@@ -517,7 +517,7 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         # Open-ended or instruction following: direct question
         # Match training format: NO system prompt
         # system_prompt = "You are a helpful audio assistant. Focus on the audio and provide a helpful, complete answer."
-        user_content = f"Question: {question.strip()} <|AUDIO|>\nAnswer:"
+        user_content = f"Question: {question.strip()}\n<|AUDIO|>\nAnswer:"
     else:
         # Closed-ended (MCQ) alignment
         # Match training format: NO system prompt
@@ -529,9 +529,9 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
             choice_text = "\nOptions:\n" + "\n".join([f'"{opt}"' for opt in choices])
         
         user_content = (
-             f"Question: {question.strip()} <|AUDIO|>\n"
-             f"{choice_text}\n\n"
-             "Answer with the text corresponding to the correct answer.\nAnswer:"
+             f"Question: {question.strip()}\n"
+             f"{choice_text}\n"
+             "<|AUDIO|>\nAnswer:"
         )
 
     messages = [

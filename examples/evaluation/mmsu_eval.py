@@ -129,9 +129,9 @@ def build_prompt(question, options):
     choices_text = '\n'.join([f"({choice_labels[i]}) {opt}" for i, opt in enumerate(options[:4])])
     
     return (
-        f"Question: {question.strip()} <|AUDIO|>\n"
+        f"Question: {question.strip()}\n"
         f"Options:\n{choices_text}\n"
-        "Answer with the option letter and text corresponding to the correct answer.\nAnswer:"
+        f"<|AUDIO|>\nAnswer:"
     )
 
 
