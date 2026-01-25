@@ -141,6 +141,8 @@ def string_match(answer, prediction, choices):
 
     return cond1 and cond2
 
+    return cond1 and cond2
+
 # =====================
 # DeSTA 推論
 # =====================
@@ -151,7 +153,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    system_prompt = "You are a helpful assistant."
+    system_prompt = "You are a helpful audio assistant. Select the correct option."
 
     # Use robust prompt builder
     prompt = build_prompt(item['question'], item['choices'])
@@ -177,7 +179,8 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
                 do_sample=False,
                 top_p=0.85,
                 temperature=0.0,
-                max_new_tokens=512
+                max_new_tokens=128,  # Reduce max tokens to prevent long hallucinations
+                repetition_penalty=1.2
             )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
@@ -300,6 +303,12 @@ def main():
     )
     model.to(device)
     model.eval()
+
+    # Enforce deterministic inference for evaluation
+    if hasattr(model.perception.connector, "s1_inference_alpha"):
+        model.perception.connector.s1_inference_alpha = 0.0
+        print(f"Forced deterministic inference: s1_inference_alpha = {model.perception.connector.s1_inference_alpha}")
+
 
     # 載入 Judge
     print(f"Loading Judge model {JUDGE_MODEL_ID}...")

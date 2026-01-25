@@ -1463,7 +1463,7 @@ class DeSTA25AudioModel(PreTrainedModel):
 
 
 
-    def _generate_step(self, inputs, pad_token_id, temperature=0.7, top_p=0.9, max_new_tokens=512, do_sample=True):
+    def _generate_step(self, inputs, pad_token_id, temperature=0.7, top_p=0.9, max_new_tokens=512, do_sample=True, **kwargs):
         input_ids = inputs["context_input_ids"] # only context inputs
         attention_mask = inputs["context_attention_mask"] # only context attention mask
         batch_start_positions = inputs["context_batch_start_positions"]
@@ -1531,7 +1531,9 @@ class DeSTA25AudioModel(PreTrainedModel):
                 temperature=temperature,
                 top_p=top_p,
                 max_new_tokens=max_new_tokens,
-                do_sample=do_sample
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                **kwargs
             )
         finally:
             # Clear local tokens after generation
@@ -2152,7 +2154,9 @@ class DeSTA25AudioModel(PreTrainedModel):
                 temperature=temperature,
                 top_p=top_p,
                 max_new_tokens=max_new_tokens,
-                do_sample=do_sample)
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                **kwargs)
 
             return GenerationOutput(
                 text=self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True),

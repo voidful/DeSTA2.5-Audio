@@ -98,14 +98,13 @@ def build_prompt(instr, choices):
     if choices and len(choices) > 0:
         cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
         return (
-            f"{instr.strip()}\n\n"
+            f"Question: {instr.strip()}\n"
             f"Options:\n{cs}\n\n"
-            "Answer with the option letter and text corresponding to the correct answer."
+            "Answer with the option letter and text corresponding to the correct answer. The correct answer is"
         )
     else:
-        # Fallback for open-ended or missing choices
         return (
-            f"{instr.strip()}\n\n"
+            f"Question: {instr.strip()}\n\n"
             "Answer the question directly and concisely."
         )
 
@@ -132,14 +131,16 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     # Use robust prompt builder
     prompt = build_prompt(question, choices)
 
+    system_prompt = "You are a helpful audio assistant. Select the correct option."
+
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant."
+            "content": system_prompt
         },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n{prompt}",
+            "content": f"<|AUDIO|>\n\n{prompt}",
             "audios": [{
                 "audio": wav_path
             }]
@@ -156,7 +157,8 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                     do_sample=False,
                     top_p=0.85,
                     temperature=0.0,
-                    max_new_tokens=512
+                    max_new_tokens=128,  # Reduce max tokens to avoid verbose hallucinations
+                    repetition_penalty=1.2
                 )
             else:
                 outputs = model.generate(
@@ -164,7 +166,8 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                     do_sample=False,
                     top_p=0.85,
                     temperature=0.0,
-                    max_new_tokens=512
+                    max_new_tokens=128,  # Reduce max tokens to avoid verbose hallucinations
+                    repetition_penalty=1.2
                 )
 
     pred = outputs.text
@@ -392,6 +395,11 @@ def main():
     )
     desta_model.to(device)
     desta_model.eval()
+
+    # Enforce deterministic inference for evaluation
+    if hasattr(desta_model.perception.connector, "s1_inference_alpha"):
+        desta_model.perception.connector.s1_inference_alpha = 0.0
+        print(f"Forced deterministic inference: s1_inference_alpha = {desta_model.perception.connector.s1_inference_alpha}")
 
     # 載入 Qwen 評審
     print("Loading Qwen judge model...")
