@@ -157,8 +157,7 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                     do_sample=False,
                     top_p=0.85,
                     temperature=0.0,
-                    max_new_tokens=128,  # Reduce max tokens to avoid verbose hallucinations
-                    repetition_penalty=1.2
+                    max_new_tokens=128,
                 )
             else:
                 outputs = model.generate(
@@ -166,8 +165,7 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                     do_sample=False,
                     top_p=0.85,
                     temperature=0.0,
-                    max_new_tokens=128,  # Reduce max tokens to avoid verbose hallucinations
-                    repetition_penalty=1.2
+                    max_new_tokens=128,
                 )
 
     pred = outputs.text
@@ -395,11 +393,6 @@ def main():
     )
     desta_model.to(device)
     desta_model.eval()
-
-    # Enforce deterministic inference for evaluation
-    if hasattr(desta_model.perception.connector, "s1_inference_alpha"):
-        desta_model.perception.connector.s1_inference_alpha = 0.0
-        print(f"Forced deterministic inference: s1_inference_alpha = {desta_model.perception.connector.s1_inference_alpha}")
 
     # 載入 Qwen 評審
     print("Loading Qwen judge model...")

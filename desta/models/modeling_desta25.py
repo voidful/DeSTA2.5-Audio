@@ -225,7 +225,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
         self.s1_kl_annealing_cycle_steps = getattr(config, 's1_kl_annealing_cycle_steps', 0)
         self.s1_free_bits = getattr(config, 's1_free_bits', 0.0)
         self.s1_mu_invariance_enabled = getattr(config, 's1_mu_invariance_enabled', False)
-        self.s1_inference_alpha = getattr(config, 's1_inference_alpha', 0.5)  # σ scaling for inference
+        # Default to 0.0 for deterministic inference (use mu)
+        self.s1_inference_alpha = getattr(config, 's1_inference_alpha', 0.0)  
         
         if self.variational_enabled:
             # Project from d_llm to mu and logvar
