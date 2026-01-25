@@ -36,9 +36,13 @@ def _prepare_audio_context_and_start_positions(
 
         result = []
         start_positions = []
+        print(f"[DEBUG] audio_locator: '{audio_locator}'")
+        # print(f"[DEBUG] token_list: {token_list}")
+        
         for x in token_list:
             # Robust check for audio locator (handles tokenizer prefixes like Ġ<|AUDIO|>)
             if x == audio_locator:
+                print(f"[DEBUG] FOUND audio_locator at match!")
                 # start_positions.append(len(result))
                 transcription_size = transcription_size_list.pop(0)
                 audio_size = audio_size_list.pop(0)
@@ -49,6 +53,9 @@ def _prepare_audio_context_and_start_positions(
                 result.extend([placeholder_token] * (transcription_size))
             else:
                 result.append(x)
+        
+        if len(start_positions) == 0:
+             print(f"[DEBUG] WARNING: No audio_locator found in token_list! {token_list}")
                 
         return result, start_positions
 
