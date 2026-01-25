@@ -552,9 +552,7 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
             outputs = model.generate(
                 messages=messages,
                 do_sample=False,
-                top_p=0.85,
-                temperature=0.0,
-                max_new_tokens=512 if category == "open" else 128,
+                max_new_tokens=512,
                 repetition_penalty=1.2
             )
 

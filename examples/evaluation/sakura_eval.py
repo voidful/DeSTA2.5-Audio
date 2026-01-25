@@ -169,9 +169,7 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                 outputs = model.generate(
                     messages=messages,
                     do_sample=False,
-                    top_p=0.85,
-                    temperature=0.0,
-                    max_new_tokens=64, # Force conciseness
+                    max_new_tokens=512,
                     repetition_penalty=1.5 # Prevent loops
                 )
 

@@ -206,13 +206,9 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            outputs = model.generate(
                 messages=messages,
                 do_sample=False,
-                top_p=0.85,
-                temperature=0.0,
-                max_new_tokens=128, # Enough for some reasoning if needed
-                repetition_penalty=1.2
+                max_new_tokens=512
             )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
