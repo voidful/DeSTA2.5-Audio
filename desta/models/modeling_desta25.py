@@ -552,7 +552,8 @@ class WhisperPerception(nn.Module):
                 
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    attention_mask=None,
+                    None,
+                    None,
                     output_attentions=None,
                 )
                 hidden_states = layer_outputs[0]
@@ -585,7 +586,8 @@ class WhisperPerception(nn.Module):
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    attention_mask=None,
+                    None,
+                    None,
                     output_attentions=None,
                 )
                 hidden_states = layer_outputs[0]
@@ -602,7 +604,8 @@ class WhisperPerception(nn.Module):
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    attention_mask=None,
+                    None,
+                    None,
                     output_attentions=None,
                 )
                 hidden_states = layer_outputs[0]

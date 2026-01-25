@@ -24,7 +24,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 # - Audio position scale: 5.0
 # - Losses: L_ortho_diversity + L_align_layerwise (simplified)
 
-DEFAULT_MODEL_ID = "voidful/QAQ_0.6b_orca_all"  # Update to your trained model
+DEFAULT_MODEL_ID = "voidful/desta25_4b_R2_full"  # Update to your trained model
 DATASET_ID = "lmms-lab/mmau"
 DEFAULT_SPLIT = "test_mini"
 TMP_WAV_PATH = "tmp_mmau_audio.wav"
