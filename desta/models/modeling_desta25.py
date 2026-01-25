@@ -35,6 +35,7 @@ def _prepare_audio_context_and_start_positions(
         assert len(audio_size_list) == len(transcription_size_list), f"audio_size_list and transcription_size_list must have the same length, audio_size_list: {audio_size_list}, transcription_size_list: {transcription_size_list}"
 
         result = []
+        start_positions = []
         for x in token_list:
             # Robust check for audio locator (handles tokenizer prefixes like Ġ<|AUDIO|>)
             if x == audio_locator:
