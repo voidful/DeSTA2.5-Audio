@@ -123,18 +123,19 @@ def check_answer(pred_choice, answer_index, options):
 
 def build_prompt(question, options):
     """
-    Build question with choices - using yuantuo666 format
+    Build question with choices - using reference format
     """
-    choice_labels = ['A', 'B', 'C', 'D']
-    choices_text = '\n'.join([f"({choice_labels[i]}) {opt}" for i, opt in enumerate(options[:4])])
-    
-    return (
-        f"Question: {question.strip()}\n"
-        f"<|AUDIO|>\n"
-        f"Options:\n{choices_text}\n"
-        f"Answer:"
-    )
-
+    prompt = f"{question.strip()} "
+    prompt += "Choose from the following options: "
+    if options:
+        for i, option in enumerate(options[:4]):
+            prompt += f'"{option}"'
+            if i == len(options[:4]) - 2:
+                prompt += " or "
+            else:
+                prompt += ", "
+    prompt = prompt.rstrip(", ")
+    return prompt
 
 # =====================
 # DeSTA 推論
@@ -146,20 +147,21 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    # Match training format: "Question <|AUDIO|>" and NO system prompt
-    # system_prompt = "You are a helpful audio assistant. Select the correct option."
+    # Reference System Prompt
+    system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'
 
     # Build question with choices
     prompt = build_prompt(item.get('question', ''), item.get('options', []))
 
     messages = [
-        # {
-        #     "role": "system",
-        #     "content": system_prompt
-        # },
+        {
+            "role": "system",
+            "content": system_prompt
+        },
         {
             "role": "user",
-            "content": prompt, # Audio at the end matches training, trigger added
+            # Reference: <|AUDIO|>\n\n{question}
+            "content": f"<|AUDIO|>\n\n{prompt}", 
             "audios": [{
                 "audio": wav_path
             }]

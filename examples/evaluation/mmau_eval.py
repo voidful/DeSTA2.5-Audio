@@ -183,21 +183,22 @@ def extract_answer_choice(response):
 # =====================
 
 def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
-    """
-    對單一樣本跑 DeSTA. 回傳文字答案。
-    """
     write_wav_from_dataset_item(item, wav_path)
-
-    # Build question with choices
-    # Using the first build_prompt definition which has clear instructions
+    
+    # Reference System Prompt
+    system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'
+    
     prompt = build_prompt(item['question'], item.get('choices', []))
 
     messages = [
         {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
             "role": "user",
-            # Audio at the end matches training
-            # Append \nAnswer: to force generation mode
-            "content": prompt, 
+            # Reference: <|AUDIO|>\n\n{question}
+            "content": f"<|AUDIO|>\n\n{prompt}", 
             "audios": [{
                 "audio": wav_path
             }]

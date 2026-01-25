@@ -98,18 +98,19 @@ def build_prompt(instr, choices):
     """
     if choices and len(choices) > 0:
         cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
-        return (
-            f"Question: {instr.strip()}\n"
-            "<|AUDIO|>\n"
-            f"Options:\n{cs}\n"
-            "Answer:"
-        )
-    else:
-        return (
-            f"Question: {instr.strip()}\n"
-            "<|AUDIO|>\nAnswer:"
-        )
-
+def build_prompt(instr, choices):
+    # Reference Implementation format
+    prompt = f"{instr.strip()} "
+    prompt += "Choose from the following options: "
+    if choices:
+        for i, option in enumerate(choices):
+            prompt += f'"{option}"'
+            if i == len(choices) - 2:
+                prompt += " or "
+            else:
+                prompt += ", "
+    prompt = prompt.rstrip(", ")
+    return prompt
 
 # =====================
 # DeSTA 推論
@@ -130,22 +131,21 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     question = item[instruction_key]
     choices = item.get("choices")
 
+    # Reference System Prompt
+    system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'
+
     # Use robust prompt builder
     prompt = build_prompt(question, choices)
 
-    # Match training format: "Question <|AUDIO|>" and NO system prompt
-    # system_prompt = "You are a helpful audio assistant. Select the correct option."
-
     messages = [
-        # {
-        #     "role": "system",
-        #     "content": system_prompt
-        # },
+        {
+            "role": "system",
+            "content": system_prompt
+        },
         {
             "role": "user",
-            # Audio at the end matches training
-            # Append \nAnswer: to force generation mode
-            "content": prompt, 
+            # Reference: <|AUDIO|>\n\n{question}
+            "content": f"<|AUDIO|>\n\n{prompt}", 
             "audios": [{
                 "audio": wav_path
             }]

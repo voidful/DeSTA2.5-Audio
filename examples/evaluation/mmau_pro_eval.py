@@ -517,7 +517,7 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         # Open-ended or instruction following: direct question
         # Match training format: NO system prompt
         # system_prompt = "You are a helpful audio assistant. Focus on the audio and provide a helpful, complete answer."
-        user_content = f"Question: {question.strip()}\n<|AUDIO|>\nAnswer:"
+        user_content = f"<|AUDIO|>\n\n{question.strip()}"
     else:
         # Closed-ended (MCQ) alignment
         # Match training format: NO system prompt
@@ -526,18 +526,25 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         # Format choices robustly
         choice_text = ""
         if choices:
-            choice_text = "\nOptions:\n" + "\n".join([f'"{opt}"' for opt in choices])
-        
-        user_content = (
-             f"Question: {question.strip()}\n"
-             f"<|AUDIO|>\n"
-             f"{choice_text}\n"
-             "Answer:"
-        )
+            choice_text = " Choose from the following options: "
+            for i, option in enumerate(choices):
+                choice_text += f'"{option}"'
+                if i == len(choices) - 2:
+                    choice_text += " or "
+                else:
+                    choice_text += ", "
+            choice_text = choice_text.rstrip(", ")
+            
+            user_content = f"<|AUDIO|>\n\n{question.strip()} {choice_text}"
+        else:
+             user_content = f"<|AUDIO|>\n\n{question.strip()}"
+    
+    # Reference System Prompt
+    system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'
 
     messages = [
-        # {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content}
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content, "audios": [{"audio": wav_path}]}
     ]
 
     with torch.no_grad():
