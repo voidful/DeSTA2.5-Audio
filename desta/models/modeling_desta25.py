@@ -37,8 +37,7 @@ def _prepare_audio_context_and_start_positions(
         result = []
         start_positions = []
         for x in token_list:
-            # Robust check for audio locator (handles tokenizer prefixes like Ġ<|AUDIO|>)
-            if audio_locator in x:
+            if x == audio_locator:
                 # start_positions.append(len(result))
                 transcription_size = transcription_size_list.pop(0)
                 audio_size = audio_size_list.pop(0)
@@ -1019,18 +1018,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
             
-            # Safety check: calculate available placeholder space
-            seq_len = inputs_embeds.size(1)
-            available_space = seq_len - audio_start_position
-            target_len = audio_embeddings.size(0)
-            
-            # Truncate if audio_embeddings is too long
-            if target_len > available_space:
-                audio_embeddings = audio_embeddings[:available_space]
-                target_len = available_space
-            
-            target_slice = slice(audio_start_position, audio_start_position + target_len)
-            inputs_embeds[text_batch_idx, target_slice] = audio_embeddings
+            # # replace the input_embeds with the audio features
+            # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
+            inputs_embeds[text_batch_idx, audio_start_position:audio_start_position + audio_embeddings.size(0)] = audio_embeddings
             
 
             # clean GPU memory
