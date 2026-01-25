@@ -1902,15 +1902,14 @@ class DeSTA25AudioModel(PreTrainedModel):
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            audio_context = audio_context.replace(self.audio_locator, f"<start_audio>{self.audio_locator}<end_audio>")
 
             audio_context, start_positions = _prepare_audio_context_and_start_positions(
-                    token_list=self.tokenizer.tokenize(audio_context), 
-                    audio_locator=self.audio_locator,
-                    audio_size_list=audio_size_list,
-                    transcription_size_list=transcription_size_list,
-                    placeholder_token=self.placeholder_token
-                )
+                token_list=self.tokenizer.tokenize(audio_context), 
+                audio_locator=self.audio_locator,
+                audio_size_list=audio_size_list,
+                transcription_size_list=transcription_size_list,
+                placeholder_token=self.placeholder_token
+            )
 
             audio_context = self.tokenizer.convert_tokens_to_string(audio_context)
             audio_context_list.append(audio_context)

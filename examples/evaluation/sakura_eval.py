@@ -157,7 +157,8 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                     do_sample=False,
                     top_p=0.85,
                     temperature=0.0,
-                    max_new_tokens=128,
+                    max_new_tokens=64, # Force conciseness
+                    repetition_penalty=1.5 # Prevent loops
                 )
             else:
                 outputs = model.generate(
@@ -165,13 +166,24 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
                     do_sample=False,
                     top_p=0.85,
                     temperature=0.0,
-                    max_new_tokens=128,
+                    max_new_tokens=64, # Force conciseness
+                    repetition_penalty=1.5 # Prevent loops
                 )
 
-    pred = outputs.text
+    pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
     if isinstance(pred, str):
-        pred = pred.strip()
-    return pred
+        # 1) Clean thinking process
+        pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
+        
+        # 2) Extract answer following "The correct answer is:"
+        match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
+        if match:
+            pred = match.group(1).strip()
+        else:
+            pred = pred_no_think
+        
+        return pred.strip('"').strip("'")
+    return str(pred)
 
 
 
