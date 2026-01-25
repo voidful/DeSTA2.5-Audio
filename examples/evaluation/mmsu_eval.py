@@ -12,7 +12,6 @@ from desta import DeSTA25AudioModel
 import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-logging.basicConfig(level=logging.INFO)
 
 # =====================
 # 基本設定
@@ -206,6 +205,7 @@ def load_judge(model_id=JUDGE_MODEL_ID):
         device_map="auto"
     )
     model.eval()
+    model.to(torch.bfloat16)
     return tokenizer, model
 
 

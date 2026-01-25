@@ -12,8 +12,6 @@ from desta import DeSTA25AudioModel
 import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-logging.basicConfig(level=logging.INFO)
-
 # =====================
 # 基本設定
 # =====================
@@ -57,55 +55,57 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
+def load_audio_as_array(item):
+    """
+    Robustly extract audio array from dataset item.
+    """
+    audio_obj = item.get("audio")
+    # For MMAU it might be "context" or "audio" depending on version, check both
+    if audio_obj is None:
+        audio_obj = item.get("context")
+
+    if isinstance(audio_obj, dict):
+        if "array" in audio_obj and audio_obj["array"] is not None:
+             return np.asarray(audio_obj["array"], dtype=np.float32), audio_obj.get("sampling_rate", 16000)
+        elif "path" in audio_obj and audio_obj["path"]:
+             y, sr = librosa.load(audio_obj["path"], sr=None)
+             return y.astype(np.float32), sr
+    elif isinstance(audio_obj, str):
+        y, sr = librosa.load(audio_obj, sr=None)
+        return y.astype(np.float32), sr
+    
+    return np.zeros(16000, dtype=np.float32), 16000
+
 def write_wav_from_dataset_item(item, wav_path):
     """
-    從 MMAU dataset item 取出 audio 寫成 wav 檔。
+    Robustly extract audio and write to WAV.
     """
-    audio_obj = item["audio"]
-    audio_array = audio_obj["array"]
-    sample_rate = audio_obj.get("sampling_rate", 16000)
+    y, sr = load_audio_as_array(item)
+    return write_wav_from_array(y, sr, wav_path)
 
-    # 如果 sampling_rate 是 None 或其它非 int
-    if sample_rate is None:
-        sample_rate = 16000
+def build_prompt(instr, choices):
+    """
+    Robust prompt construction consistently used across evals.
+    """
+    # Handle stringified choices if necessary
+    if isinstance(choices, str):
+        try:
+             choices = json.loads(choices)
+        except:
+             pass
 
-    return write_wav_from_array(audio_array, sample_rate, wav_path)
-
-
-# =====================
-# Scoring Logic (from mmau_evaluate.py)
-# =====================
-
-def string_match(answer, prediction, choices):
-    # Function to normalize and tokenize text
-    def tokenize(text):
-        if not isinstance(text, str):
-            text = str(text)
-        # Convert to lowercase and find all word tokens
-        return set(re.findall(r'\b\w+\b', text.lower()))
-
-    # Tokenize prediction and answer
-    prediction_tokens = tokenize(prediction)
-    answer_tokens = tokenize(answer)
-
-    if not prediction_tokens:
-        return False
-
-    # Tokenize incorrect choices and exclude tokens present in the answer
-    incorrect_tokens = set()
-    for choice in choices:
-        choice_tokens = tokenize(choice)
-        if choice_tokens != answer_tokens:
-            incorrect_tokens.update(choice_tokens - answer_tokens)
-
-    # Condition 1: All tokens of the answer are in the prediction
-    cond1 = answer_tokens.issubset(prediction_tokens)
-
-    # Condition 2: Prediction does not contain any tokens from incorrect choices (excluding shared words)
-    cond2 = prediction_tokens.isdisjoint(incorrect_tokens)
-
-    return cond1 and cond2
-
+    if choices and len(choices) > 0:
+        cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
+        return (
+            f"{instr.strip()}\n\n"
+            f"Options:\n{cs}\n\n"
+            "Answer with the option letter and text corresponding to the correct answer."
+        )
+    else:
+        return (
+            f"{instr.strip()}\n\n"
+            "Answer the question directly and concisely."
+        )
 
 # =====================
 # DeSTA 推論
@@ -117,24 +117,10 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: \"___\" " where ___ is the exact choice from the list.'
+    system_prompt = "You are a helpful assistant."
 
-    # Build question with choices (matching inference_desta25_audio.py logic)
-    question = f"{item['question']} Choose from the following options: "
-    choices = item["choices"]
-    # Handle if choices is a string representation of a list
-    if isinstance(choices, str):
-        try:
-            choices = json.loads(choices)
-        except:
-            pass
-
-    for i, option in enumerate(choices):
-        question += f'"{option}"'
-        if i == len(choices) - 2:
-            question += " or "
-        elif i < len(choices) - 1:
-            question += ", "
+    # Use robust prompt builder
+    prompt = build_prompt(item['question'], item['choices'])
 
     messages = [
         {
@@ -143,7 +129,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n\n{question}",
+            "content": f"<|AUDIO|>\n\n{prompt}",
             "audios": [{
                 "audio": wav_path
             }]
@@ -151,13 +137,14 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     ]
 
     with torch.no_grad():
-        outputs = model.generate(
-            messages=messages,
-            do_sample=False,
-            top_p=0.85,
-            temperature=0.0,
-            max_new_tokens=512
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model.generate(
+                messages=messages,
+                do_sample=False,
+                top_p=0.85,
+                temperature=0.0,
+                max_new_tokens=512
+            )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
     if isinstance(pred, str):
@@ -272,7 +259,11 @@ def main():
 
     # 載入 DeSTA
     print(f"Loading DeSTA model from {args.model_id}...")
-    model = DeSTA25AudioModel.from_pretrained(args.model_id)
+    # Use torch_dtype in from_pretrained instead of manual .to(dtype)
+    model = DeSTA25AudioModel.from_pretrained(
+        args.model_id, 
+        torch_dtype=torch.bfloat16
+    )
     model.to(device)
     model.eval()
 

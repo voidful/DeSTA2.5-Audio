@@ -330,7 +330,10 @@ def load_extra_text(cfg: CFG) -> List[str]:
 class TextEncoder:
     def __init__(self, name: str, device: str = "cpu"):
         from sentence_transformers import SentenceTransformer
-
+        import logging
+        # Suppress harmless "UNEXPECTED: embeddings.position_ids" warning
+        logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+        
         self.model = SentenceTransformer(name, device=device)
 
     def encode(self, sentences: List[str], batch_size: int = 64) -> np.ndarray:
@@ -736,6 +739,25 @@ def load_qwen2_5_omni_model(model_id: str):
     )
     model.eval()
     processor = Qwen2_5OmniProcessor.from_pretrained(model_id, trust_remote_code=True)
+    model.eval()
+    processor = Qwen2_5OmniProcessor.from_pretrained(model_id, trust_remote_code=True)
+    return model, processor
+
+
+def load_audio_flamingo3_model(model_id: str):
+    from transformers import AudioFlamingo3ForConditionalGeneration, AutoProcessor
+    print(f"🔄 Loading Audio Flamingo 3: {model_id}")
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    
+    model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
+        model_id,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+        device_map="auto" if torch.cuda.is_available() else None,
+        low_cpu_mem_usage=True,
+    )
+    model.eval()
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     return model, processor
 
 
@@ -867,6 +889,105 @@ class Qwen2_5OmniAdapter(AudioAdapterBase):
             
             # Return dummy to avoid crash
             return torch.zeros(10, 2048)
+
+
+class AudioFlamingo3Adapter(AudioAdapterBase):
+    """Adapter for nvidia/audio-flamingo-3-hf."""
+    name = "AudioFlamingo3"
+
+    def load(self) -> None:
+        self.model, self.processor = load_audio_flamingo3_model(self.model_id)
+
+    @torch.no_grad()
+    def extract_tokens(self, audio: np.ndarray, sr: int) -> torch.Tensor:
+        """
+        Extract audio features using explicit processor call.
+        This handles multimodal inputs more reliably than apply_chat_template.
+        """
+        if not hasattr(self, "model"):
+            self.load()
+            
+        device = self.model.device
+        target_sr = int(self.processor.feature_extractor.sampling_rate)
+        
+        # Resample logic
+        if sr != target_sr:
+            import librosa
+            audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=target_sr)
+            
+        # Audio Flamingo 3 reliable input handling:
+        # 1. Write audio to temporary WAV file
+        # 2. Use apply_chat_template with structured input {"type": "audio", "path": ...}
+        # 3. This matches how the model was designed to be used
+        import tempfile
+        import soundfile as sf
+        import os
+        
+        # Create temp file
+        fd, temp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        
+        try:
+            # Write audio to file
+            sf.write(temp_path, audio, target_sr)
+            
+            # Construct structured conversation
+            conversation = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract audio features."},
+                        {"type": "audio", "path": temp_path},
+                    ],
+                }
+            ]
+            
+            # Use apply_chat_template which handles the audio loading and processing internally
+            inputs = self.processor.apply_chat_template(
+                conversation,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt"
+            ).to(device)
+            
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        # Cast float inputs to model dtype (e.g., float16)
+        dtype = self.model.dtype
+        for key in ["input_features", "pixel_values"]:
+            if key in inputs and inputs[key].dtype == torch.float32:
+                inputs[key] = inputs[key].to(dtype)
+            
+        # DEBUG: Check inputs again
+        if not hasattr(self, "_logged_debug"):
+            self._logged_debug = True
+            print(f"  🐞 DEBUG: AudioFlamingo3 inputs keys: {list(inputs.keys())}")
+            if "input_features" in inputs:
+                print(f"  🐞 DEBUG: input_features dtype: {inputs['input_features'].dtype}, shape: {inputs['input_features'].shape}")
+        
+        out = self.model(
+            **inputs, 
+            output_hidden_states=True, 
+            return_dict=True
+        )
+        
+        # Last hidden state
+        Z = out.hidden_states[-1]
+        
+        # Cleanup
+        del out
+        del inputs
+        
+        if Z.dim() == 3:
+            result = Z[0].detach().float().cpu()
+        else:
+            result = Z.detach().float().cpu()
+        
+        return result
 
 
 # -----------------------------
@@ -2883,10 +3004,11 @@ def main() -> None:
     print(f"🧩 Shared U_t built. Shape={Ut.shape} (D=768, k={Ut.shape[1]})")
 
     models = [
-        ("DeSTA-Baseline", "voidful/QAQ_4b"),
-        ("DeSTA-ORCA", "voidful/desta25_4b_R2_full"),
-        ("Qwen2-Audio", "Qwen/Qwen2-Audio-7B"),
-        ("Qwen2.5-Omni", "Qwen/Qwen2.5-Omni-3B"),
+        # ("DeSTA-Baseline", "voidful/QAQ_4b"),
+        # ("DeSTA-ORCA", "voidful/desta25_4b_R2_full"),
+        # ("Qwen2-Audio", "Qwen/Qwen2-Audio-7B"),
+        # ("Qwen2.5-Omni", "Qwen/Qwen2.5-Omni-3B"),
+        ("AudioFlamingo3", "nvidia/audio-flamingo-3-hf"),
     ]
 
     results = []
@@ -2895,6 +3017,8 @@ def main() -> None:
             adapter = DeSTAAdapter(model_id=model_id, device="cuda")
         elif "Omni" in model_id:
             adapter = Qwen2_5OmniAdapter(model_id=model_id, device="cuda")
+        elif "flamingo" in model_id.lower():
+            adapter = AudioFlamingo3Adapter(model_id=model_id, device="cuda")
         else:
             adapter = Qwen2AudioAdapter(model_id=model_id, device="cuda")
         res = analyze_model(adapter, items, text_enc, Ut, CFG_)

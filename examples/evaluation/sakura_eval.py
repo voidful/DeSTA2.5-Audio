@@ -9,7 +9,6 @@ from datasets import load_dataset
 from desta import DeSTA25AudioModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
-logging.basicConfig(level = logging.INFO)
 
 # =====================
 # 基本設定
@@ -23,7 +22,7 @@ logging.basicConfig(level = logging.INFO)
 # - Audio position scale: 5.0
 # - Losses: L_ortho_diversity + L_align_layerwise (simplified)
 
-DESTA_MODEL_ID = "voidful/QAQ_0.6b_orca_all"  # Update to your trained model
+DESTA_MODEL_ID = "voidful/desta25_4b_R2_full"  # Update to your trained model
 
 DATASETS = {
     "AnimalQA":  "SLLM-multi-hop/AnimalQA",
@@ -64,15 +63,51 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
+def load_audio_as_array(item):
+    """
+    Robustly extract audio array from dataset item.
+    """
+    audio_obj = item.get("audio")
+    # For some datasets it might be "context"
+    if audio_obj is None:
+        audio_obj = item.get("context")
+
+    if isinstance(audio_obj, dict):
+        if "array" in audio_obj and audio_obj["array"] is not None:
+             return np.asarray(audio_obj["array"], dtype=np.float32), audio_obj.get("sampling_rate", 16000)
+        elif "path" in audio_obj and audio_obj["path"]:
+             y, sr = librosa.load(audio_obj["path"], sr=None)
+             return y.astype(np.float32), sr
+    elif isinstance(audio_obj, str):
+        y, sr = librosa.load(audio_obj, sr=None)
+        return y.astype(np.float32), sr
+    
+    return np.zeros(16000, dtype=np.float32), 16000
+
 def write_wav_from_dataset_item(item, wav_path):
     """
     從 SAKURA 問答 dataset item 取出 audio 寫成 wav 檔。
     """
-    audio_obj = item["audio"]
-    audio_array = audio_obj["array"]
-    sample_rate = audio_obj.get("sampling_rate", 16000)
+    y, sr = load_audio_as_array(item)
+    return write_wav_from_array(y, sr, wav_path)
 
-    return write_wav_from_array(audio_array, sample_rate, wav_path)
+def build_prompt(instr, choices):
+    """
+    Robust prompts handling both MCQA and Open-ended questions.
+    """
+    if choices and len(choices) > 0:
+        cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
+        return (
+            f"{instr.strip()}\n\n"
+            f"Options:\n{cs}\n\n"
+            "Answer with the option letter and text corresponding to the correct answer."
+        )
+    else:
+        # Fallback for open-ended or missing choices
+        return (
+            f"{instr.strip()}\n\n"
+            "Answer the question directly and concisely."
+        )
 
 
 # =====================
@@ -91,14 +126,20 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     write_wav_from_dataset_item(item, wav_path)
 
     instruction_key = f"{hop_prefix}instruction"
+    question = item[instruction_key]
+    choices = item.get("choices")
+
+    # Use robust prompt builder
+    prompt = build_prompt(question, choices)
+
     messages = [
         {
             "role": "system",
-            "content": "Focus on the audio clips and instructions."
+            "content": "You are a helpful assistant."
         },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n{item[instruction_key]}",
+            "content": f"<|AUDIO|>\n{prompt}",
             "audios": [{
                 "audio": wav_path
             }]
@@ -106,24 +147,25 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     ]
 
     with torch.no_grad():
-        if ACD_ENABLED:
-            # Use ACD for paralinguistic tasks
-            outputs = model.generate_with_acd(
-                messages=messages,
-                acd_alpha=ACD_ALPHA,
-                do_sample=False,
-                top_p=0.85,
-                temperature=0.0,
-                max_new_tokens=512
-            )
-        else:
-            outputs = model.generate(
-                messages=messages,
-                do_sample=False,
-                top_p=0.85,
-                temperature=0.0,
-                max_new_tokens=512
-            )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if ACD_ENABLED:
+                # Use ACD for paralinguistic tasks
+                outputs = model.generate_with_acd(
+                    messages=messages,
+                    acd_alpha=ACD_ALPHA,
+                    do_sample=False,
+                    top_p=0.85,
+                    temperature=0.0,
+                    max_new_tokens=512
+                )
+            else:
+                outputs = model.generate(
+                    messages=messages,
+                    do_sample=False,
+                    top_p=0.85,
+                    temperature=0.0,
+                    max_new_tokens=512
+                )
 
     pred = outputs.text
     if isinstance(pred, str):
@@ -342,9 +384,12 @@ def main():
         ACD_ALPHA = args.acd_alpha
         print(f"ACD enabled with alpha={ACD_ALPHA}")
     
-    # 載入 DeSTA
+    # Load DeSTA
     print(f"Loading model from {DESTA_MODEL_ID}...")
-    desta_model = DeSTA25AudioModel.from_pretrained(DESTA_MODEL_ID)
+    desta_model = DeSTA25AudioModel.from_pretrained(
+        DESTA_MODEL_ID,
+        torch_dtype=torch.bfloat16
+    )
     desta_model.to(device)
     desta_model.eval()
 

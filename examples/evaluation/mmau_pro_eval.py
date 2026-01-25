@@ -40,7 +40,6 @@ except LookupError:
     nltk.download('punkt_tab', quiet=True)
 from nltk.tokenize import sent_tokenize
 
-logging.basicConfig(level=logging.INFO)
 
 # =====================
 # Configuration
