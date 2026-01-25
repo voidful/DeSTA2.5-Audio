@@ -2047,7 +2047,9 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             # Use correct audio token size based on connector mode
             if self.config.connector_mode == "orca_hybrid":
-                audio_token_size = getattr(self.config, 'orca_global_num_tokens', 64)
+                # For orca_hybrid, we use prompt_size (e.g. 64) as the safe default, 
+                # ignoring potentially incorrect orca_global_num_tokens if it causes mismatch
+                audio_token_size = self.config.prompt_size 
             elif self.config.connector_mode == "orca_r1":
                 audio_token_size = self.config.orca_r1_num_groups * self.config.orca_r1_queries_per_group
             else:
@@ -2076,20 +2078,12 @@ class DeSTA25AudioModel(PreTrainedModel):
             
             for i, transcription in zip(asr_indices, transcriptions):
                 all_transcriptions[i] = transcription.strip()
-                    
-            # DEBUG: Print sizes
-            print(f"[DEBUG] connector_mode: {self.config.connector_mode}")
-            if self.config.connector_mode == 'orca_r1':
-                print(f"[DEBUG] config.orca_r1_num_groups: {getattr(self.config, 'orca_r1_num_groups', 'N/A')}")
-                print(f"[DEBUG] config.orca_r1_queries_per_group: {getattr(self.config, 'orca_r1_queries_per_group', 'N/A')}")
-            print(f"[DEBUG] Calculated audio_token_size: {audio_token_size}")
-
+            
+            # Use encode() to ensure size matches exactly what will be injected
             transcription_size_list = []
-            for i, text in enumerate(all_transcriptions):
-                tokenized_len = len(self.tokenizer.tokenize(text, add_special_tokens=False))
-                # encoded_len = self.tokenizer.encode(text, add_special_tokens=False, return_tensors="pt").size(1)
-                print(f"[DEBUG] Trans {i}: tokenized_len={tokenized_len}")
-                transcription_size_list.append(tokenized_len)
+            for text in all_transcriptions:
+                 encoded_len = self.tokenizer.encode(text, add_special_tokens=False, return_tensors="pt").size(1)
+                 transcription_size_list.append(encoded_len)
 
 
             audio_context_list = []
