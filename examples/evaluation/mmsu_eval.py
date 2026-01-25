@@ -158,7 +158,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         # },
         {
             "role": "user",
-            "content": f"{prompt} <|AUDIO|>", # Audio at the end matches training
+            "content": f"{prompt} <|AUDIO|>\nAnswer:", # Audio at the end matches training, trigger added
             "audios": [{
                 "audio": wav_path
             }]

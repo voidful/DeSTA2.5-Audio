@@ -543,7 +543,7 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         user_content = (
              f"Question: {question.strip()}\n"
              f"{choice_text}\n\n"
-             f"Answer with the text corresponding to the correct answer. <|AUDIO|>"
+             f"Answer with the text corresponding to the correct answer. <|AUDIO|>\nAnswer:"
         )
 
     messages = [

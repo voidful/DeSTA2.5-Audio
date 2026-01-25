@@ -143,8 +143,8 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
         {
             "role": "user",
             # Audio at the end matches training
-            # We append <|AUDIO|> to the prompt which already contains instructions
-            "content": f"{prompt} <|AUDIO|>", 
+            # Append \nAnswer: to force generation mode
+            "content": f"{prompt} <|AUDIO|>\nAnswer:", 
             "audios": [{
                 "audio": wav_path
             }]
