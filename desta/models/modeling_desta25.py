@@ -1553,7 +1553,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         top_p=0.9, 
         max_new_tokens=512, 
         do_sample=True,
-        acd_alpha=None
+        acd_alpha=None,
+        **kwargs
     ):
         """
         Acoustic-Contrastive Decoding (ACD) for ORCA-R1.
@@ -1775,6 +1776,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         top_p=0.9,
         do_sample=True,
         max_new_tokens=512,
+        **kwargs
     ):
         """
         Generate with Acoustic-Contrastive Decoding (ACD).
@@ -1957,7 +1959,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             top_p=top_p,
             max_new_tokens=max_new_tokens,
             do_sample=do_sample,
-            acd_alpha=acd_alpha
+            acd_alpha=acd_alpha,
+            **kwargs
         )
 
         return GenerationOutput(
@@ -1973,6 +1976,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         top_p=0.9,
         do_sample=True,
         max_new_tokens=512,
+        **kwargs
         ):
         """
         messages = [
