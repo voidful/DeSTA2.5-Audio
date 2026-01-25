@@ -2048,6 +2048,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Use correct audio token size based on connector mode
             if self.config.connector_mode == "orca_hybrid":
                 audio_token_size = getattr(self.config, 'orca_global_num_tokens', 64)
+            elif self.config.connector_mode == "orca_r1":
+                audio_token_size = self.config.orca_r1_num_groups * self.config.orca_r1_queries_per_group
             else:
                 audio_token_size = self.config.prompt_size
             audio_size_list = [audio_token_size] * len(batch_features)
