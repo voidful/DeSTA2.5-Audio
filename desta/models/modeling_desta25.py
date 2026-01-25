@@ -35,14 +35,9 @@ def _prepare_audio_context_and_start_positions(
         assert len(audio_size_list) == len(transcription_size_list), f"audio_size_list and transcription_size_list must have the same length, audio_size_list: {audio_size_list}, transcription_size_list: {transcription_size_list}"
 
         result = []
-        start_positions = []
-        print(f"[DEBUG] audio_locator: '{audio_locator}'")
-        # print(f"[DEBUG] token_list: {token_list}")
-        
         for x in token_list:
             # Robust check for audio locator (handles tokenizer prefixes like Ġ<|AUDIO|>)
             if x == audio_locator:
-                print(f"[DEBUG] FOUND audio_locator at match!")
                 # start_positions.append(len(result))
                 transcription_size = transcription_size_list.pop(0)
                 audio_size = audio_size_list.pop(0)
@@ -53,9 +48,6 @@ def _prepare_audio_context_and_start_positions(
                 result.extend([placeholder_token] * (transcription_size))
             else:
                 result.append(x)
-        
-        if len(start_positions) == 0:
-             print(f"[DEBUG] WARNING: No audio_locator found in token_list! {token_list}")
                 
         return result, start_positions
 
@@ -1026,17 +1018,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             # # replace the input_embeds with the audio features
             # # [---- Other text embeddings ----][---- audio features + transcription embeddings ----][---- Other text embeddings ----]
             
-            # Safety check: calculate available placeholder space
-            seq_len = inputs_embeds.size(1)
-            available_space = seq_len - audio_start_position
-            target_len = audio_embeddings.size(0)
-            
-            # Truncate if audio_embeddings is too long
-            if target_len > available_space:
-                audio_embeddings = audio_embeddings[:available_space]
-                target_len = available_space
-            
-            target_slice = slice(audio_start_position, audio_start_position + target_len)
+            target_slice = slice(audio_start_position, audio_start_position + audio_embeddings.size(0))
             inputs_embeds[text_batch_idx, target_slice] = audio_embeddings
             
 
