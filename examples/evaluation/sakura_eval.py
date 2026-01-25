@@ -131,21 +131,17 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     question = item[instruction_key]
     choices = item.get("choices")
 
-    # Reference System Prompt
-    system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'
+    # remove System Prompt (Training does not use it)
+    # system_prompt = ...
 
     # Use robust prompt builder
     prompt = build_prompt(question, choices)
 
     messages = [
         {
-            "role": "system",
-            "content": system_prompt
-        },
-        {
             "role": "user",
-            # Reference: <|AUDIO|>\n\n{question}
-            "content": f"<|AUDIO|>\n\n{prompt.replace('<|AUDIO|>', '')}", 
+            # Training Logic: "{text} <|AUDIO|>"
+            "content": f"{prompt.replace('<|AUDIO|>', '')} <|AUDIO|>", 
             "audios": [{
                 "audio": wav_path
             }]

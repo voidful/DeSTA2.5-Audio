@@ -184,20 +184,16 @@ def extract_answer_choice(response):
 def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     write_wav_from_dataset_item(item, wav_path)
     
-    # Reference System Prompt
-    system_prompt = 'Focus on the audio clips and instructions. Put your answer in the format "The correct answer is: "___" ".'
+    # remove System Prompt (Training does not use it)
+    # system_prompt = ...
     
     prompt = build_prompt(item['question'], item.get('choices', []))
 
     messages = [
         {
-            "role": "system",
-            "content": system_prompt
-        },
-        {
             "role": "user",
-            # Reference: <|AUDIO|>\n\n{question}
-            "content": f"<|AUDIO|>\n\n{prompt.replace('<|AUDIO|>', '')}", 
+            # Training Logic: "{text} <|AUDIO|>"
+            "content": f"{prompt.replace('<|AUDIO|>', '')} <|AUDIO|>", 
             "audios": [{
                 "audio": wav_path
             }]
@@ -206,6 +202,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model.generate(
                 messages=messages,
                 do_sample=False,
                 max_new_tokens=512
