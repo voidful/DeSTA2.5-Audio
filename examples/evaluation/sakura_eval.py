@@ -101,7 +101,7 @@ def build_prompt(instr, choices):
         return (
             f"Question: {instr.strip()}\n"
             f"Options:\n{cs}\n\n"
-            "Answer with the option letter and text corresponding to the correct answer. The correct answer is"
+            "Answer with the option letter and text corresponding to the correct answer."
         )
     else:
         return (
@@ -142,7 +142,9 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
         # },
         {
             "role": "user",
-            "content": f"{prompt} <|AUDIO|>", # Audio at the end matches training
+            # Audio at the end matches training
+            # We append <|AUDIO|> to the prompt which already contains instructions
+            "content": f"{prompt} <|AUDIO|>", 
             "audios": [{
                 "audio": wav_path
             }]

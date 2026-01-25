@@ -93,6 +93,7 @@ def extract_answer_choice(response):
         r'([ABCD])\)',
         r'\(([ABCD])\)',
         r'option\s+([ABCD])',
+        r'correct answer is\s*([ABCD])',
     ]
     for pattern in patterns:
         match = re.search(pattern, response.upper())
@@ -130,7 +131,7 @@ def build_prompt(question, options):
     return (
         f"Question: {question.strip()}\n"
         f"Options:\n{choices_text}\n\n"
-        "Answer with the option letter and text corresponding to the correct answer. The correct answer is"
+        "Answer with the option letter and text corresponding to the correct answer."
     )
 
 

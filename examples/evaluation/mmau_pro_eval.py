@@ -526,13 +526,13 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         # Format choices robustly
         choice_text = ""
         if choices:
-            choice_text = "\nOptions:\n" + "\n".join([f'"{opt}"' for opt in choices])
+            choice_text = "\nOptions:\n" + "\n.join([f'"{opt}"' for opt in choices])
         
         user_content = (
-            f"Question: {question.strip()}\n"
-            f"{choice_text}\n\n"
-            "Answer with the text corresponding to the correct answer. The correct answer is <|AUDIO|>" 
-            # Note: Putting <|AUDIO|> at the very end might be tricky if "The correct answer is" expects immediate completion.
+             f"Question: {question.strip()}\n"
+             f"{choice_text}\n\n"
+             f"Answer with the text corresponding to the correct answer. The correct answer is <|AUDIO|>"
+        )    # Note: Putting <|AUDIO|> at the very end might be tricky if "The correct answer is" expects immediate completion.
             # But training was [Prompt] <|AUDIO|>.
             # If Prompt includes "The correct answer is", then <|AUDIO|> comes AFTER it.
             # Actually, training data usually is "Describe... <|AUDIO|>" -> Response "It is..."
@@ -543,7 +543,7 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
         user_content = (
              f"Question: {question.strip()}\n"
              f"{choice_text}\n\n"
-             f"Answer with the text corresponding to the correct answer. The correct answer is <|AUDIO|>"
+             f"Answer with the text corresponding to the correct answer. <|AUDIO|>"
         )
 
     messages = [
