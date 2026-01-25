@@ -102,6 +102,12 @@ def run_qwen_omni_on_item(model, processor, item, hop_prefix, tmp_wav_path):
     instruction_key = f"{hop_prefix}instruction"
     question = item[instruction_key]
 
+    # Align with robust prompt format
+    full_question = (
+        f"Question: {question.strip()}\n\n"
+        "Answer with the text corresponding to the correct answer. The correct answer is"
+    )
+
     # Use Qwen2.5-Omni's exact default system prompt to avoid warning
     default_system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
 
@@ -115,7 +121,7 @@ def run_qwen_omni_on_item(model, processor, item, hop_prefix, tmp_wav_path):
             "role": "user",
             "content": [
                 {"type": "audio", "audio": tmp_wav_path},
-                {"type": "text", "text": question}
+                {"type": "text", "text": full_question}
             ]
         }
     ]

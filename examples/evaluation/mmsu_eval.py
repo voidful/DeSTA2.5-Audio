@@ -120,23 +120,34 @@ def check_answer(pred_choice, answer_index, options):
 # DeSTA 推論
 # =====================
 
+def build_prompt(question, options):
+    """
+    Build question with choices - using yuantuo666 format
+    """
+    choice_labels = ['A', 'B', 'C', 'D']
+    choices_text = '\n'.join([f"({choice_labels[i]}) {opt}" for i, opt in enumerate(options[:4])])
+    
+    return (
+        f"Question: {question.strip()}\n"
+        f"Options:\n{choices_text}\n\n"
+        "Answer with the option letter and text corresponding to the correct answer. The correct answer is"
+    )
+
+
+# =====================
+# DeSTA 推論
+# =====================
+
 def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     """
     對單一樣本跑 DeSTA. 回傳文字答案。
     """
     write_wav_from_dataset_item(item, wav_path)
 
-    system_prompt = 'Listen to the audio and answer the multiple choice question. Output ONLY the letter (A, B, C, or D) of the correct answer.'
+    system_prompt = "You are a helpful audio assistant. Select the correct option."
 
-    # Build question with choices - using yuantuo666 format
-    question = item.get('question', '')
-    options = item.get('options', [])  # List of 4 options
-    
-    # Build choices text from options list
-    choice_labels = ['A', 'B', 'C', 'D']
-    choices_text = '\n'.join([f"{choice_labels[i]}. {opt}" for i, opt in enumerate(options[:4])])
-    
-    full_question = f"{question}\n\nOptions:\n{choices_text}\n\nAnswer with only the letter (A, B, C, or D):"
+    # Build question with choices
+    prompt = build_prompt(item.get('question', ''), item.get('options', []))
 
     messages = [
         {
@@ -145,7 +156,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n\n{full_question}",
+            "content": f"<|AUDIO|>\n\n{prompt}",
             "audios": [{
                 "audio": wav_path
             }]
@@ -153,13 +164,15 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     ]
 
     with torch.no_grad():
-        outputs = model.generate(
-            messages=messages,
-            do_sample=False,
-            top_p=0.85,
-            temperature=0.0,
-            max_new_tokens=64  # Shorter since we just want A/B/C/D
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model.generate(
+                messages=messages,
+                do_sample=False,
+                top_p=0.85,
+                temperature=0.0,
+                max_new_tokens=128,
+                repetition_penalty=1.2
+            )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
     if isinstance(pred, str):

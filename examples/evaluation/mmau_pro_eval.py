@@ -514,36 +514,39 @@ def run_desta_inference(model, item, category, wav_path=TMP_WAV_PATH):
     # Build prompt based on category
     if category in ["open", "instruction following"]:
         # Open-ended or instruction following: direct question
-        system_prompt = "Focus on the audio and provide a helpful, complete answer."
-        user_content = f"<|AUDIO|>\n\n{question}"
+        system_prompt = "You are a helpful audio assistant. Focus on the audio and provide a helpful, complete answer."
+        user_content = f"<|AUDIO|>\n\nQuestion: {question.strip()}"
     else:
-        # Closed-ended (MCQ): include choices
-        system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: \"___\" " where ___ is the exact choice from the list.'
+        # Closed-ended (MCQ) alignment
+        system_prompt = "You are a helpful audio assistant. Select the correct option."
         
-        question_with_choices = f"{question} Choose from the following options: "
+        # Format choices robustly
+        choice_text = ""
         if choices:
-            for i, option in enumerate(choices):
-                question_with_choices += f'"{option}"'
-                if i == len(choices) - 2:
-                    question_with_choices += " or "
-                elif i < len(choices) - 1:
-                    question_with_choices += ", "
+            choice_text = "\nOptions:\n" + "\n".join([f'"{opt}"' for opt in choices])
         
-        user_content = f"<|AUDIO|>\n\n{question_with_choices}"
+        user_content = (
+            f"<|AUDIO|>\n\n"
+            f"Question: {question.strip()}\n"
+            f"{choice_text}\n\n"
+            "Answer with the text corresponding to the correct answer. The correct answer is"
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content, "audios": [{"audio": wav_path}]}
+        {"role": "user", "content": user_content}
     ]
 
     with torch.no_grad():
-        outputs = model.generate(
-            messages=messages,
-            do_sample=False,
-            top_p=0.85,
-            temperature=0.0,
-            max_new_tokens=512 if category == "open" else 256
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model.generate(
+                messages=messages,
+                do_sample=False,
+                top_p=0.85,
+                temperature=0.0,
+                max_new_tokens=512 if category == "open" else 128,
+                repetition_penalty=1.2
+            )
 
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
     

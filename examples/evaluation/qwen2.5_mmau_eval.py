@@ -124,7 +124,6 @@ def run_qwen_omni_on_item(model, processor, item, tmp_wav_path):
     write_wav_from_dataset_item(item, tmp_wav_path)
 
     # Build question with choices
-    question = f"{item['question']} Choose from the following options: "
     choices = item["choices"]
     if isinstance(choices, str):
         try:
@@ -132,15 +131,16 @@ def run_qwen_omni_on_item(model, processor, item, tmp_wav_path):
         except:
             pass
 
-    for i, option in enumerate(choices):
-        question += f'"{option}"'
-        if i == len(choices) - 2:
-            question += " or "
-        elif i < len(choices) - 1:
-            question += ", "
+    choice_text = ""
+    if choices:
+        choice_text = "\nOptions:\n" + "\n".join([f'"{opt}"' for opt in choices])
 
-    # Add instruction to question directly
-    full_question = f'{question}\n\nProvide your answer by ending with "The correct answer is: \"___\" " where ___ is the exact choice from the list.'
+    # Align with robust prompt format
+    full_question = (
+        f"Question: {item['question'].strip()}\n"
+        f"{choice_text}\n\n"
+        "Answer with the text corresponding to the correct answer. The correct answer is"
+    )
 
     # Use Qwen2.5-Omni's exact default system prompt to avoid warning
     default_system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
