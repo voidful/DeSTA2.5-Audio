@@ -98,11 +98,12 @@ def build_prompt(instr, choices):
         cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
         return (
         return (
-            f"<|AUDIO|>\nQuestion: {instr.strip()}\n"
+            f"Question: {instr.strip()}\n"
+            "<|AUDIO|>\n"
             f"Options:\n{cs}\n"
             "Answer:"
         )
-    return f"<|AUDIO|>\nQuestion: {instr.strip()}\nAnswer:"
+    return f"Question: {instr.strip()}\n<|AUDIO|>\nAnswer:"
 
 
 

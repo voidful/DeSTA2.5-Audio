@@ -99,14 +99,15 @@ def build_prompt(instr, choices):
     if choices and len(choices) > 0:
         cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
         return (
-            f"<|AUDIO|>\nQuestion: {instr.strip()}\n"
+            f"Question: {instr.strip()}\n"
+            "<|AUDIO|>\n"
             f"Options:\n{cs}\n"
             "Answer:"
         )
     else:
         return (
-            f"<|AUDIO|>\nQuestion: {instr.strip()}\n"
-            "Answer:"
+            f"Question: {instr.strip()}\n"
+            "<|AUDIO|>\nAnswer:"
         )
 
 
