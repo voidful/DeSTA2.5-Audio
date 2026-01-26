@@ -131,7 +131,7 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     question = item[instruction_key]
     choices = item.get("choices")
 
-    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: "___" " where ___ is the exact choice from the list.'
+    system_prompt = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
     
     # Use robust prompt builder
     prompt = build_prompt(question, choices)
@@ -144,7 +144,7 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
         {
             "role": "user",
             # Audio First: <|AUDIO|>\n\n{text}
-            "content": f"<|AUDIO|>\n\n{question}", # Simpler prompt construction might be better suited here if build_prompt is complex, but sticking to pattern
+            "content": f"<|AUDIO|>\n\n{prompt}", 
             "audios": [{
                 "audio": wav_path
             }]
