@@ -143,39 +143,45 @@ def string_match(answer, prediction, choices):
 
 def extract_answer_choice(response):
     """
-    Extract answer choice (A/B/C/D) from model response.
+    Robustly extract answer choice (A/B/C/D) or full answer text from model response.
     """
     if not response:
         return None
+        
+    pred = response.strip()
     
-    response = response.strip().replace('\n', '')
+    # 1) Clean thinking process
+    pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
     
-    # Try first character
-    if response and response[0] in ['A', 'B', 'C', 'D']:
-        return response[0]
-    
-    # Try last character/second last
-    if len(response) > 1:
-        if response[-2] in ['A', 'B', 'C', 'D']:
-            return response[-2]
-        if response[-1] in ['A', 'B', 'C', 'D']:
-            return response[-1]
-    
-    # Try to find "Answer: X" or "(X)" patterns
+    # 2) Extract answer with multiple fallback patterns
     patterns = [
-        r'answer[:\s]+([ABCD])',
-        r'([ABCD])\)',
-        r'\(([ABCD])\)',
-        r'option\s+([ABCD])',
-        r'correct answer is\s*([ABCD])',
+        r'The correct answer is:\s*["\']?(.*?)["\']?$',
+        r'Final Answer:\s*["\']?(.*?)["\']?$',
+        r'Answer:\s*["\']?(.*?)["\']?$',
+        r'Option\s*([A-D])'
     ]
-    for pattern in patterns:
-        match = re.search(pattern, response, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
     
-    return None
-
+    extracted = None
+    for pat in patterns:
+        match = re.search(pat, pred_no_think, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            break
+    
+    if not extracted:
+         # Fallback: look for last isolated A/B/C/D or (A)/(B)/(C)/(D)
+         paren_match = re.findall(r'\(([A-D])\)', pred_no_think)
+         if paren_match:
+             extracted = paren_match[-1] # Take the last one
+         else:
+             # Last resort: look for just A-D at the end
+             last_char_match = re.search(r'\b([A-D])\b[. ]*$', pred_no_think)
+             if last_char_match:
+                 extracted = last_char_match.group(1)
+             else:
+                 extracted = pred_no_think # Return full string
+    
+    return extracted.strip('"').strip("'").strip()
 
 # =====================
 # DeSTA 推論
@@ -184,7 +190,7 @@ def extract_answer_choice(response):
 def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     write_wav_from_dataset_item(item, wav_path)
     
-    system_prompt = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: "___" " where ___ is the exact choice from the list.'
+    system_prompt = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
     
     # Build question with choices (matching inference_desta25_audio.py logic)
     question = f"{item['question']} Choose from the following options: "
@@ -200,8 +206,9 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         question += f'"{option}"'
         if i == len(choices) - 2:
             question += " or "
-        elif i < len(choices) - 1:
+        else:
             question += ", "
+    question = question.rstrip(", ")
 
     messages = [
         {
@@ -211,7 +218,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         {
             "role": "user",
             # Audio First: <|AUDIO|>\n\n{text}
-            "content": f"<|AUDIO|>\n\n{question}",
+            "content": f"<|AUDIO|>\n\n{question}", 
             "audios": [{
                 "audio": wav_path
             }]
@@ -220,19 +227,14 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            outputs = model.generate(
-                messages=messages,
-                do_sample=False,
-                max_new_tokens=512
-            )
-
+                outputs = model.generate(
+                    messages=messages,
+                    do_sample=False,
+                    max_new_tokens=512,
+                    repetition_penalty=1.5 # Prevent loops
+                )
+    
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
-    if isinstance(pred, str):
-        # 1) Clean thinking process
-        pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
-        
-        # 2) Extract answer following "The correct answer is:"
-        match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
         if match:
             cleaned_pred = match.group(1).strip()
         else:
