@@ -165,14 +165,38 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
         # 1) Clean thinking process
         pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
         
-        # 2) Extract answer following "The correct answer is:"
-        match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
-        if match:
-            pred = match.group(1).strip()
-        else:
-            pred = pred_no_think
+        # 2) Extract answer with multiple fallback patterns
+        patterns = [
+            r'The correct answer is:\s*["\']?(.*?)["\']?$',
+            r'Final Answer:\s*["\']?(.*?)["\']?$',
+            r'Answer:\s*["\']?(.*?)["\']?$',
+            r'Option\s*([A-D])'
+        ]
         
-        return pred.strip('"').strip("'")
+        extracted = None
+        for pat in patterns:
+            match = re.search(pat, pred_no_think, re.IGNORECASE)
+            if match:
+                extracted = match.group(1).strip()
+                break
+        
+        if not extracted:
+             # Fallback: look for last isolated A/B/C/D or (A)/(B)/(C)/(D)
+             # Regex explanation:
+             # Try to find (A), (B), (C), (D) or just A, B, C, D at the very end of string
+             # Priority to parenthesized options
+             paren_match = re.findall(r'\(([A-D])\)', pred_no_think)
+             if paren_match:
+                 extracted = paren_match[-1] # Take the last one
+             else:
+                 # Last resort: look for just A-D at the end
+                 last_char_match = re.search(r'\b([A-D])\b[. ]*$', pred_no_think)
+                 if last_char_match:
+                     extracted = last_char_match.group(1)
+                 else:
+                     extracted = pred_no_think # Return full string if nothing found
+        
+        return extracted.strip('"').strip("'").strip()
     return str(pred)
 
 
