@@ -235,16 +235,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
                 )
     
     pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
-        if match:
-            cleaned_pred = match.group(1).strip()
-        else:
-            # Fallback: if no prefix found, just use the think-stripped version
-            cleaned_pred = pred_no_think
-            
-        # Remove surrounding quotes if any
-        cleaned_pred = cleaned_pred.strip('"').strip("'")
-        return cleaned_pred
-    return str(pred)
+    return extract_answer_choice(pred)
 
 # =====================
 # LLM Judge Logic
