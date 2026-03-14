@@ -565,7 +565,7 @@ class WhisperPerception(nn.Module):
                     # Qformer is a BERTEncoder(but set to decoder) from huggingface Transformers
                     qformer_output = self.connector.qformer(
                         layer_prompt,
-                        encoder_hidden_states=hidden_states,
+                        encoder_hidden_states=hidden_states.to(dtype=layer_prompt.dtype),
                     )
                     
                     layer_prompt_output = qformer_output.last_hidden_state[:, :self.config.prompt_size, :] # (b, prompt_size, d_model)
