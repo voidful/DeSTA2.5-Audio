@@ -10,20 +10,9 @@ from datasets import load_dataset
 from desta import DeSTA25AudioModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
+logging.basicConfig(level = logging.INFO)
 
-# =====================
-# 基本設定
-# =====================
-
-# Expected ORCA Configuration:
-# - Whisper: openai/whisper-large-v3 (standard, not turbo)
-# - Target layers: [7, 15, 23, 31] (4 selected layers)
-# - Local downsample: 2x (not 4x)
-# - Local kernel size: 5
-# - Audio position scale: 5.0
-# - Losses: L_ortho_diversity + L_align_layerwise (simplified)
-
-DESTA_MODEL_ID = "voidful/desta25_4b_R2_full"  # Update to your trained model
+DESTA_MODEL_ID = "voidful/desta25_4b_baseline_full"
 
 DATASETS = {
     "AnimalQA":  "SLLM-multi-hop/AnimalQA",
@@ -43,10 +32,6 @@ RESULT_DIR = "desta_sakura_results"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# =====================
-# Audio 工具函式
-# =====================
-
 def write_wav_from_array(audio_array, sample_rate, wav_path):
     """
     將 float [-1, 1] 波形轉成 mono 16-bit PCM WAV 檔。
@@ -64,61 +49,20 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
-def load_audio_as_array(item):
-    """
-    Robustly extract audio array from dataset item.
-    """
-    audio_obj = item.get("audio")
-    # For some datasets it might be "context"
-    if audio_obj is None:
-        audio_obj = item.get("context")
-
-    if isinstance(audio_obj, dict):
-        if "array" in audio_obj and audio_obj["array"] is not None:
-             return np.asarray(audio_obj["array"], dtype=np.float32), audio_obj.get("sampling_rate", 16000)
-        elif "path" in audio_obj and audio_obj["path"]:
-             y, sr = librosa.load(audio_obj["path"], sr=None)
-             return y.astype(np.float32), sr
-    elif isinstance(audio_obj, str):
-        y, sr = librosa.load(audio_obj, sr=None)
-        return y.astype(np.float32), sr
-    
-    return np.zeros(16000, dtype=np.float32), 16000
-
 def write_wav_from_dataset_item(item, wav_path):
     """
     從 SAKURA 問答 dataset item 取出 audio 寫成 wav 檔。
     """
-    y, sr = load_audio_as_array(item)
-    return write_wav_from_array(y, sr, wav_path)
+    audio_obj = item["audio"]
+    audio_array = audio_obj["array"]
+    sample_rate = audio_obj.get("sampling_rate", 16000)
 
-def build_prompt(instr, choices):
-    """
-    Robust prompts handling both MCQA and Open-ended questions.
-    """
-    if choices and len(choices) > 0:
-        cs = "\n".join(f"({chr(65+i)}) {c.strip()}" for i, c in enumerate(choices))
-def build_prompt(instr, choices):
-    # Reference Implementation format
-    prompt = f"{instr.strip()} "
-    prompt += "Choose from the following options: "
-    if choices:
-        for i, option in enumerate(choices):
-            prompt += f'"{option}"'
-            if i == len(choices) - 2:
-                prompt += " or "
-            else:
-                prompt += ", "
-    prompt = prompt.rstrip(", ")
-    return prompt
+    return write_wav_from_array(audio_array, sample_rate, wav_path)
+
 
 # =====================
 # DeSTA 推論
 # =====================
-
-# Global ACD settings (set via command line)
-ACD_ENABLED = False
-ACD_ALPHA = 0.5
 
 def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     """
@@ -128,23 +72,17 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     write_wav_from_dataset_item(item, wav_path)
 
     instruction_key = f"{hop_prefix}instruction"
-    question = item[instruction_key]
-    choices = item.get("choices")
-
-    system_prompt = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
-    
-    # Use robust prompt builder
-    prompt = build_prompt(question, choices)
+    # DEBUG input to check for leakage
+    print(f"DEBUG_INPUT: {item[instruction_key]}")
 
     messages = [
         {
             "role": "system",
-            "content": system_prompt
+            "content": "You are an audio assistant."
         },
         {
             "role": "user",
-            # Audio First: <|AUDIO|>\n\n{text}
-            "content": f"<|AUDIO|>\n\n{prompt}", 
+            "content": f"<|AUDIO|>\n\nQuestion: {item[instruction_key]}\n\nInstructions:\nListen to the audio and select the correct option from the list.\n\nFormat:\nReasoning: <Brief thoughts>\nAnswer: (x) label",
             "audios": [{
                 "audio": wav_path
             }]
@@ -152,53 +90,18 @@ def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
     ]
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = model.generate(
-                    messages=messages,
-                    do_sample=False,
-                    max_new_tokens=512,
-                    repetition_penalty=1.5 # Prevent loops
-                )
+        outputs = model.generate(
+            messages=messages,
+            do_sample=False,      # 評測建議關掉 sampling
+            max_new_tokens=512
+        )
 
-    pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
+    pred = outputs.text
+    if isinstance(pred, list):
+        pred = pred[0]
     if isinstance(pred, str):
-        # 1) Clean thinking process
-        pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
-        
-        # 2) Extract answer with multiple fallback patterns
-        patterns = [
-            r'The correct answer is:\s*["\']?(.*?)["\']?$',
-            r'Final Answer:\s*["\']?(.*?)["\']?$',
-            r'Answer:\s*["\']?(.*?)["\']?$',
-            r'Option\s*([A-D])'
-        ]
-        
-        extracted = None
-        for pat in patterns:
-            match = re.search(pat, pred_no_think, re.IGNORECASE)
-            if match:
-                extracted = match.group(1).strip()
-                break
-        
-        if not extracted:
-             # Fallback: look for last isolated A/B/C/D or (A)/(B)/(C)/(D)
-             # Regex explanation:
-             # Try to find (A), (B), (C), (D) or just A, B, C, D at the very end of string
-             # Priority to parenthesized options
-             paren_match = re.findall(r'\(([A-D])\)', pred_no_think)
-             if paren_match:
-                 extracted = paren_match[-1] # Take the last one
-             else:
-                 # Last resort: look for just A-D at the end
-                 last_char_match = re.search(r'\b([A-D])\b[. ]*$', pred_no_think)
-                 if last_char_match:
-                     extracted = last_char_match.group(1)
-                 else:
-                     extracted = pred_no_think # Return full string if nothing found
-        
-        return extracted.strip('"').strip("'").strip()
-    return str(pred)
-
+        pred = pred.strip()
+    return pred
 
 
 # =====================
@@ -322,56 +225,69 @@ def evaluate_desta_binary_accuracy_on_dataset(
     instruction_key = f"{hop_prefix}instruction"
     answer_key = f"{hop_prefix}answer"
 
-    for idx, item in enumerate(tqdm(ds, desc=f"{dataset_name}-{hop_prefix}{split}")):
-        question = item[instruction_key]
-        gold = item[answer_key]
-
-        # 1) DeSTA 推論
-        pred = run_desta_on_item(desta_model, item, hop_prefix, TMP_WAV_PATH)
-        print(gold,pred)
-        # 2) Qwen 評審
-        judge_bool, raw_text = call_qwen_binary_judge(
-            judge_tokenizer,
-            judge_model,
-            question,
-            gold,
-            pred
-        )
-
-        if judge_bool is not None:
-            num_valid_judged += 1
-            if judge_bool:
-                num_correct += 1
-
-        results.append({
-            "idx": idx,
-            "question": question,
-            "gold": gold,
-            "pred": pred,
-            "judge_correct": judge_bool,
-            "judge_raw": raw_text,
-        })
-
-        # 如需 debug 可以開這行
-        # print(dataset_name, hop_prefix, idx, pred, gold, judge_bool)
-
-    accuracy = num_correct / num_valid_judged if num_valid_judged > 0 else 0.0
-
-    print(f"\nDeSTA on {dataset_name} ({hop_prefix}{split}), judged by Qwen (binary):")
-    print(f"  Valid judged samples: {num_valid_judged}/{total}")
-    print(f"  Accuracy: {num_correct}/{num_valid_judged} = {accuracy:.4f}")
-
     hop_tag = hop_prefix.rstrip("_")  # "single" or "multi"
     out_path = os.path.join(
         output_dir,
         f"desta_{dataset_name.lower()}_{hop_tag}_qwen_binary_results.jsonl"
     )
 
+    # Clean output file first
     with open(out_path, "w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        pass
+
+    for idx, item in enumerate(tqdm(ds, desc=f"{dataset_name}-{hop_prefix}{split}")):
+        question = item[instruction_key]
+        gold = item[answer_key]
+
+        # 1) DeSTA 推论
+        try:
+            pred = run_desta_on_item(desta_model, item, hop_prefix, TMP_WAV_PATH)
+        except Exception as e:
+            print(f"Error running DeSTA on item {idx}: {e}")
+            pred = "ERROR"
+
+        # 2) Qwen 評審
+        try:
+            judge_bool, raw_text = call_qwen_binary_judge(
+                judge_tokenizer,
+                judge_model,
+                question,
+                gold,
+                pred
+            )
+        except Exception as e:
+            print(f"Error running Judge on item {idx}: {e}")
+            judge_bool = False
+            raw_text = "ERROR"
+        
+        print(f"Gold: {gold} | Pred: {pred} | Correct: {judge_bool}")
+
+        if judge_bool is not None:
+            num_valid_judged += 1
+            if judge_bool:
+                num_correct += 1
+
+        result_item = {
+            "idx": idx,
+            "question": question,
+            "gold": gold,
+            "pred": pred,
+            "judge_correct": judge_bool,
+            "judge_raw": raw_text,
+        }
+        results.append(result_item)
+
+        # Write incrementally
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(result_item, ensure_ascii=False) + "\n")
 
     print(f"  Results saved to: {out_path}")
+
+    accuracy = num_correct / num_valid_judged if num_valid_judged > 0 else 0.0
+
+    print(f"\nDeSTA on {dataset_name} ({hop_prefix}{split}), judged by Qwen (binary):")
+    print(f"  Valid judged samples: {num_valid_judged}/{total}")
+    print(f"  Accuracy: {num_correct}/{num_valid_judged} = {accuracy:.4f}")
 
     return {
         "dataset_name": dataset_name,
@@ -391,32 +307,24 @@ def evaluate_desta_binary_accuracy_on_dataset(
 
 def main():
     import argparse
-    global ACD_ENABLED, ACD_ALPHA, DESTA_MODEL_ID
-    
     parser = argparse.ArgumentParser(description="SAKURA Evaluation for DeSTA/ORCA models")
     parser.add_argument("--model_id", type=str, default=DESTA_MODEL_ID,
                         help="HuggingFace model ID or local checkpoint path")
-    parser.add_argument("--acd_alpha", type=float, default=None,
-                        help="ACD contrast strength (enables ACD if set). Try 0.3, 0.5, 0.7, 1.0")
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR,
                         help="Directory to save results")
     parser.add_argument("--datasets", type=str, nargs="+", default=None,
                         help="Specific datasets to evaluate (default: all)")
     args = parser.parse_args()
-    
+
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+
     # Update globals
-    DESTA_MODEL_ID = args.model_id
-    if args.acd_alpha is not None:
-        ACD_ENABLED = True
-        ACD_ALPHA = args.acd_alpha
-        print(f"ACD enabled with alpha={ACD_ALPHA}")
+    desta_model_id = args.model_id
     
-    # Load DeSTA
-    print(f"Loading model from {DESTA_MODEL_ID}...")
-    desta_model = DeSTA25AudioModel.from_pretrained(
-        DESTA_MODEL_ID,
-        torch_dtype=torch.bfloat16
-    )
+    # 載入 DeSTA
+    print(f"Loading DeSTA model from {desta_model_id}...")
+    desta_model = DeSTA25AudioModel.from_pretrained(desta_model_id)
     desta_model.to(device)
     desta_model.eval()
 
@@ -428,7 +336,7 @@ def main():
     datasets_to_eval = DATASETS
     if args.datasets:
         datasets_to_eval = {k: v for k, v in DATASETS.items() if k in args.datasets}
-    
+
     # 跑所有 dataset × hop 組合
     all_stats = []
 
@@ -448,8 +356,6 @@ def main():
 
     # 總結表
     print("\n================ Overall summary ================")
-    if ACD_ENABLED:
-        print(f"ACD alpha: {ACD_ALPHA}")
     for s in all_stats:
         hop_tag = s["hop_prefix"].rstrip("_")
         print(
@@ -461,4 +367,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

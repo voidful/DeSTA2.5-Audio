@@ -139,7 +139,9 @@ def run_qwen_omni_on_item(model, processor, item, tmp_wav_path):
     full_question = (
         f"Question: {item['question'].strip()}\n"
         f"{choice_text}\n\n"
-        "Answer with the text corresponding to the correct answer. The correct answer is"
+        "Please analyze the audio concisely step-by-step in <think> tags. "
+        "Then, you MUST output the final answer strictly in the format: \"The correct answer is: ...\". "
+        "The correct answer is"
     )
 
     # Use Qwen2.5-Omni's exact default system prompt to avoid warning
@@ -179,7 +181,7 @@ def run_qwen_omni_on_item(model, processor, item, tmp_wav_path):
         # The thinker is the language model component without the audio output head
         text_ids = model.thinker.generate(
             **inputs,
-            max_new_tokens=512,
+            max_new_tokens=2048,
             do_sample=False,
         )
 
@@ -187,20 +189,49 @@ def run_qwen_omni_on_item(model, processor, item, tmp_wav_path):
     text_ids = text_ids[:, inputs.input_ids.size(1):]
     pred = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 
-    if isinstance(pred, str):
-        # Clean thinking process
-        pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
+    return extract_answer_choice(pred)
 
-        # Extract answer following "The correct answer is:"
-        match = re.search(r'The correct answer is:\s*["\']?(.*?)["\']?$', pred_no_think, re.IGNORECASE)
+def extract_answer_choice(response):
+    """
+    Robustly extract answer choice (A/B/C/D) or full answer text from model response.
+    """
+    if not response:
+        return None
+
+    pred = response.strip()
+
+    # 1) Clean thinking process
+    pred_no_think = re.sub(r'<(?:think|thinking|analysis|analyze_audio|start_analysis)>.*?(?:</(?:think|thinking|analysis|analyze_audio|start_analysis)>|$)', '', pred, flags=re.DOTALL).strip()
+
+    # 2) Extract answer with multiple fallback patterns
+    patterns = [
+        r'The correct answer is:\s*["\']?(.*?)["\']?$',
+        r'Final Answer:\s*["\']?(.*?)["\']?$',
+        r'Answer:\s*["\']?(.*?)["\']?$',
+        r'Option\s*([A-D])'
+    ]
+
+    extracted = None
+    for pat in patterns:
+        match = re.search(pat, pred_no_think, re.IGNORECASE)
         if match:
-            cleaned_pred = match.group(1).strip()
-        else:
-            cleaned_pred = pred_no_think
+            extracted = match.group(1).strip()
+            break
 
-        cleaned_pred = cleaned_pred.strip('"').strip("'")
-        return cleaned_pred
-    return str(pred)
+    if not extracted:
+        # Fallback: look for last isolated A/B/C/D or (A)/(B)/(C)/(D)
+        paren_match = re.findall(r'\(([A-D])\)', pred_no_think)
+        if paren_match:
+            extracted = paren_match[-1]  # Take the last one
+        else:
+            # Last resort: look for just A-D at the end
+            last_char_match = re.search(r'\b([A-D])\b[. ]*$', pred_no_think)
+            if last_char_match:
+                extracted = last_char_match.group(1)
+            else:
+                extracted = pred_no_think  # Return full string
+
+    return extracted.strip('"').strip("'").strip()
 
 
 # =====================

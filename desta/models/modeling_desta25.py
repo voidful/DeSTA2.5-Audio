@@ -554,9 +554,8 @@ class WhisperPerception(nn.Module):
                 
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    None,
-                    None,
-                    output_attentions=None,
+                    attention_mask=None,
+                    layer_head_mask=None,
                 )
                 hidden_states = layer_outputs[0]
 
@@ -588,9 +587,8 @@ class WhisperPerception(nn.Module):
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    None,
-                    None,
-                    output_attentions=None,
+                    attention_mask=None,
+                    layer_head_mask=None,
                 )
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
@@ -606,9 +604,8 @@ class WhisperPerception(nn.Module):
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = encoder_layer(
                     hidden_states,
-                    None,
-                    None,
-                    output_attentions=None,
+                    attention_mask=None,
+                    layer_head_mask=None,
                 )
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
@@ -2060,7 +2057,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             # RUN ASR
             if asr_features:
                 asr_features = self.processor(asr_features, sampling_rate=16000, return_tensors="pt").input_features
-                asr_features = asr_features.to(self.device)
+                asr_features = asr_features.to(self.device).half()
 
                 transcriptions = self.perception.whisper.generate(
                     input_features=asr_features,

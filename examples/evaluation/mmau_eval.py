@@ -151,7 +151,8 @@ def extract_answer_choice(response):
     pred = response.strip()
     
     # 1) Clean thinking process
-    pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
+    # 1) Clean thinking process
+    pred_no_think = re.sub(r'<(?:think|thinking|analysis|analyze_audio|start_analysis)>.*?(?:</(?:think|thinking|analysis|analyze_audio|start_analysis)>|$)', '', pred, flags=re.DOTALL).strip()
     
     # 2) Extract answer with multiple fallback patterns
     patterns = [
@@ -190,10 +191,9 @@ def extract_answer_choice(response):
 def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     write_wav_from_dataset_item(item, wav_path)
     
-    system_prompt = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
+    system_prompt = "You are an audio assistant."
     
     # Build question with choices (matching inference_desta25_audio.py logic)
-    question = f"{item['question']} Choose from the following options: "
     choices = item["choices"]
     # Handle if choices is a string representation of a list
     if isinstance(choices, str):
@@ -202,13 +202,15 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         except:
             pass
 
+    options_str = ""
     for i, option in enumerate(choices):
-        question += f'"{option}"'
+        options_str += f'"{option}"'
         if i == len(choices) - 2:
-            question += " or "
-        else:
-            question += ", "
-    question = question.rstrip(", ")
+            options_str += " or "
+        elif i < len(choices) - 1:
+            options_str += ", "
+            
+    question = f"{item['question']}\nChoose from the following options: {options_str}"
 
     messages = [
         {
@@ -218,7 +220,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
         {
             "role": "user",
             # Audio First: <|AUDIO|>\n\n{text}
-            "content": f"<|AUDIO|>\n\n{question}", 
+            "content": f"<|AUDIO|>\n\n{question}\n\nInstructions:\nListen to the audio and select the correct option from the list.\n\nFormat:\nReasoning: <Brief thoughts>\nAnswer: (x) label", 
             "audios": [{
                 "audio": wav_path
             }]
@@ -226,15 +228,17 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
     ]
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = model.generate(
-                    messages=messages,
-                    do_sample=False,
-                    max_new_tokens=512,
-                    repetition_penalty=1.5 # Prevent loops
-                )
+        outputs = model.generate(
+            messages=messages,
+            do_sample=False,
+            max_new_tokens=512
+        )
     
-    pred = outputs.text[0] if isinstance(outputs.text, list) else outputs.text
+    pred = outputs.text
+    if isinstance(pred, list):
+        pred = pred[0]
+    if isinstance(pred, str):
+        pred = pred.strip()
     return extract_answer_choice(pred)
 
 # =====================
