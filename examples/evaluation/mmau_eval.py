@@ -80,11 +80,15 @@ def load_audio_as_array(item, snr_db=None):
     """
     Robustly extract audio array from dataset item.
     Optionally injects additive Gaussian noise at the given SNR (dB).
+    Supports both legacy dict format and new AudioDecoder (torchcodec) objects.
     """
-    audio_obj = item.get("audio")
+    audio_obj = item.get("audio") if isinstance(item, dict) else getattr(item, "audio", None)
     # For MMAU it might be "context" or "audio" depending on version, check both
     if audio_obj is None:
-        audio_obj = item.get("context")
+        audio_obj = item.get("context") if isinstance(item, dict) else getattr(item, "context", None)
+
+    if audio_obj is None:
+        return np.zeros(16000, dtype=np.float32), 16000
 
     if isinstance(audio_obj, dict):
         if "array" in audio_obj and audio_obj["array"] is not None:
@@ -99,7 +103,13 @@ def load_audio_as_array(item, snr_db=None):
         y, sr = librosa.load(audio_obj, sr=None)
         y = y.astype(np.float32)
     else:
-        return np.zeros(16000, dtype=np.float32), 16000
+        # New datasets versions use AudioDecoder objects (torchcodec)
+        try:
+            arr = audio_obj["array"] if hasattr(audio_obj, '__getitem__') else audio_obj.array
+            y = np.asarray(arr, dtype=np.float32)
+            sr = getattr(audio_obj, "sampling_rate", 16000)
+        except Exception:
+            return np.zeros(16000, dtype=np.float32), 16000
     
     # Inject noise if requested
     y = add_gaussian_noise_snr(y, snr_db)

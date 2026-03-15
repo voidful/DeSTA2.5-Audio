@@ -70,14 +70,28 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
+def _extract_audio_array_and_sr(audio_obj):
+    """
+    Robustly extract (audio_array, sample_rate) from an audio object.
+    Supports both legacy dict format and new AudioDecoder (torchcodec) objects.
+    """
+    if isinstance(audio_obj, dict):
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = audio_obj.get("sampling_rate", 16000)
+    else:
+        # New datasets versions use AudioDecoder objects (torchcodec)
+        arr = np.asarray(audio_obj["array"] if hasattr(audio_obj, '__getitem__') else audio_obj.array, dtype=np.float32)
+        sr = getattr(audio_obj, "sampling_rate", 16000)
+    return arr, sr
+
+
 def write_wav_from_dataset_item(item, wav_path, snr_db=None):
     """
     從 SAKURA 問答 dataset item 取出 audio 寫成 wav 檔。
     Optionally injects additive Gaussian noise at the given SNR (dB).
     """
     audio_obj = item["audio"]
-    audio_array = np.asarray(audio_obj["array"], dtype=np.float32)
-    sample_rate = audio_obj.get("sampling_rate", 16000)
+    audio_array, sample_rate = _extract_audio_array_and_sr(audio_obj)
 
     # Inject noise if requested
     audio_array = add_gaussian_noise_snr(audio_array, snr_db)
@@ -255,8 +269,7 @@ def extract_per_group_variance(
 
     for idx, item in enumerate(tqdm(ds, desc=f"Variance extraction ({dataset_name}, {snr_tag})")):
         audio_obj = item["audio"]
-        audio_array = np.asarray(audio_obj["array"], dtype=np.float32)
-        sample_rate = audio_obj.get("sampling_rate", 16000)
+        audio_array, sample_rate = _extract_audio_array_and_sr(audio_obj)
         audio_array = add_gaussian_noise_snr(audio_array, snr_db)
 
         # Write temp wav and get features
