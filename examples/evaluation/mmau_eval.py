@@ -12,6 +12,27 @@ from desta import DeSTA25AudioModel
 import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+
+# =====================
+# Noise Injection
+# =====================
+
+def add_gaussian_noise_snr(audio_array: np.ndarray, snr_db) -> np.ndarray:
+    """
+    Add white Gaussian noise to an audio waveform at the specified SNR (dB).
+    If snr_db is None or inf, returns the original audio unchanged.
+    """
+    if snr_db is None or np.isinf(snr_db):
+        return audio_array
+    audio_array = np.asarray(audio_array, dtype=np.float32)
+    sig_power = np.mean(audio_array ** 2)
+    if sig_power < 1e-10:
+        return audio_array  # silence – nothing to corrupt
+    snr_linear = 10 ** (snr_db / 10.0)
+    noise_power = sig_power / snr_linear
+    noise = np.random.default_rng().normal(0, np.sqrt(noise_power), audio_array.shape).astype(np.float32)
+    return audio_array + noise
+
 # =====================
 # 基本設定
 # =====================
@@ -55,9 +76,10 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
-def load_audio_as_array(item):
+def load_audio_as_array(item, snr_db=None):
     """
     Robustly extract audio array from dataset item.
+    Optionally injects additive Gaussian noise at the given SNR (dB).
     """
     audio_obj = item.get("audio")
     # For MMAU it might be "context" or "audio" depending on version, check both
@@ -66,21 +88,29 @@ def load_audio_as_array(item):
 
     if isinstance(audio_obj, dict):
         if "array" in audio_obj and audio_obj["array"] is not None:
-             return np.asarray(audio_obj["array"], dtype=np.float32), audio_obj.get("sampling_rate", 16000)
+             y = np.asarray(audio_obj["array"], dtype=np.float32)
+             sr = audio_obj.get("sampling_rate", 16000)
         elif "path" in audio_obj and audio_obj["path"]:
              y, sr = librosa.load(audio_obj["path"], sr=None)
-             return y.astype(np.float32), sr
+             y = y.astype(np.float32)
+        else:
+             return np.zeros(16000, dtype=np.float32), 16000
     elif isinstance(audio_obj, str):
         y, sr = librosa.load(audio_obj, sr=None)
-        return y.astype(np.float32), sr
+        y = y.astype(np.float32)
+    else:
+        return np.zeros(16000, dtype=np.float32), 16000
     
-    return np.zeros(16000, dtype=np.float32), 16000
+    # Inject noise if requested
+    y = add_gaussian_noise_snr(y, snr_db)
+    return y, sr
 
-def write_wav_from_dataset_item(item, wav_path):
+def write_wav_from_dataset_item(item, wav_path, snr_db=None):
     """
     Robustly extract audio and write to WAV.
+    Optionally injects additive Gaussian noise at the given SNR (dB).
     """
-    y, sr = load_audio_as_array(item)
+    y, sr = load_audio_as_array(item, snr_db=snr_db)
     return write_wav_from_array(y, sr, wav_path)
 
 def build_prompt(instr, choices):
@@ -188,8 +218,8 @@ def extract_answer_choice(response):
 # DeSTA 推論
 # =====================
 
-def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH):
-    write_wav_from_dataset_item(item, wav_path)
+def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
+    write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
     
     system_prompt = "You are an audio assistant."
     
@@ -330,7 +360,11 @@ def main():
     parser.add_argument("--split", type=str, default=DEFAULT_SPLIT)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
+    parser.add_argument("--snr_db", type=float, default=None,
+                        help="SNR in dB for additive Gaussian noise (default: None = clean)")
     args = parser.parse_args()
+    
+    snr_tag = "clean" if args.snr_db is None else f"snr{int(args.snr_db)}"
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -379,7 +413,7 @@ def main():
                 pass
 
         # 1) DeSTA 推論
-        pred = run_desta_on_item(model, item, TMP_WAV_PATH)
+        pred = run_desta_on_item(model, item, TMP_WAV_PATH, snr_db=args.snr_db)
 
         # 2) Match
         is_string_correct = string_match(answer, pred, choices)
@@ -443,7 +477,7 @@ def main():
     print("*" * 30)
 
     # Save results
-    out_path = os.path.join(args.output_dir, f"mmau_{args.split}_results.jsonl")
+    out_path = os.path.join(args.output_dir, f"mmau_{args.split}_{snr_tag}_results.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")

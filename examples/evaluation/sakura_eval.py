@@ -12,6 +12,27 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 logging.basicConfig(level = logging.INFO)
 
+
+# =====================
+# Noise Injection
+# =====================
+
+def add_gaussian_noise_snr(audio_array: np.ndarray, snr_db) -> np.ndarray:
+    """
+    Add white Gaussian noise to an audio waveform at the specified SNR (dB).
+    If snr_db is None or inf, returns the original audio unchanged.
+    """
+    if snr_db is None or np.isinf(snr_db):
+        return audio_array
+    audio_array = np.asarray(audio_array, dtype=np.float32)
+    sig_power = np.mean(audio_array ** 2)
+    if sig_power < 1e-10:
+        return audio_array  # silence – nothing to corrupt
+    snr_linear = 10 ** (snr_db / 10.0)
+    noise_power = sig_power / snr_linear
+    noise = np.random.default_rng().normal(0, np.sqrt(noise_power), audio_array.shape).astype(np.float32)
+    return audio_array + noise
+
 DESTA_MODEL_ID = "voidful/desta25_4b_baseline_full"
 
 DATASETS = {
@@ -49,13 +70,17 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
-def write_wav_from_dataset_item(item, wav_path):
+def write_wav_from_dataset_item(item, wav_path, snr_db=None):
     """
     從 SAKURA 問答 dataset item 取出 audio 寫成 wav 檔。
+    Optionally injects additive Gaussian noise at the given SNR (dB).
     """
     audio_obj = item["audio"]
-    audio_array = audio_obj["array"]
+    audio_array = np.asarray(audio_obj["array"], dtype=np.float32)
     sample_rate = audio_obj.get("sampling_rate", 16000)
+
+    # Inject noise if requested
+    audio_array = add_gaussian_noise_snr(audio_array, snr_db)
 
     return write_wav_from_array(audio_array, sample_rate, wav_path)
 
@@ -64,12 +89,13 @@ def write_wav_from_dataset_item(item, wav_path):
 # DeSTA 推論
 # =====================
 
-def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH):
+def run_desta_on_item(model, item, hop_prefix, wav_path=TMP_WAV_PATH, snr_db=None):
     """
     對單一樣本跑 DeSTA. 回傳文字答案。
     hop_prefix: "single_" 或 "multi_"
+    snr_db: optional noise level in dB (None = clean)
     """
-    write_wav_from_dataset_item(item, wav_path)
+    write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
 
     instruction_key = f"{hop_prefix}instruction"
     # DEBUG input to check for leakage
@@ -196,6 +222,138 @@ def call_qwen_binary_judge(tokenizer, model, question, gold, pred):
 # 主評測函式（可重複呼叫）
 # =====================
 
+def extract_per_group_variance(
+    desta_model,
+    dataset_id,
+    dataset_name,
+    split=DATA_SPLIT,
+    snr_db=None,
+    output_dir=RESULT_DIR,
+    max_samples=50,
+):
+    """
+    Extract per-group variance from the ORCA variational connector.
+    Runs a forward pass through the perception module to capture logvar,
+    then computes mean variance per group across the dataset.
+    """
+    connector = desta_model.perception.connector
+    if not getattr(connector, 'variational_enabled', False):
+        print("WARNING: Model does not have variational grouping enabled. Skipping variance extraction.")
+        return None
+
+    num_groups = connector.num_groups
+    queries_per_group = connector.queries_per_group
+
+    ds = load_dataset(dataset_id, "default")[split]
+    if max_samples and len(ds) > max_samples:
+        ds = ds.select(range(max_samples))
+
+    # Accumulators for per-group variance
+    group_variances = [[] for _ in range(num_groups)]  # list of lists of float
+
+    snr_tag = "clean" if snr_db is None else f"snr{int(snr_db)}"
+
+    for idx, item in enumerate(tqdm(ds, desc=f"Variance extraction ({dataset_name}, {snr_tag})")):
+        audio_obj = item["audio"]
+        audio_array = np.asarray(audio_obj["array"], dtype=np.float32)
+        sample_rate = audio_obj.get("sampling_rate", 16000)
+        audio_array = add_gaussian_noise_snr(audio_array, snr_db)
+
+        # Write temp wav and get features
+        wav_path = f"tmp_variance_{idx}.wav"
+        write_wav_from_array(audio_array, sample_rate, wav_path)
+
+        from desta.utils.audio import AudioSegment
+        feature = AudioSegment.from_file(wav_path, target_sr=16000, channel_selector="average").samples
+        if not hasattr(desta_model, 'processor'):
+            desta_model._setup_generation()
+        input_features = desta_model.processor([feature], sampling_rate=16000, return_tensors="pt").input_features
+        input_features = input_features.to(desta_model.device)
+
+        with torch.no_grad():
+            # Forward through perception to get global_tokens + losses
+            global_tokens, speech_lengths = desta_model.perception(input_features)
+            # Access the cached logvar from the connector's last forward pass
+            # The connector stores mu and logvar during forward when variational_enabled
+            # We need to re-run the connector to capture logvar
+            # Actually, the connector already ran in perception.forward above.
+            # We can hook into mu_proj and logvar_proj by running them on the pre-variational tokens.
+            # Easier: just re-extract from the connector's forward logic
+            # The connector's forward returns z (sampled), but we need logvar per group.
+            # Let's hook the connector directly.
+            pass
+
+        # Re-run connector forward to capture mu and logvar
+        # Collect encoder hidden states
+        with torch.no_grad():
+            # Get whisper encoder hidden states
+            target_dtype = desta_model.perception.connector.proj[1].weight.dtype
+            target_device = desta_model.perception.connector.proj[1].weight.device
+            input_features_typed = input_features.to(dtype=target_dtype, device=target_device)
+
+            whisper_encoder = desta_model.perception.whisper.model.encoder
+            expected_seq_length = whisper_encoder.config.max_source_positions * whisper_encoder.conv1.stride[0] * whisper_encoder.conv2.stride[0]
+
+            inputs_embeds = torch.nn.functional.gelu(whisper_encoder.conv1(input_features_typed))
+            inputs_embeds = torch.nn.functional.gelu(whisper_encoder.conv2(inputs_embeds))
+            inputs_embeds = inputs_embeds.permute(0, 2, 1)
+            embed_pos = whisper_encoder.embed_positions.weight[:whisper_encoder.config.max_source_positions, :]
+            embed_pos = embed_pos.to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            hidden_states = inputs_embeds + embed_pos
+
+            all_layer_outputs = []
+            for encoder_layer in whisper_encoder.layers:
+                layer_outputs = encoder_layer(hidden_states, attention_mask=None)
+                hidden_states = layer_outputs[0]
+                all_layer_outputs.append(hidden_states)
+
+            # Now run connector forward (which includes variational reparameterization)
+            # But we need to capture logvar. We'll temporarily hook mu_proj and logvar_proj.
+            captured = {}
+            def hook_logvar(module, input, output):
+                captured['logvar'] = output.detach()
+            def hook_mu(module, input, output):
+                captured['mu'] = output.detach()
+
+            h_mu = connector.mu_proj.register_forward_hook(hook_mu)
+            h_lv = connector.logvar_proj.register_forward_hook(hook_logvar)
+
+            connector(all_layer_outputs)
+
+            h_mu.remove()
+            h_lv.remove()
+
+        if 'logvar' in captured:
+            logvar = captured['logvar']  # [1, total_queries, d_llm]
+            variance = torch.exp(logvar)  # σ²
+            # Split into groups
+            for g in range(num_groups):
+                start = g * queries_per_group
+                end = start + queries_per_group
+                group_var = variance[0, start:end, :].mean().item()
+                group_variances[g].append(group_var)
+
+        # Cleanup temp file
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+
+    # Compute mean per-group variance
+    result = {}
+    for g in range(num_groups):
+        if group_variances[g]:
+            result[f"Group {g}"] = float(np.mean(group_variances[g]))
+        else:
+            result[f"Group {g}"] = None
+
+    # Save
+    out_path = os.path.join(output_dir, f"variance_{dataset_name.lower()}_{snr_tag}.json")
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"Per-group variance saved to: {out_path}")
+    print(json.dumps(result, indent=2))
+    return result
+
+
 def evaluate_desta_binary_accuracy_on_dataset(
     desta_model,
     judge_tokenizer,
@@ -205,13 +363,15 @@ def evaluate_desta_binary_accuracy_on_dataset(
     hop_prefix,
     split=DATA_SPLIT,
     output_dir=RESULT_DIR,
+    snr_db=None,
 ):
     """
     對單一 dataset + 單一 hop_prefix (single_ 或 multi_) 做完整評測。
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"\n========== Evaluating {dataset_name} ({dataset_id}), hop={hop_prefix} ==========")
+    snr_tag = "clean" if snr_db is None else f"snr{int(snr_db)}"
+    print(f"\n========== Evaluating {dataset_name} ({dataset_id}), hop={hop_prefix}, noise={snr_tag} ==========")
 
     # 載入資料
     ds = load_dataset(dataset_id, "default")[split]
@@ -228,7 +388,7 @@ def evaluate_desta_binary_accuracy_on_dataset(
     hop_tag = hop_prefix.rstrip("_")  # "single" or "multi"
     out_path = os.path.join(
         output_dir,
-        f"desta_{dataset_name.lower()}_{hop_tag}_qwen_binary_results.jsonl"
+        f"desta_{dataset_name.lower()}_{hop_tag}_{snr_tag}_qwen_binary_results.jsonl"
     )
 
     # Clean output file first
@@ -241,7 +401,7 @@ def evaluate_desta_binary_accuracy_on_dataset(
 
         # 1) DeSTA 推论
         try:
-            pred = run_desta_on_item(desta_model, item, hop_prefix, TMP_WAV_PATH)
+            pred = run_desta_on_item(desta_model, item, hop_prefix, TMP_WAV_PATH, snr_db=snr_db)
         except Exception as e:
             print(f"Error running DeSTA on item {idx}: {e}")
             pred = "ERROR"
@@ -314,6 +474,12 @@ def main():
                         help="Directory to save results")
     parser.add_argument("--datasets", type=str, nargs="+", default=None,
                         help="Specific datasets to evaluate (default: all)")
+    parser.add_argument("--snr_db", type=float, default=None,
+                        help="SNR in dB for additive Gaussian noise (default: None = clean)")
+    parser.add_argument("--extract_variance", action="store_true",
+                        help="Extract per-group variance from ORCA variational connector")
+    parser.add_argument("--variance_max_samples", type=int, default=50,
+                        help="Max samples for variance extraction (default: 50)")
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
@@ -351,11 +517,13 @@ def main():
                 hop_prefix=hop_prefix,
                 split=DATA_SPLIT,
                 output_dir=args.output_dir,
+                snr_db=args.snr_db,
             )
             all_stats.append(stats)
 
     # 總結表
-    print("\n================ Overall summary ================")
+    snr_tag = "clean" if args.snr_db is None else f"SNR {args.snr_db} dB"
+    print(f"\n================ Overall summary ({snr_tag}) ================")
     for s in all_stats:
         hop_tag = s["hop_prefix"].rstrip("_")
         print(
@@ -363,6 +531,20 @@ def main():
             f"acc={s['accuracy']:.4f} "
             f"({s['num_correct']}/{s['num_valid_judged']} valid; total={s['total']})"
         )
+
+    # Per-group variance extraction (optional)
+    if args.extract_variance:
+        print("\n================ Per-Group Variance Extraction ================")
+        for dataset_name, dataset_id in datasets_to_eval.items():
+            extract_per_group_variance(
+                desta_model=desta_model,
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                split=DATA_SPLIT,
+                snr_db=args.snr_db,
+                output_dir=args.output_dir,
+                max_samples=args.variance_max_samples,
+            )
 
 
 if __name__ == "__main__":
