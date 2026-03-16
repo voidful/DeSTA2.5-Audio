@@ -268,6 +268,8 @@ def run_desta_batch(model, items, out_dir, snr_db=None):
 
     # Ensure left-padding is used for batch generation with decoder-only models
     # This is critical; otherwise, right-padded tokens corrupt the generation attention
+    if hasattr(model, "_setup_generation") and not hasattr(model, "tokenizer"):
+        model._setup_generation()
     old_padding_side = model.tokenizer.padding_side
     model.tokenizer.padding_side = "left"
 
