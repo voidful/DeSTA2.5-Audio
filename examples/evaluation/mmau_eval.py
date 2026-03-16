@@ -93,43 +93,84 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
-def load_audio_as_array(item, snr_db=None):
+def load_audio_as_array(item, snr_db=None, sample_idx=0):
     """
     Robustly extract audio array from dataset item.
     Optionally injects additive Gaussian noise at the given SNR (dB).
-    Supports both legacy dict format and new AudioDecoder (torchcodec) objects.
+    Compatible with both legacy dict format and new AudioDecoder (torchcodec) objects.
     """
-    audio_obj = item.get("audio") if isinstance(item, dict) else getattr(item, "audio", None)
-    # For MMAU it might be "context" or "audio" depending on version, check both
-    if audio_obj is None:
-        audio_obj = item.get("context") if isinstance(item, dict) else getattr(item, "context", None)
+    # --- Step 1: Get the audio object from item ---
+    audio_obj = None
+    for key in ("audio", "context"):
+        if isinstance(item, dict):
+            audio_obj = item.get(key)
+        else:
+            audio_obj = getattr(item, key, None)
+        if audio_obj is not None:
+            break
 
     if audio_obj is None:
+        print(f"⚠️ [sample {sample_idx}] No 'audio' or 'context' field found in item. Keys: {list(item.keys()) if hasattr(item, 'keys') else 'N/A'}. Returning silence.")
         return np.zeros(16000, dtype=np.float32), 16000
 
+    # --- Step 2: Extract array + sample rate from audio_obj ---
+    y, sr = None, 16000
+
+    # Strategy A: dict with "array" key (legacy datasets format)
     if isinstance(audio_obj, dict):
         if "array" in audio_obj and audio_obj["array"] is not None:
-             y = np.asarray(audio_obj["array"], dtype=np.float32)
-             sr = audio_obj.get("sampling_rate", 16000)
+            y = np.asarray(audio_obj["array"], dtype=np.float32)
+            sr = audio_obj.get("sampling_rate", 16000)
         elif "path" in audio_obj and audio_obj["path"]:
-             y, sr = librosa.load(audio_obj["path"], sr=None)
-             y = y.astype(np.float32)
-        else:
-             return np.zeros(16000, dtype=np.float32), 16000
+            import librosa
+            y, sr = librosa.load(audio_obj["path"], sr=None)
+            y = y.astype(np.float32)
+
+    # Strategy B: file path string
     elif isinstance(audio_obj, str):
+        import librosa
         y, sr = librosa.load(audio_obj, sr=None)
         y = y.astype(np.float32)
+
+    # Strategy C: new datasets AudioDecoder / torchcodec objects
     else:
-        # New datasets versions use AudioDecoder objects (torchcodec)
-        try:
-            arr = audio_obj["array"] if hasattr(audio_obj, '__getitem__') else audio_obj.array
-            y = np.asarray(arr, dtype=np.float32)
-            sr = getattr(audio_obj, "sampling_rate", 16000)
-        except Exception:
+        obj_type = type(audio_obj).__name__
+        # Try multiple access patterns
+        for attempt, extractor in enumerate([
+            # C1: dict-like ["array"] access
+            lambda o: (np.asarray(o["array"], dtype=np.float32), o.get("sampling_rate", 16000) if hasattr(o, "get") else getattr(o, "sampling_rate", 16000)),
+            # C2: attribute .array access
+            lambda o: (np.asarray(o.array, dtype=np.float32), getattr(o, "sampling_rate", 16000)),
+            # C3: numpy() for torch tensors
+            lambda o: (o.numpy().astype(np.float32) if hasattr(o, 'numpy') else None, 16000),
+        ]):
+            try:
+                result = extractor(audio_obj)
+                if result[0] is not None and len(result[0]) > 0:
+                    y, sr = result
+                    if sample_idx == 0:
+                        print(f"ℹ️  [sample 0] Audio loaded via strategy C{attempt+1} from {obj_type}, shape={y.shape}, sr={sr}")
+                    break
+            except Exception:
+                continue
+
+        if y is None:
+            print(f"⚠️ [sample {sample_idx}] FAILED to extract audio from {obj_type}. "
+                  f"dir(audio_obj)={[a for a in dir(audio_obj) if not a.startswith('_')]}")
             return np.zeros(16000, dtype=np.float32), 16000
-    
+
+    # --- Step 3: Validate ---
+    if y is None or len(y) == 0:
+        print(f"⚠️ [sample {sample_idx}] Audio array is empty. Returning silence.")
+        return np.zeros(16000, dtype=np.float32), 16000
+
+    # Print debug for first sample
+    if sample_idx == 0:
+        print(f"ℹ️  [sample 0] Audio loaded OK: shape={y.shape}, sr={sr}, "
+              f"range=[{y.min():.4f}, {y.max():.4f}], type(audio_obj)={type(audio_obj).__name__}")
+
     # Inject noise if requested
-    y = add_gaussian_noise_snr(y, snr_db)
+    y = add_gaussian_noise_snr(y, snr_db, sample_idx=sample_idx)
     return y, sr
 
 def write_wav_from_dataset_item(item, wav_path, snr_db=None):
@@ -208,8 +249,7 @@ def extract_answer_choice(response):
     pred = response.strip()
     
     # 1) Clean thinking process
-    # 1) Clean thinking process
-    pred_no_think = re.sub(r'<(?:think|thinking|analysis|analyze_audio|start_analysis)>.*?(?:</(?:think|thinking|analysis|analyze_audio|start_analysis)>|$)', '', pred, flags=re.DOTALL).strip()
+    pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
     
     # 2) Extract answer with multiple fallback patterns
     patterns = [
@@ -290,6 +330,7 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
                 messages=messages,
                 do_sample=False,
                 max_new_tokens=512,
+                repetition_penalty=1.5
             )
     
     pred = outputs.text
