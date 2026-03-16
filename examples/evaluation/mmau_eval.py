@@ -6,6 +6,7 @@ import gc
 import numpy as np
 import re
 import argparse
+from collections import Counter, defaultdict
 from tqdm import tqdm
 
 import torch
@@ -297,6 +298,45 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
         pred = pred.strip()
     return extract_answer_choice(pred)
 
+
+def run_desta_with_latent_sampling(model, item, num_samples, tau,
+                                   wav_path=TMP_WAV_PATH, snr_db=None):
+    """
+    Run DeSTA inference S times with latent sampling (τ > 0),
+    then return the majority-voted answer.
+    
+    Each sample draws z = μ + τ·σ·ε with fresh ε ~ N(0,I),
+    giving a different perceptual "view" of the same audio.
+    """
+    connector = model.perception.connector
+    
+    # Check if model supports variational sampling
+    if not getattr(connector, 'variational_enabled', False):
+        # Not variational — just run once
+        pred = run_desta_on_item(model, item, wav_path, snr_db=snr_db)
+        return pred, [pred]
+    
+    # Set the sampling temperature
+    original_alpha = connector.s1_inference_alpha
+    connector.s1_inference_alpha = tau
+    
+    predictions = []
+    for s in range(num_samples):
+        pred = run_desta_on_item(model, item, wav_path, snr_db=snr_db)
+        predictions.append(pred)
+    
+    # Restore original alpha
+    connector.s1_inference_alpha = original_alpha
+    
+    # Majority vote
+    vote_counts = Counter(p for p in predictions if p is not None)
+    if vote_counts:
+        final_pred = vote_counts.most_common(1)[0][0]
+    else:
+        final_pred = predictions[0] if predictions else None
+    
+    return final_pred, predictions
+
 # =====================
 # LLM Judge Logic
 # =====================
@@ -476,6 +516,8 @@ def main():
                         help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     parser.add_argument("--group_ablation", action="store_true",
                         help="Run group config ablation diagnostics (cosine sim on MMAU)")
+    parser.add_argument("--latent_ablation", action="store_true",
+                        help="Run latent sampling ablation over specific (tau, S) pairs from the paper.")
     args = parser.parse_args()
     
     # Set global random seeds for reproducibility
@@ -507,13 +549,25 @@ def main():
     if args.max_samples:
         ds = ds.select(range(min(args.max_samples, len(ds))))
 
-    total = 0
-    corr = 0
+    # Output metrics tracker
+    # Configs: (tau, S)
+    latent_configs = [(0.0, 1)]
+    if args.latent_ablation:
+        latent_configs.extend([
+            (0.3, 3),
+            (0.3, 5),
+            (0.5, 5),
+            (1.0, 5)
+        ])
+        print(f"Latent ablation enabled. Running configs (tau, S): {latent_configs}")
 
-    # Metrics trackers
-    task_metrics = {}
-    diff_metrics = {}
-    subcat_metrics = {}
+    # trackers[config] = {"total": 0, "corr": 0, "task": {...}, "diff": {...}, "subcat": {...}}
+    trackers = {cfg: {
+        "total": 0, "corr": 0,
+        "task": defaultdict(lambda: [0,0]),
+        "diff": defaultdict(lambda: [0,0]),
+        "subcat": defaultdict(lambda: [0,0])
+    } for cfg in latent_configs}
 
     results = []
 
@@ -529,77 +583,110 @@ def main():
             except:
                 pass
 
-        # 1) DeSTA 推論
-        pred = run_desta_on_item(model, item, TMP_WAV_PATH, snr_db=args.snr_db)
-
-        # 2) Match
-        is_string_correct = string_match(answer, pred, choices)
-        
-        # 3) LLM Judge as a secondary check if string match fails or to be sure
-        is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
-        
-        # Combine results: if either is correct, we consider it correct
-        is_correct = is_string_correct or is_llm_correct
-        
-        print(f"Match: {is_string_correct}, LLM Judge: {is_llm_correct} ({judge_raw}), Ans: {answer}, Pred: {pred}")
-        # Update metrics
-        if task not in task_metrics: task_metrics[task] = [0, 0]
-        if difficulty not in diff_metrics: diff_metrics[difficulty] = [0, 0]
-        if subcat not in subcat_metrics: subcat_metrics[subcat] = [0, 0]
-
-        task_metrics[task][1] += 1
-        diff_metrics[difficulty][1] += 1
-        subcat_metrics[subcat][1] += 1
-        total += 1
-
-        if is_correct:
-            task_metrics[task][0] += 1
-            diff_metrics[difficulty][0] += 1
-            subcat_metrics[subcat][0] += 1
-            corr += 1
-
-        results.append({
+        item_result = {
             "id": item["id"],
             "question": item["question"],
             "answer": answer,
-            "prediction": pred,
-            "is_correct": is_correct,
             "task": task,
             "difficulty": difficulty,
-            "subcat": subcat
+            "subcat": subcat,
+            "configs": {}
+        }
+        
+        # Determine max samples needed across all configs
+        max_samples_needed = max(s for t, s in latent_configs) if args.latent_ablation else 1
+
+        # We can extract all samples at the highest tau if we want, but since each config has a different tau, 
+        # it's cleaner to just run each config separately using run_desta_with_latent_sampling.
+        # However, to be perfectly rigorous and save compute, we can just run the loop. 
+        # (S=5 takes ~5x longer per item, so we just run for the active configs)
+        for cfg in latent_configs:
+            tau, S = cfg
+            if tau == 0.0 and S == 1:
+                pred, sample_preds = run_desta_with_latent_sampling(model, item, 1, 0.0, TMP_WAV_PATH, snr_db=args.snr_db)
+            else:
+                pred, sample_preds = run_desta_with_latent_sampling(model, item, S, tau, TMP_WAV_PATH, snr_db=args.snr_db)
+            
+            # Match
+            is_string_correct = string_match(answer, pred, choices)
+            is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
+            is_correct = is_string_correct or is_llm_correct
+            
+            # Update trackers for this config
+            tr = trackers[cfg]
+            tr["total"] += 1
+            tr["task"][task][1] += 1
+            tr["diff"][difficulty][1] += 1
+            tr["subcat"][subcat][1] += 1
+            
+            if is_correct:
+                tr["corr"] += 1
+                tr["task"][task][0] += 1
+                tr["diff"][difficulty][0] += 1
+                tr["subcat"][subcat][0] += 1
+
+            item_result["configs"][f"tau{tau}_S{S}"] = {
+                "prediction": pred,
+                "is_correct": is_correct,
+                "sample_predictions": sample_preds
+            }
+            
+            # Print only for baseline to keep logs clean
+            if tau == 0.0 and S == 1:
+                print(f"Match: {is_string_correct}, Judge: {is_llm_correct}, Ans: {answer}, Pred: {pred}")
+
+        results.append(item_result)
+
+    # Print results for each config
+    ablation_summary = []
+    
+    for cfg in latent_configs:
+        tau, S = cfg
+        tr = trackers[cfg]
+        total = tr["total"]
+        corr = tr["corr"]
+        total_acc = (corr / total) * 100 if total > 0 else 0
+        
+        print("\n" + "=" * 50)
+        print(f"RESULTS FOR CONFIG: tau={tau}, S={S}")
+        print("=" * 50)
+        print(f"Overall Accuracy: {total_acc:.2f}% ({corr}/{total})")
+        
+        ablation_summary.append({
+            "tau": tau,
+            "S": S,
+            "accuracy": round(total_acc, 2),
+            "correct": corr,
+            "total": total
         })
-
-    # Print results
-    print("\n" + "*" * 30)
-    print("Task-wise Accuracy:")
-    for task, counts in task_metrics.items():
-        acc = (counts[0] / counts[1]) * 100 if counts[1] > 0 else 0
-        print(f"{task} : {acc:.2f}% over {counts[1]} samples")
-
-    print("*" * 30)
-    print("Difficulty-wise Accuracy:")
-    for diff, counts in diff_metrics.items():
-        acc = (counts[0] / counts[1]) * 100 if counts[1] > 0 else 0
-        print(f"{diff} : {acc:.2f}% over {counts[1]} samples")
-
-    print("*" * 30)
-    print("Sub-category-wise Accuracy:")
-    for subcat, counts in subcat_metrics.items():
-        acc = (counts[0] / counts[1]) * 100 if counts[1] > 0 else 0
-        print(f"{subcat} : {acc:.2f}% over {counts[1]} samples")
-
-    print("*" * 30)
-    total_acc = (corr / total) * 100 if total > 0 else 0
-    print(f"Total Accuracy: {total_acc:.2f}% over {total} samples")
-    print("*" * 30)
+        
+        # Only print detailed breakdown for the baseline (tau=0, S=1)
+        if tau == 0.0 and S == 1:
+            print("-" * 30)
+            print("Task-wise Accuracy:")
+            for t, counts in tr["task"].items():
+                acc = (counts[0] / counts[1]) * 100 if counts[1] > 0 else 0
+                print(f"{t} : {acc:.2f}% over {counts[1]}")
 
     # Save results
-    out_path = os.path.join(args.output_dir, f"mmau_{args.split}_{snr_tag}_results.jsonl")
+    out_path = os.path.join(args.output_dir, f"mmau_{args.split}_{snr_tag}_latent_results.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            
+    if args.latent_ablation:
+        summary_path = os.path.join(args.output_dir, f"mmau_{args.split}_{snr_tag}_latent_summary.json")
+        with open(summary_path, "w") as f:
+            json.dump({
+                "model_id": args.model_id,
+                "ablation_results": ablation_summary
+            }, f, indent=2)
+        print(f"\nLatent ablation summary saved to: {summary_path}")
 
-    print(f"Detailed results saved to: {out_path}")
+    print(f"Detailed per-item results saved to: {out_path}")
+    
+    # Need to extract baseline accuracy for group ablation diagnostics below
+    total_acc = ablation_summary[0]["accuracy"] if ablation_summary else 0.0
 
     # =======================
     # Group Ablation Diagnostics
