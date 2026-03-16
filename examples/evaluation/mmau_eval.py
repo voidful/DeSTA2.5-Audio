@@ -17,6 +17,16 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoFeatureExtract
 
 DEFAULT_SEED = 42
 
+# Group ablation configurations from the paper (Table group_config)
+# Each tuple is (G, K) with M = G*K = 64 fixed
+GROUP_ABLATION_CONFIGS = [
+    (1, 64),
+    (2, 32),
+    (4, 16),
+    (8, 8),
+    (16, 4),
+]
+
 def set_seed(seed: int):
     """Set random seeds for reproducibility."""
     random.seed(seed)
@@ -532,72 +542,22 @@ def extract_query_vectors_from_mmau(model, ds, device, max_samples=None):
 
 
 # =====================
-# Main Evaluation function
+# Evaluation helpers
 # =====================
 
-def main():
-    parser = argparse.ArgumentParser(description="Run MMAU evaluation with DeSTA2.5-Audio")
-    parser.add_argument("--model_id", type=str, default=DEFAULT_MODEL_ID)
-    parser.add_argument("--split", type=str, default=DEFAULT_SPLIT)
-    parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
-    parser.add_argument("--snr_db", type=float, default=None,
-                        help="SNR in dB for additive Gaussian noise (default: None = clean)")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
-    parser.add_argument("--group_ablation", action="store_true",
-                        help="Run group config ablation diagnostics (cosine sim on MMAU)")
-    parser.add_argument("--latent_ablation", action="store_true",
-                        help="Run latent sampling ablation over specific (tau, S) pairs from the paper.")
-    args = parser.parse_args()
-    
-    # Set global random seeds for reproducibility
-    set_seed(args.seed)
-    print(f"Random seed set to: {args.seed}")
-    
-    snr_tag = "clean" if args.snr_db is None else f"snr{int(args.snr_db)}"
+def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
+                           latent_configs=None):
+    """
+    Run MMAU evaluation for a single model. Returns (results, ablation_summary, trackers).
+    """
+    if latent_configs is None:
+        latent_configs = [(0.0, 1)]
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # 載入 DeSTA
-    print(f"Loading DeSTA model from {args.model_id}...")
-    model = DeSTA25AudioModel.from_pretrained(
-        args.model_id, 
-        torch_dtype=torch.bfloat16
-    )
-    model.to(device)
-    model.eval()
-
-
-    # 載入 Judge
-    print(f"Loading Judge model {JUDGE_MODEL_ID}...")
-    judge_tokenizer, judge_model = load_judge()
-
-    # 載入資料
-    print(f"Loading dataset {DATASET_ID} split {args.split}...")
-    ds = load_dataset(DATASET_ID, split=args.split)
-
-    if args.max_samples:
-        ds = ds.select(range(min(args.max_samples, len(ds))))
-
-    # Output metrics tracker
-    # Configs: (tau, S)
-    latent_configs = [(0.0, 1)]
-    if args.latent_ablation:
-        latent_configs.extend([
-            (0.3, 3),
-            (0.3, 5),
-            (0.5, 5),
-            (1.0, 5)
-        ])
-        print(f"Latent ablation enabled. Running configs (tau, S): {latent_configs}")
-
-    # trackers[config] = {"total": 0, "corr": 0, "task": {...}, "diff": {...}, "subcat": {...}}
     trackers = {cfg: {
         "total": 0, "corr": 0,
-        "task": defaultdict(lambda: [0,0]),
-        "diff": defaultdict(lambda: [0,0]),
-        "subcat": defaultdict(lambda: [0,0])
+        "task": defaultdict(lambda: [0, 0]),
+        "diff": defaultdict(lambda: [0, 0]),
+        "subcat": defaultdict(lambda: [0, 0])
     } for cfg in latent_configs}
 
     results = []
@@ -623,33 +583,24 @@ def main():
             "subcat": subcat,
             "configs": {}
         }
-        
-        # Determine max samples needed across all configs
-        max_samples_needed = max(s for t, s in latent_configs) if args.latent_ablation else 1
 
-        # We can extract all samples at the highest tau if we want, but since each config has a different tau, 
-        # it's cleaner to just run each config separately using run_desta_with_latent_sampling.
-        # However, to be perfectly rigorous and save compute, we can just run the loop. 
-        # (S=5 takes ~5x longer per item, so we just run for the active configs)
         for cfg in latent_configs:
             tau, S = cfg
             if tau == 0.0 and S == 1:
-                pred, sample_preds = run_desta_with_latent_sampling(model, item, 1, 0.0, TMP_WAV_PATH, snr_db=args.snr_db)
+                pred, sample_preds = run_desta_with_latent_sampling(model, item, 1, 0.0, TMP_WAV_PATH, snr_db=snr_db)
             else:
-                pred, sample_preds = run_desta_with_latent_sampling(model, item, S, tau, TMP_WAV_PATH, snr_db=args.snr_db)
-            
-            # Match
+                pred, sample_preds = run_desta_with_latent_sampling(model, item, S, tau, TMP_WAV_PATH, snr_db=snr_db)
+
             is_string_correct = string_match(answer, pred, choices)
             is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
             is_correct = is_string_correct or is_llm_correct
-            
-            # Update trackers for this config
+
             tr = trackers[cfg]
             tr["total"] += 1
             tr["task"][task][1] += 1
             tr["diff"][difficulty][1] += 1
             tr["subcat"][subcat][1] += 1
-            
+
             if is_correct:
                 tr["corr"] += 1
                 tr["task"][task][0] += 1
@@ -661,28 +612,25 @@ def main():
                 "is_correct": is_correct,
                 "sample_predictions": sample_preds
             }
-            
-            # Print only for baseline to keep logs clean
+
             if tau == 0.0 and S == 1:
                 print(f"Match: {is_string_correct}, Judge: {is_llm_correct}, Ans: {answer}, Pred: {pred}")
 
         results.append(item_result)
 
-    # Print results for each config
     ablation_summary = []
-    
     for cfg in latent_configs:
         tau, S = cfg
         tr = trackers[cfg]
         total = tr["total"]
         corr = tr["corr"]
         total_acc = (corr / total) * 100 if total > 0 else 0
-        
+
         print("\n" + "=" * 50)
         print(f"RESULTS FOR CONFIG: tau={tau}, S={S}")
         print("=" * 50)
         print(f"Overall Accuracy: {total_acc:.2f}% ({corr}/{total})")
-        
+
         ablation_summary.append({
             "tau": tau,
             "S": S,
@@ -690,8 +638,7 @@ def main():
             "correct": corr,
             "total": total
         })
-        
-        # Only print detailed breakdown for the baseline (tau=0, S=1)
+
         if tau == 0.0 and S == 1:
             print("-" * 30)
             print("Task-wise Accuracy:")
@@ -699,12 +646,197 @@ def main():
                 acc = (counts[0] / counts[1]) * 100 if counts[1] > 0 else 0
                 print(f"{t} : {acc:.2f}% over {counts[1]}")
 
+    return results, ablation_summary, trackers
+
+
+def resolve_group_model_id(base_model_id, G, K, pattern=None):
+    """
+    Resolve model ID for a given (G, K) configuration.
+    If pattern is provided, substitute {G} and {K}.
+    Otherwise, use base_model_id_G{G}_K{K}.
+    """
+    if pattern:
+        return pattern.format(G=G, K=K)
+    return f"{base_model_id}_G{G}_K{K}"
+
+
+# =====================
+# Main Evaluation function
+# =====================
+
+def main():
+    parser = argparse.ArgumentParser(description="Run MMAU evaluation with DeSTA2.5-Audio")
+    parser.add_argument("--model_id", type=str, default=DEFAULT_MODEL_ID)
+    parser.add_argument("--split", type=str, default=DEFAULT_SPLIT)
+    parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
+    parser.add_argument("--snr_db", type=float, default=None,
+                        help="SNR in dB for additive Gaussian noise (default: None = clean)")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
+    parser.add_argument("--group_ablation", action="store_true",
+                        help="Run group config ablation: iterate over (G,K) in {(1,64),(2,32),(4,16),(8,8),(16,4)}")
+    parser.add_argument("--group_model_pattern", type=str, default=None,
+                        help="Model ID pattern with {G} and {K} placeholders, e.g. 'voidful/desta25_4b_G{G}_K{K}'. "
+                             "If not set, defaults to <model_id>_G{G}_K{K} (base model_id used as-is for its native G,K).")
+    parser.add_argument("--latent_ablation", action="store_true",
+                        help="Run latent sampling ablation over specific (tau, S) pairs from the paper.")
+    args = parser.parse_args()
+
+    # Set global random seeds for reproducibility
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
+
+    snr_tag = "clean" if args.snr_db is None else f"snr{int(args.snr_db)}"
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Load Judge
+    print(f"Loading Judge model {JUDGE_MODEL_ID}...")
+    judge_tokenizer, judge_model = load_judge()
+
+    # Load dataset
+    print(f"Loading dataset {DATASET_ID} split {args.split}...")
+    ds = load_dataset(DATASET_ID, split=args.split)
+
+    if args.max_samples:
+        ds = ds.select(range(min(args.max_samples, len(ds))))
+
+    # Latent ablation configs
+    latent_configs = [(0.0, 1)]
+    if args.latent_ablation:
+        latent_configs.extend([
+            (0.3, 3),
+            (0.3, 5),
+            (0.5, 5),
+            (1.0, 5)
+        ])
+        print(f"Latent ablation enabled. Running configs (tau, S): {latent_configs}")
+
+    # =======================
+    # Group Ablation Mode
+    # =======================
+    if args.group_ablation:
+        print(f"\n{'='*60}")
+        print(f"  GROUP CONFIGURATION ABLATION (M=64 fixed)")
+        print(f"  Configs: {GROUP_ABLATION_CONFIGS}")
+        print(f"{'='*60}\n")
+
+        group_ablation_results = []
+
+        for G, K in GROUP_ABLATION_CONFIGS:
+            model_id = resolve_group_model_id(args.model_id, G, K, args.group_model_pattern)
+            print(f"\n{'─'*60}")
+            print(f"  Loading model for G={G}, K={K}: {model_id}")
+            print(f"{'─'*60}")
+
+            try:
+                model = DeSTA25AudioModel.from_pretrained(
+                    model_id,
+                    torch_dtype=torch.bfloat16
+                )
+                model.to(device)
+                model.eval()
+            except Exception as e:
+                print(f"  [SKIP] Failed to load model {model_id}: {e}")
+                group_ablation_results.append({
+                    "G": G, "K": K, "M": G * K,
+                    "model_id": model_id,
+                    "mmau_accuracy": None,
+                    "mean_offdiag_cosine_sim": None,
+                    "error": str(e)
+                })
+                continue
+
+            # Verify connector config matches expected G, K
+            connector = model.perception.connector
+            actual_G = connector.num_groups
+            actual_K = connector.queries_per_group
+            if actual_G != G or actual_K != K:
+                print(f"  [WARN] Model reports G={actual_G}, K={actual_K} but expected G={G}, K={K}")
+
+            # Reset seed for each config to ensure identical evaluation order
+            set_seed(args.seed)
+
+            # Run MMAU evaluation
+            results, ablation_summary, trackers = evaluate_model_on_mmau(
+                model, ds, judge_tokenizer, judge_model,
+                snr_db=args.snr_db, latent_configs=[(0.0, 1)]
+            )
+            baseline_acc = ablation_summary[0]["accuracy"]
+
+            # Compute query diagnostics
+            connector_mode = model.config.connector_mode
+            mean_cos_sim = None
+            if connector_mode in ("orca_r1", "orca_hybrid"):
+                queries = extract_query_vectors_from_mmau(model, ds, device)
+                mean_cos_sim = compute_mean_offdiag_cosine_similarity(queries)
+
+            entry = {
+                "G": G, "K": K, "M": G * K,
+                "model_id": model_id,
+                "mmau_accuracy": baseline_acc,
+                "mean_offdiag_cosine_sim": round(mean_cos_sim, 4) if mean_cos_sim is not None else None,
+            }
+            group_ablation_results.append(entry)
+
+            # Save per-config detailed results
+            out_path = os.path.join(args.output_dir, f"group_ablation_G{G}_K{K}_results.jsonl")
+            with open(out_path, "w", encoding="utf-8") as f:
+                for r in results:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+            # Free model memory before loading the next one
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Print summary table
+        print(f"\n{'='*60}")
+        print(f"  GROUP ABLATION SUMMARY (MMAU-{args.split})")
+        print(f"{'='*60}")
+        print(f"  {'G':>4}  {'K':>4}  {'MMAU (%)':>10}  {'Cos Sim':>10}  Model")
+        print(f"  {'─'*4}  {'─'*4}  {'─'*10}  {'─'*10}  {'─'*30}")
+        for entry in group_ablation_results:
+            acc_str = f"{entry['mmau_accuracy']:.1f}" if entry['mmau_accuracy'] is not None else "SKIP"
+            cos_str = f"{entry['mean_offdiag_cosine_sim']:.4f}" if entry['mean_offdiag_cosine_sim'] is not None else "N/A"
+            print(f"  {entry['G']:>4}  {entry['K']:>4}  {acc_str:>10}  {cos_str:>10}  {entry['model_id']}")
+        print(f"{'='*60}")
+
+        # Save combined summary
+        summary_path = os.path.join(args.output_dir, f"group_ablation_summary_{args.split}_{snr_tag}.json")
+        with open(summary_path, "w") as f:
+            json.dump({
+                "base_model_id": args.model_id,
+                "split": args.split,
+                "configs": group_ablation_results
+            }, f, indent=2)
+        print(f"  Summary saved to: {summary_path}")
+        return
+
+    # =======================
+    # Standard (non-group-ablation) Mode
+    # =======================
+    print(f"Loading DeSTA model from {args.model_id}...")
+    model = DeSTA25AudioModel.from_pretrained(
+        args.model_id,
+        torch_dtype=torch.bfloat16
+    )
+    model.to(device)
+    model.eval()
+
+    results, ablation_summary, trackers = evaluate_model_on_mmau(
+        model, ds, judge_tokenizer, judge_model,
+        snr_db=args.snr_db, latent_configs=latent_configs
+    )
+
     # Save results
     out_path = os.path.join(args.output_dir, f"mmau_{args.split}_{snr_tag}_latent_results.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            
+
     if args.latent_ablation:
         summary_path = os.path.join(args.output_dir, f"mmau_{args.split}_{snr_tag}_latent_summary.json")
         with open(summary_path, "w") as f:
@@ -715,47 +847,6 @@ def main():
         print(f"\nLatent ablation summary saved to: {summary_path}")
 
     print(f"Detailed per-item results saved to: {out_path}")
-    
-    # Need to extract baseline accuracy for group ablation diagnostics below
-    total_acc = ablation_summary[0]["accuracy"] if ablation_summary else 0.0
-
-    # =======================
-    # Group Ablation Diagnostics
-    # =======================
-    if args.group_ablation:
-        connector_mode = model.config.connector_mode
-        if connector_mode not in ("orca_r1", "orca_hybrid"):
-            print(f"\n⚠️  Skipping group ablation: connector_mode is '{connector_mode}' (not ORCA).")
-        else:
-            print(f"\n{'='*60}")
-            print(f"  GROUP ABLATION DIAGNOSTICS (MMAU)")
-            print(f"{'='*60}")
-            
-            connector = model.perception.connector
-            num_groups = connector.num_groups
-            queries_per_group = connector.queries_per_group
-            print(f"  G={num_groups}, K={queries_per_group}, M={num_groups * queries_per_group}")
-
-            queries = extract_query_vectors_from_mmau(model, ds, device)
-            mean_cos_sim = compute_mean_offdiag_cosine_similarity(queries)
-
-            print(f"\n  --- Diagnostic Results ---")
-            print(f"  Off-diag Cosine Sim    : {mean_cos_sim:.4f}")
-            print(f"  MMAU Accuracy          : {total_acc:.2f}%")
-            print(f"{'='*60}")
-
-            diag = {
-                "model_id": args.model_id,
-                "G": num_groups,
-                "K": queries_per_group,
-                "M": num_groups * queries_per_group,
-                "mmau_accuracy": round(total_acc, 2),
-                "mean_offdiag_cosine_sim": round(mean_cos_sim, 4),
-            }
-            diag_path = os.path.join(args.output_dir, f"group_ablation_G{num_groups}_K{queries_per_group}.json")
-            with open(diag_path, "w") as f:
-                json.dump(diag, f, indent=2)
-            print(f"  Diagnostics saved to: {diag_path}")
 
 
 if __name__ == "__main__":
