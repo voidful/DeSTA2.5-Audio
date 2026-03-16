@@ -673,8 +673,7 @@ def main():
             }
             results.append(item_result)
             
-            if (b_idx + i) % 50 == 0:
-                print(f"[{b_idx+i}/{len(ds)}] Match: {is_correct}, Ans: {item['answer']}, Pred: {pred[:50]}...")
+            print(f"[{b_idx+i}/{len(ds)}] Match: {is_correct}, Ans: {item['answer']}, Pred: {pred[:150]}...")
 
     # Print results for each config
     ablation_summary = []
