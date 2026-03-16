@@ -18,6 +18,8 @@ import os
 import json
 import wave
 import random
+import tempfile
+import atexit
 import numpy as np
 import re
 import argparse
@@ -61,7 +63,9 @@ def set_seed(seed: int):
 DEFAULT_MODEL_ID = "voidful/QAQ_0.6b_orca_all"
 DATASET_ID = "gamma-lab-umd/MMAU-Pro"
 DEFAULT_SPLIT = "test"
-TMP_WAV_PATH = "tmp_mmau_pro_audio.wav"
+_tmp_wav_fd, TMP_WAV_PATH = tempfile.mkstemp(suffix=".wav", prefix=f"mmau_pro_eval_pid{os.getpid()}_")
+os.close(_tmp_wav_fd)
+atexit.register(lambda: os.remove(TMP_WAV_PATH) if os.path.exists(TMP_WAV_PATH) else None)
 RESULT_DIR = "mmau_pro_results"
 JUDGE_MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 NVEMBED_MODEL_ID = "nvidia/NV-Embed-v2"
@@ -815,9 +819,7 @@ def main():
         json.dump(summary, f, indent=2)
     print(f"Summary saved to: {summary_path}")
 
-    # Cleanup temp files
-    if os.path.exists(TMP_WAV_PATH):
-        os.remove(TMP_WAV_PATH)
+    # Cleanup handled by atexit
 
 
 if __name__ == "__main__":

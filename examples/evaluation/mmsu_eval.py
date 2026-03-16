@@ -2,6 +2,8 @@ import os
 import json
 import wave
 import random
+import tempfile
+import atexit
 import numpy as np
 import re
 import argparse
@@ -33,7 +35,9 @@ def set_seed(seed: int):
 DEFAULT_MODEL_ID = "voidful/desta25_4b_H1_variational_grouping"
 DATASET_ID = "yuantuo666/MMSU-full_5k_hf_format.v0"  # MMSU dataset
 DEFAULT_SPLIT = "train"
-TMP_WAV_PATH = "tmp_mmsu_audio.wav"
+_tmp_wav_fd, TMP_WAV_PATH = tempfile.mkstemp(suffix=".wav", prefix=f"mmsu_eval_pid{os.getpid()}_")
+os.close(_tmp_wav_fd)
+atexit.register(lambda: os.remove(TMP_WAV_PATH) if os.path.exists(TMP_WAV_PATH) else None)
 RESULT_DIR = "mmsu_results"
 JUDGE_MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 

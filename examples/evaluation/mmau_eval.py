@@ -3,6 +3,8 @@ import json
 import wave
 import random
 import gc
+import tempfile
+import atexit
 import numpy as np
 import re
 import argparse
@@ -75,7 +77,10 @@ def add_gaussian_noise_snr(audio_array: np.ndarray, snr_db, sample_idx: int = 0,
 DEFAULT_MODEL_ID = "voidful/desta25_4b_R2_full"  # Update to your trained model
 DATASET_ID = "lmms-lab/mmau"
 DEFAULT_SPLIT = "test_mini"
-TMP_WAV_PATH = "tmp_mmau_audio.wav"
+# Use a process-unique temp file to avoid collisions when multiple evals run on the same machine
+_tmp_wav_fd, TMP_WAV_PATH = tempfile.mkstemp(suffix=".wav", prefix=f"mmau_eval_pid{os.getpid()}_")
+os.close(_tmp_wav_fd)  # close fd, we'll write via wave module
+atexit.register(lambda: os.remove(TMP_WAV_PATH) if os.path.exists(TMP_WAV_PATH) else None)
 RESULT_DIR = "mmau_results"
 JUDGE_MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 
