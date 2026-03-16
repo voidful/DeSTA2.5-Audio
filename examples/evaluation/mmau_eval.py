@@ -403,18 +403,28 @@ Output "CORRECT" or "INCORRECT".
 """
 
 
-def load_judge(model_id=JUDGE_MODEL_ID):
+def load_judge(model_id=JUDGE_MODEL_ID, use_compile=True):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto"
+        device_map="auto",
+        attn_implementation="sdpa",
     )
     model.eval()
+    if use_compile and torch.cuda.is_available():
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("  Judge model compiled with torch.compile (reduce-overhead)")
+        except Exception as e:
+            print(f"  torch.compile failed for judge, using eager mode: {e}")
     return tokenizer, model
 
 
-def call_judge(tokenizer, model, item, pred):
+def _build_judge_chat_str(tokenizer, item, pred):
     question = item['question']
     gold = item['answer']
     choices = item['choices']
@@ -431,12 +441,24 @@ def call_judge(tokenizer, model, item, pred):
         {"role": "user", "content": prompt}
     ]
 
-    chat_str = tokenizer.apply_chat_template(
+    return tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True
     )
 
+
+def _parse_judge_output(raw_text):
+    raw_text = raw_text.strip().upper()
+    if raw_text.startswith("CORRECT"):
+        return True, raw_text
+    if raw_text.startswith("INCORRECT"):
+        return False, raw_text
+    return None, raw_text
+
+
+def call_judge(tokenizer, model, item, pred):
+    chat_str = _build_judge_chat_str(tokenizer, item, pred)
     inputs = tokenizer(chat_str, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
@@ -448,13 +470,42 @@ def call_judge(tokenizer, model, item, pred):
         )
 
     gen_ids = output_ids[0][inputs["input_ids"].shape[1]:]
-    raw_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip().upper()
+    raw_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+    return _parse_judge_output(raw_text)
 
-    if raw_text.startswith("CORRECT"):
-        return True, raw_text
-    if raw_text.startswith("INCORRECT"):
-        return False, raw_text
-    return None, raw_text
+
+def call_judge_batch(tokenizer, model, items_and_preds, batch_size=16):
+    """
+    Batched judge inference. Returns list of (is_correct, raw_text) tuples.
+    """
+    results = []
+    chat_strs = [_build_judge_chat_str(tokenizer, item, pred) for item, pred in items_and_preds]
+
+    for i in range(0, len(chat_strs), batch_size):
+        batch_strs = chat_strs[i:i + batch_size]
+        inputs = tokenizer(
+            batch_strs,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        ).to(model.device)
+
+        input_lengths = inputs["attention_mask"].sum(dim=1)
+
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=4,
+                do_sample=False,
+                temperature=0.0
+            )
+
+        for j in range(len(batch_strs)):
+            gen_ids = output_ids[j][input_lengths[j]:]
+            raw_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            results.append(_parse_judge_output(raw_text))
+
+    return results
 
 
 # =====================
@@ -546,23 +597,21 @@ def extract_query_vectors_from_mmau(model, ds, device, max_samples=None):
 # =====================
 
 def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
-                           latent_configs=None):
+                           latent_configs=None, judge_batch_size=16):
     """
     Run MMAU evaluation for a single model. Returns (results, ablation_summary, trackers).
+
+    Two-pass strategy for speed:
+      Pass 1 – Run DeSTA inference + string_match on all items (GPU-bound on DeSTA).
+      Pass 2 – Batch judge only the items where string_match failed.
     """
     if latent_configs is None:
         latent_configs = [(0.0, 1)]
 
-    trackers = {cfg: {
-        "total": 0, "corr": 0,
-        "task": defaultdict(lambda: [0, 0]),
-        "diff": defaultdict(lambda: [0, 0]),
-        "subcat": defaultdict(lambda: [0, 0])
-    } for cfg in latent_configs}
+    # --- Pass 1: DeSTA inference + string_match ---
+    raw_results = []  # list of dicts with per-config predictions
 
-    results = []
-
-    for idx, item in enumerate(tqdm(ds, desc="Evaluating")):
+    for idx, item in enumerate(tqdm(ds, desc="DeSTA inference")):
         answer = item["answer"]
         task = item["task"]
         difficulty = item["difficulty"]
@@ -574,13 +623,13 @@ def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
             except:
                 pass
 
-        item_result = {
-            "id": item["id"],
-            "question": item["question"],
+        entry = {
+            "item": item,
             "answer": answer,
             "task": task,
             "difficulty": difficulty,
             "subcat": subcat,
+            "choices": choices,
             "configs": {}
         }
 
@@ -592,10 +641,69 @@ def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
                 pred, sample_preds = run_desta_with_latent_sampling(model, item, S, tau, TMP_WAV_PATH, snr_db=snr_db)
 
             is_string_correct = string_match(answer, pred, choices)
-            is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
-            is_correct = is_string_correct or is_llm_correct
+            entry["configs"][cfg] = {
+                "pred": pred,
+                "sample_preds": sample_preds,
+                "is_string_correct": is_string_correct,
+            }
+
+        raw_results.append(entry)
+
+    # --- Pass 2: Batched judge for items where string_match failed ---
+    # Collect (index, cfg) pairs that need judging
+    judge_requests = []  # (result_idx, cfg, item, pred)
+    for i, entry in enumerate(raw_results):
+        for cfg, cfg_data in entry["configs"].items():
+            if not cfg_data["is_string_correct"]:
+                judge_requests.append((i, cfg, entry["item"], cfg_data["pred"]))
+
+    judge_results_map = {}  # (i, cfg) -> (is_correct, raw_text)
+    if judge_requests and judge_model is not None:
+        print(f"Running batched judge on {len(judge_requests)} items (string_match failed)...")
+        items_and_preds = [(item, pred) for _, _, item, pred in judge_requests]
+        judge_outputs = call_judge_batch(judge_tokenizer, judge_model, items_and_preds, batch_size=judge_batch_size)
+        for (i, cfg, _, _), output in zip(judge_requests, judge_outputs):
+            judge_results_map[(i, cfg)] = output
+    elif judge_requests:
+        print(f"Skipping judge for {len(judge_requests)} items (--no_judge mode).")
+
+    # --- Assemble final results and trackers ---
+    trackers = {cfg: {
+        "total": 0, "corr": 0,
+        "task": defaultdict(lambda: [0, 0]),
+        "diff": defaultdict(lambda: [0, 0]),
+        "subcat": defaultdict(lambda: [0, 0])
+    } for cfg in latent_configs}
+
+    results = []
+    for i, entry in enumerate(raw_results):
+        item_result = {
+            "id": entry["item"]["id"],
+            "question": entry["item"]["question"],
+            "answer": entry["answer"],
+            "task": entry["task"],
+            "difficulty": entry["difficulty"],
+            "subcat": entry["subcat"],
+            "configs": {}
+        }
+
+        for cfg in latent_configs:
+            tau, S = cfg
+            cfg_data = entry["configs"][cfg]
+            pred = cfg_data["pred"]
+            is_string_correct = cfg_data["is_string_correct"]
+
+            if is_string_correct:
+                is_llm_correct = None
+            else:
+                is_llm_correct, _ = judge_results_map.get((i, cfg), (None, ""))
+
+            is_correct = is_string_correct or bool(is_llm_correct)
 
             tr = trackers[cfg]
+            task = entry["task"]
+            difficulty = entry["difficulty"]
+            subcat = entry["subcat"]
             tr["total"] += 1
             tr["task"][task][1] += 1
             tr["diff"][difficulty][1] += 1
@@ -610,11 +718,11 @@ def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
             item_result["configs"][f"tau{tau}_S{S}"] = {
                 "prediction": pred,
                 "is_correct": is_correct,
-                "sample_predictions": sample_preds
+                "sample_predictions": cfg_data["sample_preds"]
             }
 
             if tau == 0.0 and S == 1:
-                print(f"Match: {is_string_correct}, Judge: {is_llm_correct}, Ans: {answer}, Pred: {pred}")
+                print(f"Match: {is_string_correct}, Judge: {is_llm_correct}, Ans: {entry['answer']}, Pred: {pred}")
 
         results.append(item_result)
 
@@ -681,6 +789,10 @@ def main():
                              "If not set, defaults to <model_id>_G{G}_K{K} (base model_id used as-is for its native G,K).")
     parser.add_argument("--latent_ablation", action="store_true",
                         help="Run latent sampling ablation over specific (tau, S) pairs from the paper.")
+    parser.add_argument("--no_judge", action="store_true",
+                        help="Skip LLM judge entirely; use only string_match for scoring (much faster).")
+    parser.add_argument("--judge_batch_size", type=int, default=16,
+                        help="Batch size for LLM judge inference (default: 16)")
     args = parser.parse_args()
 
     # Set global random seeds for reproducibility
@@ -691,9 +803,13 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Load Judge
-    print(f"Loading Judge model {JUDGE_MODEL_ID}...")
-    judge_tokenizer, judge_model = load_judge()
+    # Load Judge (skip if --no_judge)
+    judge_tokenizer, judge_model = None, None
+    if not args.no_judge:
+        print(f"Loading Judge model {JUDGE_MODEL_ID}...")
+        judge_tokenizer, judge_model = load_judge()
+    else:
+        print("Judge model disabled (--no_judge). Using string_match only.")
 
     # Load dataset
     print(f"Loading dataset {DATASET_ID} split {args.split}...")
@@ -761,7 +877,8 @@ def main():
             # Run MMAU evaluation
             results, ablation_summary, trackers = evaluate_model_on_mmau(
                 model, ds, judge_tokenizer, judge_model,
-                snr_db=args.snr_db, latent_configs=[(0.0, 1)]
+                snr_db=args.snr_db, latent_configs=[(0.0, 1)],
+                judge_batch_size=args.judge_batch_size
             )
             baseline_acc = ablation_summary[0]["accuracy"]
 
@@ -828,7 +945,8 @@ def main():
 
     results, ablation_summary, trackers = evaluate_model_on_mmau(
         model, ds, judge_tokenizer, judge_model,
-        snr_db=args.snr_db, latent_configs=latent_configs
+        snr_db=args.snr_db, latent_configs=latent_configs,
+        judge_batch_size=args.judge_batch_size
     )
 
     # Save results
