@@ -363,6 +363,17 @@ def _run_desta_generate(model, wav_path, question, transcription=None, max_new_t
     return extract_answer_choice(pred)
 
 
+def _suppress_whisper_max_length_warning(model):
+    """
+    Whisper's generation_config has max_length=448 by default.
+    When we also pass max_new_tokens, HF prints a noisy warning.
+    Clear max_length once to suppress it.
+    """
+    whisper = model.perception.whisper
+    if hasattr(whisper, 'generation_config') and whisper.generation_config.max_length is not None:
+        whisper.generation_config.max_length = None
+
+
 def _get_cached_transcription(model, wav_path):
     """
     Run VAD + ASR on an audio file once and return the transcription string.
@@ -377,12 +388,13 @@ def _get_cached_transcription(model, wav_path):
 
     if not hasattr(model, "processor"):
         model._setup_generation()
+    _suppress_whisper_max_length_warning(model)
     feats = model.processor([feature], sampling_rate=16000, return_tensors="pt").input_features
     feats = feats.to(model.device).half()
     with torch.no_grad():
         trans_ids = model.perception.whisper.generate(
             input_features=feats, attention_mask=None,
-            max_new_tokens=128, max_length=None
+            max_new_tokens=128,
         )
     transcription = model.processor.batch_decode(trans_ids, skip_special_tokens=True)[0].strip()
     return transcription
@@ -776,6 +788,7 @@ def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
         )
 
         for cfg in latent_configs:
+            tau, S = cfg
             pred, sample_preds = all_cfg_results[cfg]
 
             is_string_correct = string_match(answer, pred, choices)
@@ -784,6 +797,12 @@ def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
                 "sample_preds": sample_preds,
                 "is_string_correct": is_string_correct,
             }
+
+            # Print every prediction for debugging
+            match_str = "✓" if is_string_correct else "✗"
+            print(f"  [{idx}] tau={tau} S={S} | {match_str} | Ans: {answer} | Pred: {pred}")
+            if S > 1:
+                print(f"         samples: {sample_preds}")
 
         raw_results.append(entry)
 

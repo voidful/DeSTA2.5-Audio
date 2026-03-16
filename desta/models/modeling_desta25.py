@@ -1741,6 +1741,10 @@ class DeSTA25AudioModel(PreTrainedModel):
         self.tokenizer.add_tokens([self.audio_locator])
         self.processor = AutoProcessor.from_pretrained(self.config.encoder_model_id, cache_dir=os.getenv("HF_HOME"))
 
+        # Clear Whisper's default max_length to avoid warning when max_new_tokens is passed
+        if hasattr(self.perception.whisper, 'generation_config'):
+            self.perception.whisper.generation_config.max_length = None
+
         assert len(self.tokenizer.tokenize(self.audio_locator)) == 1, "audio_locator must be a single token"
         assert len(self.tokenizer.tokenize(self.placeholder_token)) == 1, "placeholder_token must be a single token in the tokenizer"
 
