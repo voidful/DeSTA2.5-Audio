@@ -2,6 +2,7 @@ import os
 import json
 import wave
 import random
+import gc
 import numpy as np
 import re
 import argparse
@@ -11,7 +12,7 @@ import torch
 from datasets import load_dataset
 from desta import DeSTA25AudioModel
 import logging
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoFeatureExtractor
 
 DEFAULT_SEED = 42
 
@@ -376,6 +377,90 @@ def call_judge(tokenizer, model, item, pred):
 
 
 # =====================
+# Group Ablation Diagnostics
+# =====================
+
+def compute_mean_offdiag_cosine_similarity(queries):
+    """
+    For each sample, compute cosine similarity between all pairs of
+    query vectors. Return the mean off-diagonal cosine similarity
+    averaged across all samples. Lower = less query redundancy.
+    
+    Args:
+        queries: np.ndarray [N, M, D]
+    Returns:
+        float: mean off-diagonal cosine similarity
+    """
+    N, M, D = queries.shape
+    offdiag_sims = []
+    for i in range(N):
+        vecs = queries[i]  # [M, D]
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-8)
+        vecs_normed = vecs / norms
+        gram = vecs_normed @ vecs_normed.T  # [M, M]
+        mask = ~np.eye(M, dtype=bool)
+        offdiag_sims.append(float(gram[mask].mean()))
+    return float(np.mean(offdiag_sims)) if offdiag_sims else 0.0
+
+
+@torch.inference_mode()
+def extract_query_vectors_from_mmau(model, ds, device, max_samples=None):
+    """
+    Extract query vectors [N, M, D] from MMAU audio items via the ORCA connector.
+    Reuses load_audio_as_array() already defined in this script.
+    """
+    perception = model.perception
+    connector = perception.connector
+    whisper_enc = perception.whisper.model.encoder
+    encoder_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
+    processor = AutoFeatureExtractor.from_pretrained(encoder_id)
+
+    n = min(max_samples, len(ds)) if max_samples else len(ds)
+    all_queries = []
+    print(f"  Extracting query vectors from {n} MMAU samples ...")
+
+    for i in range(n):
+        item = ds[i]
+        audio_array, sr = load_audio_as_array(item)
+        if audio_array is None:
+            continue
+
+        inputs = processor(audio_array, sampling_rate=sr, return_tensors="pt")
+        feats = inputs.input_features.to(device)
+        target_dtype = whisper_enc.conv1.weight.dtype
+        target_dev = whisper_enc.conv1.weight.device
+        feats = feats.to(dtype=target_dtype, device=target_dev)
+
+        h = torch.nn.functional.gelu(whisper_enc.conv1(feats))
+        h = torch.nn.functional.gelu(whisper_enc.conv2(h))
+        h = h.permute(0, 2, 1)
+        pos = whisper_enc.embed_positions.weight[
+            : whisper_enc.config.max_source_positions
+        ].to(dtype=h.dtype, device=h.device)
+        hidden = h + pos
+
+        all_layer_outputs = []
+        for enc_layer in whisper_enc.layers:
+            hidden = enc_layer(hidden, None, None)[0]
+            all_layer_outputs.append(hidden)
+
+        conn_out = connector(all_layer_outputs)
+        query_vecs = conn_out[0] if isinstance(conn_out, tuple) else conn_out
+        all_queries.append(query_vecs[0].float().cpu().numpy())
+
+        if (i + 1) % 100 == 0:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print(f"    [{i+1}/{n}]")
+
+    queries = np.stack(all_queries, axis=0)  # [N, M, D]
+    print(f"  → queries shape: {queries.shape}")
+    return queries
+
+
+# =====================
 # Main Evaluation function
 # =====================
 
@@ -389,6 +474,8 @@ def main():
                         help="SNR in dB for additive Gaussian noise (default: None = clean)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
+    parser.add_argument("--group_ablation", action="store_true",
+                        help="Run group config ablation diagnostics (cosine sim on MMAU)")
     args = parser.parse_args()
     
     # Set global random seeds for reproducibility
@@ -401,7 +488,6 @@ def main():
 
     # 載入 DeSTA
     print(f"Loading DeSTA model from {args.model_id}...")
-    # Use torch_dtype in from_pretrained instead of manual .to(dtype)
     model = DeSTA25AudioModel.from_pretrained(
         args.model_id, 
         torch_dtype=torch.bfloat16
@@ -452,7 +538,7 @@ def main():
         # 3) LLM Judge as a secondary check if string match fails or to be sure
         is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
         
-        # Combine results: if either is correct, we consider it correct (usually LLM judge is more reliable for complex output)
+        # Combine results: if either is correct, we consider it correct
         is_correct = is_string_correct or is_llm_correct
         
         print(f"Match: {is_string_correct}, LLM Judge: {is_llm_correct} ({judge_raw}), Ans: {answer}, Pred: {pred}")
@@ -483,7 +569,7 @@ def main():
             "subcat": subcat
         })
 
-    # Print results (similar to mmau_evaluate.py)
+    # Print results
     print("\n" + "*" * 30)
     print("Task-wise Accuracy:")
     for task, counts in task_metrics.items():
@@ -514,6 +600,44 @@ def main():
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     print(f"Detailed results saved to: {out_path}")
+
+    # =======================
+    # Group Ablation Diagnostics
+    # =======================
+    if args.group_ablation:
+        connector_mode = model.config.connector_mode
+        if connector_mode not in ("orca_r1", "orca_hybrid"):
+            print(f"\n⚠️  Skipping group ablation: connector_mode is '{connector_mode}' (not ORCA).")
+        else:
+            print(f"\n{'='*60}")
+            print(f"  GROUP ABLATION DIAGNOSTICS (MMAU)")
+            print(f"{'='*60}")
+            
+            connector = model.perception.connector
+            num_groups = connector.num_groups
+            queries_per_group = connector.queries_per_group
+            print(f"  G={num_groups}, K={queries_per_group}, M={num_groups * queries_per_group}")
+
+            queries = extract_query_vectors_from_mmau(model, ds, device)
+            mean_cos_sim = compute_mean_offdiag_cosine_similarity(queries)
+
+            print(f"\n  --- Diagnostic Results ---")
+            print(f"  Off-diag Cosine Sim    : {mean_cos_sim:.4f}")
+            print(f"  MMAU Accuracy          : {total_acc:.2f}%")
+            print(f"{'='*60}")
+
+            diag = {
+                "model_id": args.model_id,
+                "G": num_groups,
+                "K": queries_per_group,
+                "M": num_groups * queries_per_group,
+                "mmau_accuracy": round(total_acc, 2),
+                "mean_offdiag_cosine_sim": round(mean_cos_sim, 4),
+            }
+            diag_path = os.path.join(args.output_dir, f"group_ablation_G{num_groups}_K{queries_per_group}.json")
+            with open(diag_path, "w") as f:
+                json.dump(diag, f, indent=2)
+            print(f"  Diagnostics saved to: {diag_path}")
 
 
 if __name__ == "__main__":
