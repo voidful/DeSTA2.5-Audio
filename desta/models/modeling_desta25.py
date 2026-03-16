@@ -1449,7 +1449,7 @@ class DeSTA25AudioModel(PreTrainedModel):
 
 
 
-    def _generate_step(self, inputs, pad_token_id, temperature=0.7, top_p=0.9, max_new_tokens=512, do_sample=True, **kwargs):
+    def _generate_step(self, inputs, pad_token_id, temperature=0.7, top_p=0.9, max_new_tokens=512, do_sample=True, repetition_penalty=None, **kwargs):
         input_ids = inputs["context_input_ids"] # only context inputs
         attention_mask = inputs["context_attention_mask"] # only context attention mask
         batch_start_positions = inputs["context_batch_start_positions"]
@@ -1510,7 +1510,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             temperature = None
         
         try:
-            generated_ids = self.llm_model.generate(
+            gen_kwargs = dict(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 pad_token_id=pad_token_id,
@@ -1520,6 +1520,9 @@ class DeSTA25AudioModel(PreTrainedModel):
                 do_sample=do_sample,
                 **kwargs
             )
+            if repetition_penalty is not None:
+                gen_kwargs["repetition_penalty"] = repetition_penalty
+            generated_ids = self.llm_model.generate(**gen_kwargs)
         finally:
             # Clear local tokens after generation
             if hasattr(self, '_orca_audio_local'):
@@ -1962,6 +1965,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         top_p=0.9,
         do_sample=True,
         max_new_tokens=512,
+        repetition_penalty=None,
         **kwargs
         ):
         """
@@ -2149,6 +2153,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 top_p=top_p,
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
                 **kwargs)
 
             return GenerationOutput(
