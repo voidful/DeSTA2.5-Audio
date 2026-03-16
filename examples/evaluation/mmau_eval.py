@@ -242,67 +242,61 @@ def extract_answer_choice(response):
     return extracted.strip('"').strip("'").strip()
 
 # =====================
-# DeSTA 推論 (Batched)
+# DeSTA 推論
 # =====================
 
-def run_desta_batch(model, items, out_dir, snr_db=None):
-    """
-    Run DeSTA inference on a batch of items.
-    """
-    batch_messages = []
-    temp_wavs = []
-    
-    for i, item in enumerate(items):
-        wav_path = os.path.join(out_dir, "temp_audio", f"_batch_temp_{i}.wav")
-        os.makedirs(os.path.dirname(wav_path), exist_ok=True)
-        write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
-        temp_wavs.append(wav_path)
-        
-        choices = item.get("choices", [])
-        prompt = build_prompt(item["question"], choices)
-        
-        # Audio First format matching original
-        batch_messages.append([
-            {"role": "user", "content": f"<|AUDIO|>\n{prompt}", "audios": [{"audio": wav_path}]}
-        ])
-
-    # Ensure left-padding is used for batch generation with decoder-only models
-    # This is critical; otherwise, right-padded tokens corrupt the generation attention
-    if hasattr(model, "_setup_generation") and not hasattr(model, "tokenizer"):
-        model._setup_generation()
-    old_padding_side = model.tokenizer.padding_side
-    model.tokenizer.padding_side = "left"
-
-    try:
-        with torch.no_grad():
-            outputs = model.generate(
-                messages=batch_messages,
-                do_sample=False,
-                max_new_tokens=1024
-            )
-    finally:
-        # Restore original padding side
-        model.tokenizer.padding_side = old_padding_side
-    
-    # Process results
-    preds = outputs.text
-    if not isinstance(preds, list):
-        preds = [preds]
-        
-    final_answers = [extract_answer_choice(p) for p in preds]
-    
-    # Cleanup temp files
-    for p in temp_wavs:
-        if os.path.exists(p):
-            os.remove(p)
-            
-    return final_answers, preds
-
-
 def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
-    """Fallback for single item if needed (unused in batched loop)"""
-    ans, raw = run_desta_batch(model, [item], os.path.dirname(wav_path), snr_db)
-    return ans[0]
+    write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
+    
+    system_prompt = "You are an audio assistant."
+    
+    # Build question with choices (matching inference_desta25_audio.py logic)
+    choices = item["choices"]
+    # Handle if choices is a string representation of a list
+    if isinstance(choices, str):
+        try:
+            choices = json.loads(choices)
+        except:
+            pass
+
+    options_str = ""
+    for i, option in enumerate(choices):
+        options_str += f'"{option}"'
+        if i == len(choices) - 2:
+            options_str += " or "
+        elif i < len(choices) - 1:
+            options_str += ", "
+            
+    question = f"{item['question']}\nChoose from the following options: {options_str}"
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
+            "role": "user",
+            # Audio First: <|AUDIO|>\n\n{text}
+            "content": f"<|AUDIO|>\n\n{question}\n\nInstructions:\nListen to the audio and select the correct option from the list.\n\nFormat:\nReasoning: <Brief thoughts>\nAnswer: (x) label", 
+            "audios": [{
+                "audio": wav_path
+            }]
+        }
+    ]
+
+    with torch.no_grad():
+        outputs = model.generate(
+            messages=messages,
+            do_sample=False,
+            max_new_tokens=512
+        )
+    
+    pred = outputs.text
+    if isinstance(pred, list):
+        pred = pred[0]
+    if isinstance(pred, str):
+        pred = pred.strip()
+    return extract_answer_choice(pred)
 
 
 def run_desta_with_latent_sampling(model, item, num_samples, tau,
@@ -379,60 +373,47 @@ def load_judge(model_id=JUDGE_MODEL_ID):
     return tokenizer, model
 
 
-def call_judge_batch(tokenizer, model, items, preds):
-    """
-    Judge multiple predictions in one batch.
-    """
-    if not items:
-        return []
-        
-    prompts = []
-    for item, pred in zip(items, preds):
-        prompt = JUDGE_PROMPT_TEMPLATE.format(
-            question=item['question'],
-            choices=item['choices'],
-            gold=item['answer'],
-            pred=pred
-        )
-        messages = [
-            {"role": "system", "content": "You are a careful judge for multiple-choice QA outputs."},
-            {"role": "user", "content": prompt}
-        ]
-        chat_str = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prompts.append(chat_str)
+def call_judge(tokenizer, model, item, pred):
+    question = item['question']
+    gold = item['answer']
+    choices = item['choices']
 
-    # Padding right for judge generation
-    old_padding_side = tokenizer.padding_side
-    tokenizer.padding_side = "left"
-    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
-    tokenizer.padding_side = old_padding_side
+    prompt = JUDGE_PROMPT_TEMPLATE.format(
+        question=question,
+        choices=choices,
+        gold=gold,
+        pred=pred
+    )
+
+    messages = [
+        {"role": "system", "content": "You are a careful judge for multiple-choice QA outputs."},
+        {"role": "user", "content": prompt}
+    ]
+
+    chat_str = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    inputs = tokenizer(chat_str, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=10,
+            max_new_tokens=4,
             do_sample=False,
+            temperature=0.0
         )
 
-    results = []
-    for i in range(len(items)):
-        gen_ids = output_ids[i][inputs["input_ids"].shape[1]:]
-        raw_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip().upper()
-        
-        if "CORRECT" in raw_text and "INCORRECT" not in raw_text[:raw_text.find("CORRECT") + 7]:
-             results.append((True, raw_text))
-        elif "INCORRECT" in raw_text:
-             results.append((False, raw_text))
-        else:
-             results.append((None, raw_text))
-             
-    return results
+    gen_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+    raw_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip().upper()
 
-
-def call_judge(tokenizer, model, item, pred):
-    """Fallback for single item"""
-    res = call_judge_batch(tokenizer, model, [item], [pred])
-    return res[0]
+    if raw_text.startswith("CORRECT"):
+        return True, raw_text
+    if raw_text.startswith("INCORRECT"):
+        return False, raw_text
+    return None, raw_text
 
 
 # =====================
@@ -531,8 +512,6 @@ def main():
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
     parser.add_argument("--snr_db", type=float, default=None,
                         help="SNR in dB for additive Gaussian noise (default: None = clean)")
-    parser.add_argument("--batch_size", type=int, default=8,
-                        help="Batch size for DeSTA and Judge inference (default: 8)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     parser.add_argument("--group_ablation", action="store_true",
@@ -562,7 +541,6 @@ def main():
     # 載入 Judge
     print(f"Loading Judge model {JUDGE_MODEL_ID}...")
     judge_tokenizer, judge_model = load_judge()
-    # judge_tokenizer, judge_model = None, None
 
     # 載入資料
     print(f"Loading dataset {DATASET_ID} split {args.split}...")
@@ -593,87 +571,71 @@ def main():
 
     results = []
 
-    # For speed optimization, we use batching for the baseline (tau=0, S=1)
-    # The progress bar is updated per batch
-    for b_idx in tqdm(range(0, len(ds), args.batch_size), desc="Evaluating"):
-        batch_ds = ds.select(range(b_idx, min(b_idx + args.batch_size, len(ds))))
-        
-        # 1. Batched Inference
-        # For now, we prioritize the baseline speed.
-        batch_preds_final, batch_preds_raw = run_desta_batch(model, batch_ds, args.output_dir, snr_db=args.snr_db)
-        
-        # 2. String Match & Judge Queue
-        judge_queue_items = []
-        judge_queue_preds = []
-        judge_queue_indices = []
-        
-        # Using a list of Any for results
-        batch_results_processed: list = [None] * len(batch_ds)
-        
-        for i, item in enumerate(batch_ds):
-            pred = batch_preds_final[i]
-            choices = item["choices"]
-            if isinstance(choices, str):
-                try: choices = json.loads(choices)
-                except: pass
-                
-            is_string_correct = string_match(item["answer"], pred, choices)
-            
-            if is_string_correct:
-                batch_results_processed[i] = (True, "STRING_MATCH")
-            else:
-                judge_queue_items.append(item)
-                judge_queue_preds.append(batch_preds_raw[i])
-                judge_queue_indices.append(i)
+    for idx, item in enumerate(tqdm(ds, desc="Evaluating")):
+        answer = item["answer"]
+        task = item["task"]
+        difficulty = item["difficulty"]
+        subcat = item.get("sub-category", "NA")
+        choices = item["choices"]
+        if isinstance(choices, str):
+            try:
+                choices = json.loads(choices)
+            except:
+                pass
 
-        # 3. Batched Judging
-        if judge_queue_items and judge_tokenizer is not None and judge_model is not None:
-            judge_results = call_judge_batch(judge_tokenizer, judge_model, judge_queue_items, judge_queue_preds)
-            for j_idx, (is_correct_val, raw) in enumerate(judge_results):
-                original_idx = judge_queue_indices[j_idx]
-                batch_results_processed[original_idx] = (is_correct_val, raw)
+        item_result = {
+            "id": item["id"],
+            "question": item["question"],
+            "answer": answer,
+            "task": task,
+            "difficulty": difficulty,
+            "subcat": subcat,
+            "configs": {}
+        }
+        
+        # Determine max samples needed across all configs
+        max_samples_needed = max(s for t, s in latent_configs) if args.latent_ablation else 1
 
-        # 4. Update Stats & Results
-        for i, item in enumerate(batch_ds):
-            proc_res = batch_results_processed[i]
-            if proc_res is None:
-                is_correct, judge_info = False, "ERROR"
+        # We can extract all samples at the highest tau if we want, but since each config has a different tau, 
+        # it's cleaner to just run each config separately using run_desta_with_latent_sampling.
+        # However, to be perfectly rigorous and save compute, we can just run the loop. 
+        # (S=5 takes ~5x longer per item, so we just run for the active configs)
+        for cfg in latent_configs:
+            tau, S = cfg
+            if tau == 0.0 and S == 1:
+                pred, sample_preds = run_desta_with_latent_sampling(model, item, 1, 0.0, TMP_WAV_PATH, snr_db=args.snr_db)
             else:
-                is_correct, judge_info = proc_res
-                
-            pred = batch_preds_final[i]
+                pred, sample_preds = run_desta_with_latent_sampling(model, item, S, tau, TMP_WAV_PATH, snr_db=args.snr_db)
             
-            # Update baseline tracker
-            tr = trackers[(0.0, 1)]
+            # Match
+            is_string_correct = string_match(answer, pred, choices)
+            is_llm_correct, judge_raw = call_judge(judge_tokenizer, judge_model, item, pred)
+            is_correct = is_string_correct or is_llm_correct
+            
+            # Update trackers for this config
+            tr = trackers[cfg]
             tr["total"] += 1
-            tr["task"][item["task"]][1] += 1
-            tr["diff"][item["difficulty"]][1] += 1
-            tr["subcat"][item.get("sub-category", "NA")][1] += 1
+            tr["task"][task][1] += 1
+            tr["diff"][difficulty][1] += 1
+            tr["subcat"][subcat][1] += 1
             
             if is_correct:
                 tr["corr"] += 1
-                tr["task"][item["task"]][0] += 1
-                tr["diff"][item["difficulty"]][0] += 1
-                tr["subcat"][item.get("sub-category", "NA")][0] += 1
+                tr["task"][task][0] += 1
+                tr["diff"][difficulty][0] += 1
+                tr["subcat"][subcat][0] += 1
 
-            item_result = {
-                "id": item["id"],
-                "question": item["question"],
-                "answer": item["answer"],
-                "task": item["task"],
-                "difficulty": item["difficulty"],
-                "subcat": item.get("sub-category", "NA"),
-                "configs": {
-                    "tau0.0_S1": {
-                        "prediction": pred,
-                        "is_correct": bool(is_correct),
-                        "judge_raw": judge_info
-                    }
-                }
+            item_result["configs"][f"tau{tau}_S{S}"] = {
+                "prediction": pred,
+                "is_correct": is_correct,
+                "sample_predictions": sample_preds
             }
-            results.append(item_result)
             
-            print(f"[{b_idx+i}/{len(ds)}] Match: {is_correct}, Ans: {item['answer']}, Pred: {pred[:150]}...")
+            # Print only for baseline to keep logs clean
+            if tau == 0.0 and S == 1:
+                print(f"Match: {is_string_correct}, Judge: {is_llm_correct}, Ans: {answer}, Pred: {pred}")
+
+        results.append(item_result)
 
     # Print results for each config
     ablation_summary = []
@@ -693,11 +655,12 @@ def main():
         ablation_summary.append({
             "tau": tau,
             "S": S,
-            "accuracy": float(round(total_acc, 2)),
+            "accuracy": round(total_acc, 2),
             "correct": corr,
             "total": total
         })
         
+        # Only print detailed breakdown for the baseline (tau=0, S=1)
         if tau == 0.0 and S == 1:
             print("-" * 30)
             print("Task-wise Accuracy:")
@@ -755,8 +718,8 @@ def main():
                 "G": num_groups,
                 "K": queries_per_group,
                 "M": num_groups * queries_per_group,
-                "mmau_accuracy": float(round(total_acc, 2)),
-                "mean_offdiag_cosine_sim": float(round(mean_cos_sim, 4)),
+                "mmau_accuracy": round(total_acc, 2),
+                "mean_offdiag_cosine_sim": round(mean_cos_sim, 4),
             }
             diag_path = os.path.join(args.output_dir, f"group_ablation_G{num_groups}_K{queries_per_group}.json")
             with open(diag_path, "w") as f:
