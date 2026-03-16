@@ -17,6 +17,7 @@ Usage:
 import os
 import json
 import wave
+import random
 import numpy as np
 import re
 import argparse
@@ -39,6 +40,18 @@ try:
 except LookupError:
     nltk.download('punkt_tab', quiet=True)
 from nltk.tokenize import sent_tokenize
+
+DEFAULT_SEED = 42
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 # =====================
@@ -584,7 +597,13 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
     parser.add_argument("--skip_nvembed", action="store_true", help="Skip NVEmbed for MCQ, use string match only")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
+
+    # Set global random seeds for reproducibility
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 

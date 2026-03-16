@@ -1,6 +1,7 @@
 import os
 import json
 import wave
+import random
 import numpy as np
 import re
 import argparse
@@ -12,15 +13,28 @@ from desta import DeSTA25AudioModel
 import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+DEFAULT_SEED = 42
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 # =====================
 # Noise Injection
 # =====================
 
-def add_gaussian_noise_snr(audio_array: np.ndarray, snr_db) -> np.ndarray:
+def add_gaussian_noise_snr(audio_array: np.ndarray, snr_db, sample_idx: int = 0, base_seed: int = DEFAULT_SEED) -> np.ndarray:
     """
     Add white Gaussian noise to an audio waveform at the specified SNR (dB).
     If snr_db is None or inf, returns the original audio unchanged.
+    Uses a deterministic RNG seeded with (base_seed + sample_idx) for reproducibility.
     """
     if snr_db is None or np.isinf(snr_db):
         return audio_array
@@ -30,7 +44,8 @@ def add_gaussian_noise_snr(audio_array: np.ndarray, snr_db) -> np.ndarray:
         return audio_array  # silence – nothing to corrupt
     snr_linear = 10 ** (snr_db / 10.0)
     noise_power = sig_power / snr_linear
-    noise = np.random.default_rng().normal(0, np.sqrt(noise_power), audio_array.shape).astype(np.float32)
+    rng = np.random.default_rng(base_seed + sample_idx)
+    noise = rng.normal(0, np.sqrt(noise_power), audio_array.shape).astype(np.float32)
     return audio_array + noise
 
 # =====================
@@ -372,7 +387,13 @@ def main():
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
     parser.add_argument("--snr_db", type=float, default=None,
                         help="SNR in dB for additive Gaussian noise (default: None = clean)")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
+    
+    # Set global random seeds for reproducibility
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
     
     snr_tag = "clean" if args.snr_db is None else f"snr{int(args.snr_db)}"
 
