@@ -259,47 +259,133 @@ def string_match(answer, prediction, choices):
 
     return cond1 and cond2
 
-def extract_answer_choice(response):
+def extract_answer_choice(response, choices=None):
     """
-    Robustly extract answer choice (A/B/C/D) or full answer text from model response.
+    Robustly extract answer choice from model response.
+    Handles: closed <think>...</think>, unclosed <think> (truncated), and choice-matching fallback.
     """
     if not response:
         return None
-        
+
     pred = response.strip()
-    
-    # 1) Clean thinking process
-    pred_no_think = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
-    
-    # 2) Extract answer with multiple fallback patterns
-    patterns = [
-        r'The correct answer is:\s*["\']?(.*?)["\']?$',
-        r'Final Answer:\s*["\']?(.*?)["\']?$',
-        r'Answer:\s*["\']?(.*?)["\']?$',
-        r'Option\s*([A-D])'
+
+    # --- Step 1: Separate thinking content from answer content ---
+    think_content = ""
+
+    # Remove closed <think>...</think> blocks
+    pred_clean = re.sub(r'<think>.*?</think>', '', pred, flags=re.DOTALL).strip()
+
+    # Handle unclosed <think> (model ran out of tokens mid-thinking)
+    if '<think>' in pred_clean:
+        idx = pred_clean.index('<think>')
+        think_content = pred_clean[idx + 7:]  # content after <think>
+        pred_clean = pred_clean[:idx].strip()  # content before <think>
+
+    # Also capture think content from closed blocks for fallback
+    think_match = re.search(r'<think>(.*?)</think>', pred, flags=re.DOTALL)
+    if think_match and not think_content:
+        think_content = think_match.group(1)
+
+    # --- Step 2: Try standard answer patterns on clean text ---
+    answer_patterns = [
+        r'The correct answer is:\s*["\']?(.*?)["\']?\s*$',
+        r'Final [Aa]nswer:\s*["\']?(.*?)["\']?\s*$',
+        r'[Aa]nswer:\s*["\']?(.*?)["\']?\s*$',
+        r'Option\s*([A-D])',
     ]
-    
+
     extracted = None
-    for pat in patterns:
-        match = re.search(pat, pred_no_think, re.IGNORECASE)
-        if match:
-            extracted = match.group(1).strip()
+    for text_to_search in [pred_clean, think_content]:
+        if not text_to_search:
+            continue
+        for pat in answer_patterns:
+            match = re.search(pat, text_to_search, re.IGNORECASE | re.MULTILINE)
+            if match:
+                extracted = match.group(1).strip()
+                break
+        if extracted:
             break
-    
+
+    # --- Step 3: Look for A/B/C/D letter patterns ---
     if not extracted:
-         # Fallback: look for last isolated A/B/C/D or (A)/(B)/(C)/(D)
-         paren_match = re.findall(r'\(([A-D])\)', pred_no_think)
-         if paren_match:
-             extracted = paren_match[-1] # Take the last one
-         else:
-             # Last resort: look for just A-D at the end
-             last_char_match = re.search(r'\b([A-D])\b[. ]*$', pred_no_think)
-             if last_char_match:
-                 extracted = last_char_match.group(1)
-             else:
-                 extracted = pred_no_think # Return full string
-    
-    return extracted.strip('"').strip("'").strip()
+        for text_to_search in [pred_clean, think_content]:
+            if not text_to_search:
+                continue
+            paren_match = re.findall(r'\(([A-D])\)', text_to_search)
+            if paren_match:
+                extracted = paren_match[-1]
+                break
+            last_char_match = re.search(r'\b([A-D])\b[. ]*$', text_to_search)
+            if last_char_match:
+                extracted = last_char_match.group(1)
+                break
+
+    # --- Step 3.5: Short-text / prefix matching against choices ---
+    # e.g. pred="b" → "Bonfire", pred="bon" → "Bonfire"
+    if extracted and choices and len(extracted) <= 3:
+        _choices = choices
+        if isinstance(_choices, str):
+            try:
+                _choices = json.loads(_choices)
+            except Exception:
+                _choices = []
+        extracted_lower = extracted.lower()
+        prefix_matches = [c for c in _choices if c.lower().startswith(extracted_lower)]
+        if len(prefix_matches) == 1:
+            extracted = prefix_matches[0]
+
+    # Also try when extracted is None but pred_clean is very short
+    if not extracted and choices and pred_clean and len(pred_clean) <= 3:
+        _choices = choices
+        if isinstance(_choices, str):
+            try:
+                _choices = json.loads(_choices)
+            except Exception:
+                _choices = []
+        pred_lower = pred_clean.lower()
+        prefix_matches = [c for c in _choices if c.lower().startswith(pred_lower)]
+        if len(prefix_matches) == 1:
+            extracted = prefix_matches[0]
+
+    # --- Step 4: Choice-matching fallback (for truncated thinking) ---
+    # If we have choices and thinking content but no extracted answer,
+    # find which choice the model concluded on by looking at the last portion
+    if not extracted and choices and think_content:
+        if isinstance(choices, str):
+            try:
+                choices = json.loads(choices)
+            except Exception:
+                choices = []
+
+        # Use the last 500 chars of thinking where conclusion usually appears
+        tail = think_content[-500:].lower()
+
+        # Score each choice: count occurrences + bonus for appearing near the end
+        best_choice = None
+        best_score = 0
+        for choice in choices:
+            choice_lower = choice.lower()
+            tokens = set(re.findall(r'\b\w+\b', choice_lower))
+            # Count token matches in tail
+            score = sum(1 for t in tokens if t in tail)
+            # Bonus: exact choice string near end (last 200 chars)
+            if choice_lower in think_content[-200:].lower():
+                score += 3
+            # Bonus: bolded/emphasized choice (e.g., **Person**)
+            if re.search(r'\*\*' + re.escape(choice_lower) + r'\*\*', tail):
+                score += 5
+            if score > best_score:
+                best_score = score
+                best_choice = choice
+
+        if best_choice and best_score >= 2:
+            extracted = best_choice
+
+    # --- Step 5: Final fallback ---
+    if not extracted:
+        extracted = pred_clean if pred_clean else think_content if think_content else pred
+
+    return extracted.strip('"').strip("'").strip() if extracted else None
 
 # =====================
 # DeSTA 推論
@@ -307,7 +393,7 @@ def extract_answer_choice(response):
 
 SYSTEM_PROMPT = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
 
-DEFAULT_MAX_NEW_TOKENS = 256
+DEFAULT_MAX_NEW_TOKENS = 512
 
 
 def _build_question(item):
@@ -329,9 +415,11 @@ def _build_question(item):
     return f"{item['question']} Choose from the following options: {options_str}"
 
 
-def _run_desta_generate(model, wav_path, question, transcription=None, max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
+def _run_desta_generate(model, wav_path, question, transcription=None,
+                        max_new_tokens=DEFAULT_MAX_NEW_TOKENS, choices=None):
     """
     Core DeSTA generate call. If transcription is provided, ASR is skipped.
+    choices is passed to extract_answer_choice for fallback matching.
     """
     audio_entry = {"audio": wav_path}
     if transcription is not None:
@@ -360,7 +448,7 @@ def _run_desta_generate(model, wav_path, question, transcription=None, max_new_t
         pred = pred[0]
     if isinstance(pred, str):
         pred = pred.strip()
-    return extract_answer_choice(pred)
+    return extract_answer_choice(pred, choices=choices)
 
 
 def _suppress_whisper_max_length_warning(model):
@@ -406,8 +494,9 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None,
     if not _wav_written:
         write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
     question = _build_question(item)
+    choices = item.get("choices") if isinstance(item, dict) else getattr(item, "choices", None)
     return _run_desta_generate(model, wav_path, question, transcription=transcription,
-                               max_new_tokens=max_new_tokens)
+                               max_new_tokens=max_new_tokens, choices=choices)
 
 
 def run_all_latent_configs(model, item, latent_configs, wav_path=TMP_WAV_PATH,
@@ -423,13 +512,14 @@ def run_all_latent_configs(model, item, latent_configs, wav_path=TMP_WAV_PATH,
     # Write WAV once for this item
     write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
     question = _build_question(item)
+    choices = item.get("choices") if isinstance(item, dict) else getattr(item, "choices", None)
 
     connector = model.perception.connector
     is_variational = getattr(connector, 'variational_enabled', False)
 
     # If not variational, run once and return for all configs
     if not is_variational:
-        pred = _run_desta_generate(model, wav_path, question, max_new_tokens=max_new_tokens)
+        pred = _run_desta_generate(model, wav_path, question, max_new_tokens=max_new_tokens, choices=choices)
         return {cfg: (pred, [pred]) for cfg in latent_configs}
 
     # Group configs by tau, find max S needed per tau
@@ -452,14 +542,14 @@ def run_all_latent_configs(model, item, latent_configs, wav_path=TMP_WAV_PATH,
             if cached_transcription is None:
                 # First call ever: no cached transcription, ASR will run
                 pred = _run_desta_generate(model, wav_path, question,
-                                           max_new_tokens=max_new_tokens)
+                                           max_new_tokens=max_new_tokens, choices=choices)
                 # Cache transcription for all subsequent calls
                 cached_transcription = _get_cached_transcription(model, wav_path)
             else:
                 # Subsequent calls: pass cached transcription to skip ASR
                 pred = _run_desta_generate(model, wav_path, question,
                                            transcription=cached_transcription,
-                                           max_new_tokens=max_new_tokens)
+                                           max_new_tokens=max_new_tokens, choices=choices)
             predictions.append(pred)
 
         connector.s1_inference_alpha = original_alpha
