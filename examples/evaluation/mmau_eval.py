@@ -110,7 +110,6 @@ def load_audio_as_array(item, snr_db=None, sample_idx=0):
             break
 
     if audio_obj is None:
-        print(f"⚠️ [sample {sample_idx}] No 'audio' or 'context' field found in item. Keys: {list(item.keys()) if hasattr(item, 'keys') else 'N/A'}. Returning silence.")
         return np.zeros(16000, dtype=np.float32), 16000
 
     # --- Step 2: Extract array + sample rate from audio_obj ---
@@ -148,26 +147,16 @@ def load_audio_as_array(item, snr_db=None, sample_idx=0):
                 result = extractor(audio_obj)
                 if result[0] is not None and len(result[0]) > 0:
                     y, sr = result
-                    if sample_idx == 0:
-                        print(f"ℹ️  [sample 0] Audio loaded via strategy C{attempt+1} from {obj_type}, shape={y.shape}, sr={sr}")
                     break
             except Exception:
                 continue
 
         if y is None:
-            print(f"⚠️ [sample {sample_idx}] FAILED to extract audio from {obj_type}. "
-                  f"dir(audio_obj)={[a for a in dir(audio_obj) if not a.startswith('_')]}")
             return np.zeros(16000, dtype=np.float32), 16000
 
     # --- Step 3: Validate ---
     if y is None or len(y) == 0:
-        print(f"⚠️ [sample {sample_idx}] Audio array is empty. Returning silence.")
         return np.zeros(16000, dtype=np.float32), 16000
-
-    # Print debug for first sample
-    if sample_idx == 0:
-        print(f"ℹ️  [sample 0] Audio loaded OK: shape={y.shape}, sr={sr}, "
-              f"range=[{y.min():.4f}, {y.max():.4f}], type(audio_obj)={type(audio_obj).__name__}")
 
     # Inject noise if requested
     y = add_gaussian_noise_snr(y, snr_db, sample_idx=sample_idx)
