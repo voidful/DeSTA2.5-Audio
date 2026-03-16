@@ -284,14 +284,13 @@ def extract_answer_choice(response):
 # DeSTA 推論
 # =====================
 
-def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
-    write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
-    
-    system_prompt = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
-    
-    # Build question with choices (matching inference_desta25_audio.py logic)
+SYSTEM_PROMPT = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
+
+DEFAULT_MAX_NEW_TOKENS = 256
+
+
+def _build_question(item):
     choices = item["choices"]
-    # Handle if choices is a string representation of a list
     if isinstance(choices, str):
         try:
             choices = json.loads(choices)
@@ -305,21 +304,24 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
             options_str += " or "
         elif i < len(choices) - 1:
             options_str += ", "
-            
-    question = f"{item['question']} Choose from the following options: {options_str}"
+
+    return f"{item['question']} Choose from the following options: {options_str}"
+
+
+def _run_desta_generate(model, wav_path, question, transcription=None, max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
+    """
+    Core DeSTA generate call. If transcription is provided, ASR is skipped.
+    """
+    audio_entry = {"audio": wav_path}
+    if transcription is not None:
+        audio_entry["text"] = transcription
 
     messages = [
-        {
-            "role": "system",
-            "content": system_prompt
-        },
+        {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
-            # Audio First: <|AUDIO|>\n\n{text}
-            "content": f"<|AUDIO|>\n\n{question}", 
-            "audios": [{
-                "audio": wav_path
-            }]
+            "content": f"<|AUDIO|>\n\n{question}",
+            "audios": [audio_entry]
         }
     ]
 
@@ -328,10 +330,10 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
             outputs = model.generate(
                 messages=messages,
                 do_sample=False,
-                max_new_tokens=512,
+                max_new_tokens=max_new_tokens,
                 repetition_penalty=1.5
             )
-    
+
     pred = outputs.text
     if isinstance(pred, list):
         pred = pred[0]
@@ -340,42 +342,141 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
     return extract_answer_choice(pred)
 
 
-def run_desta_with_latent_sampling(model, item, num_samples, tau,
-                                   wav_path=TMP_WAV_PATH, snr_db=None):
+def _get_cached_transcription(model, wav_path):
     """
-    Run DeSTA inference S times with latent sampling (τ > 0),
-    then return the majority-voted answer.
-    
-    Each sample draws z = μ + τ·σ·ε with fresh ε ~ N(0,I),
-    giving a different perceptual "view" of the same audio.
+    Run VAD + ASR on an audio file once and return the transcription string.
+    This avoids re-running Whisper for every repeated call on the same audio.
+    """
+    from desta.utils.audio import AudioSegment as DeSTAAudioSegment
+    feature = DeSTAAudioSegment.from_file(wav_path, target_sr=16000, channel_selector="average").samples
+    model._setup_vad()
+    is_speech = model.get_speech_timestamps(feature, model.vad_model)
+    if not is_speech:
+        return " "
+
+    if not hasattr(model, "processor"):
+        model._setup_generation()
+    feats = model.processor([feature], sampling_rate=16000, return_tensors="pt").input_features
+    feats = feats.to(model.device).half()
+    with torch.no_grad():
+        trans_ids = model.perception.whisper.generate(
+            input_features=feats, attention_mask=None, max_new_tokens=128
+        )
+    transcription = model.processor.batch_decode(trans_ids, skip_special_tokens=True)[0].strip()
+    return transcription
+
+
+def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None,
+                      transcription=None, max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
+                      _wav_written=False):
+    if not _wav_written:
+        write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
+    question = _build_question(item)
+    return _run_desta_generate(model, wav_path, question, transcription=transcription,
+                               max_new_tokens=max_new_tokens)
+
+
+def run_all_latent_configs(model, item, latent_configs, wav_path=TMP_WAV_PATH,
+                           snr_db=None, max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
+    """
+    Run all latent configs for a single item efficiently:
+    - Write WAV once
+    - Compute ASR transcription once, reuse for all subsequent calls
+    - Group configs by tau to avoid redundant samples
+
+    Returns: dict mapping cfg -> (final_pred, sample_preds)
+    """
+    # Write WAV once for this item
+    write_wav_from_dataset_item(item, wav_path, snr_db=snr_db)
+    question = _build_question(item)
+
+    connector = model.perception.connector
+    is_variational = getattr(connector, 'variational_enabled', False)
+
+    # If not variational, run once and return for all configs
+    if not is_variational:
+        pred = _run_desta_generate(model, wav_path, question, max_new_tokens=max_new_tokens)
+        return {cfg: (pred, [pred]) for cfg in latent_configs}
+
+    # Group configs by tau, find max S needed per tau
+    from collections import OrderedDict
+    tau_max_s = OrderedDict()
+    for tau, S in latent_configs:
+        if tau not in tau_max_s or S > tau_max_s[tau]:
+            tau_max_s[tau] = S
+
+    # Run ASR once (first call without cached transcription), then cache it
+    cached_transcription = None
+    tau_samples = {}  # tau -> list of predictions
+
+    for tau, max_s in tau_max_s.items():
+        original_alpha = connector.s1_inference_alpha
+        connector.s1_inference_alpha = tau
+
+        predictions = []
+        for s in range(max_s):
+            if cached_transcription is None:
+                # First call ever: no cached transcription, ASR will run
+                pred = _run_desta_generate(model, wav_path, question,
+                                           max_new_tokens=max_new_tokens)
+                # Cache transcription for all subsequent calls
+                cached_transcription = _get_cached_transcription(model, wav_path)
+            else:
+                # Subsequent calls: pass cached transcription to skip ASR
+                pred = _run_desta_generate(model, wav_path, question,
+                                           transcription=cached_transcription,
+                                           max_new_tokens=max_new_tokens)
+            predictions.append(pred)
+
+        connector.s1_inference_alpha = original_alpha
+        tau_samples[tau] = predictions
+
+    # Build results for each config
+    results = {}
+    for cfg in latent_configs:
+        tau, S = cfg
+        preds = tau_samples[tau][:S]
+        vote_counts = Counter(p for p in preds if p is not None)
+        if vote_counts:
+            final_pred = vote_counts.most_common(1)[0][0]
+        else:
+            final_pred = preds[0] if preds else None
+        results[cfg] = (final_pred, preds)
+
+    return results
+
+
+def run_desta_with_latent_sampling(model, item, num_samples, tau,
+                                   wav_path=TMP_WAV_PATH, snr_db=None,
+                                   max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
+    """
+    Run DeSTA inference S times with latent sampling.
+    For multi-config evaluation, prefer run_all_latent_configs() instead.
     """
     connector = model.perception.connector
-    
-    # Check if model supports variational sampling
+
     if not getattr(connector, 'variational_enabled', False):
-        # Not variational — just run once
-        pred = run_desta_on_item(model, item, wav_path, snr_db=snr_db)
+        pred = run_desta_on_item(model, item, wav_path, snr_db=snr_db,
+                                 max_new_tokens=max_new_tokens)
         return pred, [pred]
-    
-    # Set the sampling temperature
+
     original_alpha = connector.s1_inference_alpha
     connector.s1_inference_alpha = tau
-    
+
     predictions = []
     for s in range(num_samples):
-        pred = run_desta_on_item(model, item, wav_path, snr_db=snr_db)
+        pred = run_desta_on_item(model, item, wav_path, snr_db=snr_db,
+                                 max_new_tokens=max_new_tokens)
         predictions.append(pred)
-    
-    # Restore original alpha
+
     connector.s1_inference_alpha = original_alpha
-    
-    # Majority vote
+
     vote_counts = Counter(p for p in predictions if p is not None)
     if vote_counts:
         final_pred = vote_counts.most_common(1)[0][0]
     else:
         final_pred = predictions[0] if predictions else None
-    
+
     return final_pred, predictions
 
 # =====================
@@ -597,19 +698,32 @@ def extract_query_vectors_from_mmau(model, ds, device, max_samples=None):
 # =====================
 
 def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
-                           latent_configs=None, judge_batch_size=16):
+                           latent_configs=None, judge_batch_size=16,
+                           max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
     """
     Run MMAU evaluation for a single model. Returns (results, ablation_summary, trackers).
 
     Two-pass strategy for speed:
       Pass 1 – Run DeSTA inference + string_match on all items (GPU-bound on DeSTA).
+               Uses run_all_latent_configs() to write WAV once, cache ASR, and
+               share samples across configs with the same tau.
       Pass 2 – Batch judge only the items where string_match failed.
     """
     if latent_configs is None:
         latent_configs = [(0.0, 1)]
 
+    # Pre-compute total inference calls for progress info
+    tau_max_s = {}
+    for tau, S in latent_configs:
+        if tau not in tau_max_s or S > tau_max_s[tau]:
+            tau_max_s[tau] = S
+    total_calls_per_item = sum(tau_max_s.values())
+    print(f"  Latent configs: {latent_configs}")
+    print(f"  Unique (tau, max_S): {dict(tau_max_s)} → {total_calls_per_item} inference calls/item "
+          f"(was {sum(S for _, S in latent_configs)} without sharing)")
+
     # --- Pass 1: DeSTA inference + string_match ---
-    raw_results = []  # list of dicts with per-config predictions
+    raw_results = []
 
     for idx, item in enumerate(tqdm(ds, desc="DeSTA inference")):
         answer = item["answer"]
@@ -633,12 +747,14 @@ def evaluate_model_on_mmau(model, ds, judge_tokenizer, judge_model, snr_db=None,
             "configs": {}
         }
 
+        # Run all latent configs efficiently for this item
+        all_cfg_results = run_all_latent_configs(
+            model, item, latent_configs, wav_path=TMP_WAV_PATH,
+            snr_db=snr_db, max_new_tokens=max_new_tokens
+        )
+
         for cfg in latent_configs:
-            tau, S = cfg
-            if tau == 0.0 and S == 1:
-                pred, sample_preds = run_desta_with_latent_sampling(model, item, 1, 0.0, TMP_WAV_PATH, snr_db=snr_db)
-            else:
-                pred, sample_preds = run_desta_with_latent_sampling(model, item, S, tau, TMP_WAV_PATH, snr_db=snr_db)
+            pred, sample_preds = all_cfg_results[cfg]
 
             is_string_correct = string_match(answer, pred, choices)
             entry["configs"][cfg] = {
@@ -793,6 +909,8 @@ def main():
                         help="Skip LLM judge entirely; use only string_match for scoring (much faster).")
     parser.add_argument("--judge_batch_size", type=int, default=16,
                         help="Batch size for LLM judge inference (default: 16)")
+    parser.add_argument("--max_new_tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS,
+                        help=f"Max new tokens for DeSTA generation (default: {DEFAULT_MAX_NEW_TOKENS})")
     args = parser.parse_args()
 
     # Set global random seeds for reproducibility
@@ -878,7 +996,8 @@ def main():
             results, ablation_summary, trackers = evaluate_model_on_mmau(
                 model, ds, judge_tokenizer, judge_model,
                 snr_db=args.snr_db, latent_configs=[(0.0, 1)],
-                judge_batch_size=args.judge_batch_size
+                judge_batch_size=args.judge_batch_size,
+                max_new_tokens=args.max_new_tokens
             )
             baseline_acc = ablation_summary[0]["accuracy"]
 
@@ -946,7 +1065,8 @@ def main():
     results, ablation_summary, trackers = evaluate_model_on_mmau(
         model, ds, judge_tokenizer, judge_model,
         snr_db=args.snr_db, latent_configs=latent_configs,
-        judge_batch_size=args.judge_batch_size
+        judge_batch_size=args.judge_batch_size,
+        max_new_tokens=args.max_new_tokens
     )
 
     # Save results
