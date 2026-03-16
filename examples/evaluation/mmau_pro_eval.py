@@ -105,28 +105,36 @@ def write_wav_from_dataset_item(item, wav_path, audio_key="audio"):
     
     if audio_obj is None:
         raise ValueError(f"No audio found in item: {list(item.keys())}")
-    
-    # Handle single audio
+
+    # Handle single audio (legacy dict format)
     if isinstance(audio_obj, dict) and "array" in audio_obj:
         audio_array = audio_obj["array"]
         sample_rate = audio_obj.get("sampling_rate", 16000)
         if sample_rate is None:
             sample_rate = 16000
         return write_wav_from_array(audio_array, sample_rate, wav_path)
-    
+
+    # Handle AudioDecoder (torchcodec, datasets >= 4.x)
+    if hasattr(audio_obj, 'get_all_samples'):
+        audio_array = np.asarray(audio_obj["array"], dtype=np.float32)
+        sample_rate = int(audio_obj["sampling_rate"])
+        return write_wav_from_array(audio_array, sample_rate, wav_path)
+
     # Handle list of audios (multi-audio)
     if isinstance(audio_obj, list) and len(audio_obj) > 0:
-        # For multi-audio, concatenate them
         all_audio = []
         sample_rate = 16000
         for audio in audio_obj:
             if isinstance(audio, dict) and "array" in audio:
                 all_audio.append(audio["array"])
                 sample_rate = audio.get("sampling_rate", sample_rate) or sample_rate
+            elif hasattr(audio, 'get_all_samples'):
+                all_audio.append(np.asarray(audio["array"], dtype=np.float32))
+                sample_rate = int(audio["sampling_rate"])
         if all_audio:
             combined_audio = np.concatenate(all_audio)
             return write_wav_from_array(combined_audio, sample_rate, wav_path)
-    
+
     raise ValueError(f"Unsupported audio format: {type(audio_obj)}")
 
 

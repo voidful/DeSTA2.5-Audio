@@ -48,6 +48,9 @@ def load_audio_as_array(item, target_sr):
     
     if isinstance(audio_obj, dict) and "array" in audio_obj:
         return audio_obj["array"], audio_obj["sampling_rate"]
+    elif hasattr(audio_obj, 'get_all_samples'):
+        # datasets AudioDecoder (torchcodec, datasets >= 4.x)
+        return np.asarray(audio_obj["array"], dtype=np.float32), int(audio_obj["sampling_rate"])
     elif isinstance(audio_obj, str):
         # Path
         y, sr = librosa.load(audio_obj, sr=None)

@@ -46,7 +46,8 @@ def load_audio(audio_obj, target_sr: int) -> np.ndarray:
     """
     Robustly load audio from HF datasets Audio feature.
     audio_obj can be:
-      - {"array": ..., "sampling_rate": ...}
+      - {"array": ..., "sampling_rate": ...}  (legacy dict)
+      - AudioDecoder object (datasets >= 4.x, torchcodec)
       - {"path": ...}
       - a path string
     """
@@ -59,9 +60,15 @@ def load_audio(audio_obj, target_sr: int) -> np.ndarray:
             y = y.astype(np.float32)
         else:
             raise ValueError(f"Unsupported audio dict keys: {list(audio_obj.keys())}")
-    else:
+    elif hasattr(audio_obj, 'get_all_samples'):
+        # datasets AudioDecoder: supports __getitem__ but NOT .get() or attribute access
+        y = np.asarray(audio_obj["array"], dtype=np.float32)
+        orig_sr = int(audio_obj["sampling_rate"])
+    elif isinstance(audio_obj, str):
         y, orig_sr = librosa.load(audio_obj, sr=None, mono=True)
         y = y.astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported audio type: {type(audio_obj).__name__}")
 
     if orig_sr != target_sr:
         y = librosa.resample(y, orig_sr=orig_sr, target_sr=target_sr).astype(np.float32)

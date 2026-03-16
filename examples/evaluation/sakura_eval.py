@@ -89,15 +89,21 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
 def _extract_audio_array_and_sr(audio_obj):
     """
     Robustly extract (audio_array, sample_rate) from an audio object.
-    Supports both legacy dict format and new AudioDecoder (torchcodec) objects.
+    Supports both legacy dict format and new AudioDecoder (torchcodec, datasets >= 4.x).
     """
     if isinstance(audio_obj, dict):
         arr = np.asarray(audio_obj["array"], dtype=np.float32)
         sr = audio_obj.get("sampling_rate", 16000)
+    elif hasattr(audio_obj, 'get_all_samples'):
+        # datasets AudioDecoder: supports __getitem__ but NOT .get() or attribute access
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = int(audio_obj["sampling_rate"])
     else:
-        # New datasets versions use AudioDecoder objects (torchcodec)
         arr = np.asarray(audio_obj["array"] if hasattr(audio_obj, '__getitem__') else audio_obj.array, dtype=np.float32)
-        sr = getattr(audio_obj, "sampling_rate", 16000)
+        try:
+            sr = int(audio_obj["sampling_rate"])
+        except Exception:
+            sr = getattr(audio_obj, "sampling_rate", 16000)
     return arr, sr
 
 

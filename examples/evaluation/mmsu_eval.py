@@ -61,18 +61,35 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
+def _extract_audio_array_and_sr(audio_obj):
+    """
+    Robustly extract (audio_array, sample_rate) from an audio object.
+    Supports both legacy dict format and new AudioDecoder (torchcodec, datasets >= 4.x).
+    """
+    if isinstance(audio_obj, dict):
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = audio_obj.get("sampling_rate", 16000)
+    elif hasattr(audio_obj, 'get_all_samples'):
+        # datasets AudioDecoder: supports __getitem__ but NOT .get() or attribute access
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = int(audio_obj["sampling_rate"])
+    else:
+        arr = np.asarray(audio_obj["array"], dtype=np.float32) if hasattr(audio_obj, '__getitem__') else np.zeros(16000, dtype=np.float32)
+        try:
+            sr = int(audio_obj["sampling_rate"])
+        except Exception:
+            sr = 16000
+    if sr is None:
+        sr = 16000
+    return arr, int(sr)
+
+
 def write_wav_from_dataset_item(item, wav_path):
     """
     從 MMSU dataset item 取出 audio 寫成 wav 檔。
     """
     audio_obj = item["audio"]
-    audio_array = audio_obj["array"]
-    sample_rate = audio_obj.get("sampling_rate", 16000)
-
-    # 如果 sampling_rate 是 None 或其它非 int
-    if sample_rate is None:
-        sample_rate = 16000
-
+    audio_array, sample_rate = _extract_audio_array_and_sr(audio_obj)
     return write_wav_from_array(audio_array, sample_rate, wav_path)
 
 

@@ -48,17 +48,31 @@ def write_wav_from_array(audio_array, sample_rate, wav_path):
     return wav_path
 
 
+def _extract_audio_array_and_sr(audio_obj):
+    """Extract (audio_array, sample_rate) supporting dict and AudioDecoder (datasets >= 4.x)."""
+    if isinstance(audio_obj, dict):
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = audio_obj.get("sampling_rate", 16000)
+    elif hasattr(audio_obj, 'get_all_samples'):
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = int(audio_obj["sampling_rate"])
+    else:
+        arr = np.asarray(audio_obj["array"], dtype=np.float32)
+        try:
+            sr = int(audio_obj["sampling_rate"])
+        except Exception:
+            sr = 16000
+    if sr is None:
+        sr = 16000
+    return arr, int(sr)
+
+
 def write_wav_from_dataset_item(item, wav_path):
     """
     Extract audio from MMAU dataset item and write to wav file.
     """
     audio_obj = item["audio"]
-    audio_array = audio_obj["array"]
-    sample_rate = audio_obj.get("sampling_rate", 16000)
-
-    if sample_rate is None:
-        sample_rate = 16000
-
+    audio_array, sample_rate = _extract_audio_array_and_sr(audio_obj)
     return write_wav_from_array(audio_array, sample_rate, wav_path)
 
 

@@ -141,18 +141,39 @@ def load_audio_as_array(item, snr_db=None, sample_idx=0):
         y, sr = librosa.load(audio_obj, sr=None)
         y = y.astype(np.float32)
 
-    # Strategy C: new datasets AudioDecoder / torchcodec objects
+    # Strategy C: datasets AudioDecoder (torchcodec, datasets >= 4.x)
+    # AudioDecoder supports __getitem__ for "array" and "sampling_rate"
+    # but NOT .get() or attribute access. Must use o["key"] syntax.
+    elif hasattr(audio_obj, 'get_all_samples'):
+        try:
+            y = np.asarray(audio_obj["array"], dtype=np.float32)
+            sr = int(audio_obj["sampling_rate"])
+        except Exception:
+            y, sr = None, 16000
+
+    # Strategy D: other unknown audio objects — try multiple access patterns
     else:
-        obj_type = type(audio_obj).__name__
-        # Try multiple access patterns
-        for attempt, extractor in enumerate([
-            # C1: dict-like ["array"] access
-            lambda o: (np.asarray(o["array"], dtype=np.float32), o.get("sampling_rate", 16000) if hasattr(o, "get") else getattr(o, "sampling_rate", 16000)),
-            # C2: attribute .array access
-            lambda o: (np.asarray(o.array, dtype=np.float32), getattr(o, "sampling_rate", 16000)),
-            # C3: numpy() for torch tensors
+        def _safe_get_sr(o):
+            """Extract sampling_rate via __getitem__, .get(), or getattr()."""
+            for accessor in [
+                lambda: int(o["sampling_rate"]),
+                lambda: int(o.get("sampling_rate", 16000)),
+                lambda: int(getattr(o, "sampling_rate", 16000)),
+            ]:
+                try:
+                    return accessor()
+                except Exception:
+                    continue
+            return 16000
+
+        for extractor in [
+            # D1: dict-like ["array"] access
+            lambda o: (np.asarray(o["array"], dtype=np.float32), _safe_get_sr(o)),
+            # D2: attribute .array access
+            lambda o: (np.asarray(o.array, dtype=np.float32), _safe_get_sr(o)),
+            # D3: numpy() for torch tensors
             lambda o: (o.numpy().astype(np.float32) if hasattr(o, 'numpy') else None, 16000),
-        ]):
+        ]:
             try:
                 result = extractor(audio_obj)
                 if result[0] is not None and len(result[0]) > 0:
