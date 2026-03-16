@@ -560,9 +560,9 @@ def main():
 
 
     # 載入 Judge
-    print(f"Loading Judge model {JUDGE_MODEL_ID}... (SKIPPED FOR FAST TEST)")
-    # judge_tokenizer, judge_model = load_judge()
-    judge_tokenizer, judge_model = None, None
+    print(f"Loading Judge model {JUDGE_MODEL_ID}...")
+    judge_tokenizer, judge_model = load_judge()
+    # judge_tokenizer, judge_model = None, None
 
     # 載入資料
     print(f"Loading dataset {DATASET_ID} split {args.split}...")
@@ -627,7 +627,7 @@ def main():
                 judge_queue_indices.append(i)
 
         # 3. Batched Judging
-        if judge_queue_items:
+        if judge_queue_items and judge_tokenizer is not None and judge_model is not None:
             judge_results = call_judge_batch(judge_tokenizer, judge_model, judge_queue_items, judge_queue_preds)
             for j_idx, (is_correct_val, raw) in enumerate(judge_results):
                 original_idx = judge_queue_indices[j_idx]
