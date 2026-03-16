@@ -290,7 +290,6 @@ def run_desta_on_item(model, item, wav_path=TMP_WAV_PATH, snr_db=None):
                 messages=messages,
                 do_sample=False,
                 max_new_tokens=512,
-                repetition_penalty=1.5 # Prevent loops
             )
     
     pred = outputs.text
