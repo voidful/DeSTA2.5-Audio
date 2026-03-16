@@ -360,7 +360,8 @@ def _get_cached_transcription(model, wav_path):
     feats = feats.to(model.device).half()
     with torch.no_grad():
         trans_ids = model.perception.whisper.generate(
-            input_features=feats, attention_mask=None, max_new_tokens=128
+            input_features=feats, attention_mask=None,
+            max_new_tokens=128, max_length=None
         )
     transcription = model.processor.batch_decode(trans_ids, skip_special_tokens=True)[0].strip()
     return transcription

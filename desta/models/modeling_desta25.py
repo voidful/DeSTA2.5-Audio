@@ -1865,7 +1865,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             transcriptions = self.perception.whisper.generate(
                 input_features=asr_features,
                 attention_mask=None,
-                max_new_tokens=128
+                max_new_tokens=128,
+                max_length=None
             )
             transcriptions = self.processor.batch_decode(
                 transcriptions,
@@ -2063,7 +2064,8 @@ class DeSTA25AudioModel(PreTrainedModel):
                 transcriptions = self.perception.whisper.generate(
                     input_features=asr_features,
                     attention_mask=None,
-                    max_new_tokens=128
+                    max_new_tokens=128,
+                    max_length=None
                 )
                 transcriptions = self.processor.batch_decode(
                     transcriptions,
