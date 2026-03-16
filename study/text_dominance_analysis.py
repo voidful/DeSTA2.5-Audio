@@ -147,14 +147,14 @@ def token_overlap(a: str, b: str) -> float:
 #                        Load Data                                      #
 # ===================================================================== #
 
-def load_cremad(dataset_name, dataset_split, num_samples, seed):
+def load_cremad_paired(dataset_name, dataset_split, num_samples, seed):
     print(f"📦 Loading dataset: {dataset_name} [{dataset_split}]")
     ds = load_dataset(dataset_name, split=dataset_split)
-    ds = ds.shuffle(seed=seed)
-    if num_samples > 0:
-        ds = ds.select(range(min(num_samples, len(ds))))
-
-    items = []
+    
+    # Group by text to allow swapping audio for the same transcript
+    from collections import defaultdict
+    text_to_items = defaultdict(list)
+    
     for ex in ds:
         audio_obj = ex.get("audio")
         if audio_obj is None:
@@ -165,50 +165,51 @@ def load_cremad(dataset_name, dataset_split, num_samples, seed):
                 or ex.get("transcription") or str(ex.get("sentence_id", "")))
         emotion = str(ex.get("emotion") or ex.get("label") or "unknown")
 
-        items.append(dict(
-            audio=arr, sr=sr, text=str(text), emotion=emotion,
-            swapped_text="" # Will be filled below
+        text_to_items[str(text).strip()].append(dict(
+            audio=arr, sr=sr, text=str(text).strip(), emotion=emotion
         ))
 
-    # Assign a completely mismatched text to each item
-    for i in range(len(items)):
-        j = (i + len(items) // 2) % len(items)
-        items[i]["swapped_text"] = items[j]["text"]
+    paired_items = []
+    # Shuffle text keys for randomness
+    import random
+    random.seed(seed)
+    texts = list(text_to_items.keys())
+    random.shuffle(texts)
 
-    print(f"  Loaded {len(items)} samples")
-    return items
+    for txt in texts:
+        group = text_to_items[txt]
+        if len(group) < 2:
+            continue
+        
+        # Shuffle group to get random pairs
+        random.shuffle(group)
+        for i in range(0, len(group) - 1, 2):
+            item_a = group[i]
+            item_b = group[i+1]
+            
+            # We will use item_a["text"] for both, but swap the audio
+            paired_items.append(dict(
+                text=item_a["text"],
+                audio_a=item_a["audio"],
+                audio_b=item_b["audio"],
+                sr=item_a["sr"],
+                emotion_a=item_a["emotion"],
+                emotion_b=item_b["emotion"]
+            ))
+            if num_samples > 0 and len(paired_items) >= num_samples:
+                break
+        if num_samples > 0 and len(paired_items) >= num_samples:
+            break
+
+    print(f"  Generated {len(paired_items)} pairs (Fixed Transcript, Swapped Audio)")
+    return paired_items
 
 
 # ===================================================================== #
-#                     Generate with normal / zeroed audio               #
+#                     Generate with normal / swapped audio              #
 # ===================================================================== #
 
-def generate_response(model, wav_path, question, provided_text=None, do_sample=False):
-    """Run model.generate() and return text output."""
-    audio_node = {"audio": wav_path}
-    if provided_text is not None:
-        audio_node["text"] = provided_text
-    
-    messages = [
-        {"role": "system", "content": "You are an audio assistant."},
-        {"role": "user",
-         "content": f"<|AUDIO|>\n\n{question}",
-         "audios": [audio_node]},
-    ]
-    with torch.no_grad():
-        outputs = model.generate(
-            messages=messages,
-            do_sample=do_sample,
-            max_new_tokens=256,
-        )
-    pred = outputs.text
-    if isinstance(pred, list):
-        pred = pred[0]
-    return pred.strip()
-
-
-# (Removed monkey-patching logic as we now test text swapping)
-
+# (generate_response remains the same)
 
 # ===================================================================== #
 #                        Plotting                                       #
@@ -219,62 +220,55 @@ def plot_results(results, out_dir, has_semantic: bool = False):
     overlaps = [r["token_overlap"] for r in results]
     semantic_sims = [r["semantic_sim"] for r in results if r["semantic_sim"] is not None]
 
-    ncols = 2 if (not has_semantic or not semantic_sims) else 3
+    ncols = 2 if (not has_semantic or not semantic_sims) else 2
     fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 5))
 
-    # ---- Token overlap histogram ----
-    ax = axes[0]
-    ax.hist(overlaps, bins=20, color="#e74c3c", alpha=0.8, edgecolor="white")
-    ax.axvline(np.mean(overlaps), color="black", ls="--", lw=1.5,
-               label=f"mean = {np.mean(overlaps):.3f}")
-    ax.set_xlabel("Token Overlap (Jaccard)")
-    ax.set_ylabel("Count")
-    ax.set_title("Normal vs Swapped-Text: Token Overlap")
-    ax.legend()
-
-    # ---- Semantic similarity histogram ----
+    # ---- Semantic similarity histogram (Primary Metric) ----
     if has_semantic and semantic_sims:
-        ax = axes[1]
+        ax = axes[0]
         ax.hist(semantic_sims, bins=20, color="#9b59b6", alpha=0.8, edgecolor="white")
         ax.axvline(np.mean(semantic_sims), color="black", ls="--", lw=1.5,
                    label=f"mean = {np.mean(semantic_sims):.3f}")
         ax.set_xlabel("Cosine Similarity (SBERT)")
         ax.set_ylabel("Count")
-        ax.set_title("Normal vs Swapped-Text: Semantic Similarity")
+        ax.set_title("Audio-A vs Audio-B (Fixed Text): Semantic Sim")
         ax.legend()
-        ax_emo = axes[2]
+        ax_emo = axes[1]
     else:
+        ax = axes[0]
+        ax.hist(overlaps, bins=20, color="#e74c3c", alpha=0.8, edgecolor="white")
+        ax.axvline(np.mean(overlaps), color="black", ls="--", lw=1.5,
+                   label=f"mean = {np.mean(overlaps):.3f}")
+        ax.set_xlabel("Token Overlap (Jaccard)")
+        ax.set_ylabel("Count")
+        ax.set_title("Audio-A vs Audio-B (Fixed Text): Token Overlap")
+        ax.legend()
         ax_emo = axes[1]
 
-    # ---- Per-emotion semantic sim ----
+    # ---- Per-emotion audio sensitivity ----
+    # (1 - similarity) represents how much the model changed its output when audio changed
     emotion_groups = {}
     for r in results:
-        emo = r["emotion"]
-        if emo not in emotion_groups:
-            emotion_groups[emo] = {"overlap": [], "semantic": []}
-        emotion_groups[emo]["overlap"].append(r["token_overlap"])
-        if r["semantic_sim"] is not None:
-            emotion_groups[emo]["semantic"].append(r["semantic_sim"])
+        emo_pair = f"{r['emotion_a']}->{r['emotion_b']}"
+        if emo_pair not in emotion_groups:
+            emotion_groups[emo_pair] = []
+        val = r["semantic_sim"] if r["semantic_sim"] is not None else r["token_overlap"]
+        emotion_groups[emo_pair].append(1.0 - val)
 
-    emotions = sorted(emotion_groups.keys())
-    if has_semantic and semantic_sims:
-        emo_vals = [np.mean(emotion_groups[e]["semantic"]) if emotion_groups[e]["semantic"] else 0.0
-                    for e in emotions]
-        y_label = "Avg Semantic Sim (SBERT)"
-        title = "Semantic Similarity by Emotion"
-    else:
-        emo_vals = [np.mean(emotion_groups[e]["overlap"]) for e in emotions]
-        y_label = "Avg Token Overlap"
-        title = "Token Overlap by Emotion"
-
-    ax_emo.bar(emotions, emo_vals, color="#3498db", alpha=0.85)
-    ax_emo.set_ylabel(y_label)
-    ax_emo.set_xlabel("Emotion")
-    ax_emo.set_title(title)
-    ax_emo.set_ylim(0, 1.05)
+    # Sort by sensitivity
+    sorted_emos = sorted(emotion_groups.keys(), key=lambda x: np.mean(emotion_groups[x]), reverse=True)
+    top_emos = sorted_emos[:8] # Show top 8 transitions
+    
+    emo_vals = [np.mean(emotion_groups[e]) for e in top_emos]
+    
+    ax_emo.bar(top_emos, emo_vals, color="#3498db", alpha=0.85)
+    ax_emo.set_ylabel("Audio Sensitivity (1 - Similarity)")
+    ax_emo.set_xlabel("Emotion Transition")
+    ax_emo.set_title("Top 8 Audio-Sensitive Emotion Pairs")
+    plt.setp(ax_emo.get_xticklabels(), rotation=45, ha="right")
 
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "similarity_analysis.png"), dpi=150)
+    fig.savefig(os.path.join(out_dir, "audio_sensitivity_analysis.png"), dpi=150)
     plt.close(fig)
 
 
@@ -292,7 +286,7 @@ def main():
     print(f"🖥️  device={device}  |  out_dir={out_dir}\n")
 
     # ---- 1. Load data ----
-    items = load_cremad(
+    pairs = load_cremad_paired(
         args.dataset_name, args.dataset_split, args.num_samples, args.seed,
     )
 
@@ -305,57 +299,62 @@ def main():
     # ---- 2b. Load SBERT ----
     sbert = load_sbert(args.sbert_model)
 
-    # ---- 3. Run A/B generation ----
+    # ---- 3. Run paired generation ----
     results = []
-    tmp_wav = os.path.join(out_dir, "_tmp_audio.wav")
+    tmp_wav_a = os.path.join(out_dir, "_tmp_audio_a.wav")
+    tmp_wav_b = os.path.join(out_dir, "_tmp_audio_b.wav")
 
-    print(f"\n🔬 Running text dominance test on {len(items)} samples …")
+    print(f"\n🔬 Running Audio Sensitivity test on {len(pairs)} pairs …")
+    print(f"   (Fixed Transcript, Swapped Audio)")
     print(f"   Question: \"{args.question}\"\n")
 
-    for i, item in enumerate(items):
-        write_wav(item["audio"], item["sr"], tmp_wav)
+    for i, pair in enumerate(pairs):
+        write_wav(pair["audio_a"], pair["sr"], tmp_wav_a)
+        write_wav(pair["audio_b"], pair["sr"], tmp_wav_b)
 
-        # A) Normal generation (uses actual text or ASR)
-        pred_normal = generate_response(model, tmp_wav, args.question, provided_text=item["text"])
+        # 1) Generation with Audio A + Fixed Transcript
+        pred_a = generate_response(model, tmp_wav_a, args.question, provided_text=pair["text"])
 
-        # B) Mismatched-text generation (uses wrong text)
-        pred_mismatched = generate_response(model, tmp_wav, args.question, provided_text=item["swapped_text"])
+        # 2) Generation with Audio B + Fixed Transcript
+        pred_b = generate_response(model, tmp_wav_b, args.question, provided_text=pair["text"])
 
-        overlap = token_overlap(pred_normal, pred_mismatched)
-        exact = (pred_normal == pred_mismatched)
+        overlap = token_overlap(pred_a, pred_b)
+        exact = (pred_a == pred_b)
 
         results.append(dict(
             idx=i,
-            text_real=item["text"],
-            text_swapped=item["swapped_text"],
-            emotion=item["emotion"],
-            pred_normal=pred_normal,
-            pred_mismatched=pred_mismatched,
+            text=pair["text"],
+            emotion_a=pair["emotion_a"],
+            emotion_b=pair["emotion_b"],
+            pred_a=pred_a,
+            pred_b=pred_b,
             token_overlap=overlap,
             exact_match=exact,
             semantic_sim=None,  # Filled later in batch
         ))
 
         if (i + 1) % 10 == 0 or i == 0:
-            print(f"   [{i+1}/{len(items)}]  overlap={overlap:.3f}  "
-                  f"exact={'✓' if exact else '✗'}")
+            print(f"   [{i+1}/{len(pairs)}]  overlap={overlap:.3f}  "
+                  f"diff={'✓' if not exact else '✗'}")
             if i == 0:
-                print(f"     Normal (\"{item['text'][:30]}...\") : {pred_normal[:120]}")
-                print(f"     Swapped (\"{item['swapped_text'][:30]}...\") : {pred_mismatched[:120]}")
+                print(f"     Transcript: \"{pair['text']}\"")
+                print(f"     A ({pair['emotion_a']}): {pred_a[:100]}...")
+                print(f"     B ({pair['emotion_b']}): {pred_b[:100]}...")
 
         if (i + 1) % 50 == 0:
             free_mem()
 
     # Cleanup
-    if os.path.exists(tmp_wav):
-        os.remove(tmp_wav)
+    for p in [tmp_wav_a, tmp_wav_b]:
+        if os.path.exists(p):
+            os.remove(p)
 
     # ---- 3b. Compute semantic similarity (batched) ----
     print("\n📐 Computing semantic similarity (SBERT) …")
     sims = compute_semantic_similarities(
         sbert,
-        [r["pred_normal"] for r in results],
-        [r["pred_mismatched"] for r in results],
+        [r["pred_a"] for r in results],
+        [r["pred_b"] for r in results],
     )
     for r, s in zip(results, sims):
         r["semantic_sim"] = s
@@ -368,29 +367,31 @@ def main():
     valid_sems = [r["semantic_sim"] for r in results if r["semantic_sim"] is not None]
     avg_semantic = float(np.mean(valid_sems)) if valid_sems else None
 
+    # AUDIO SENSITIVITY = 1.0 - SIMILARITY
+    # If the model is text-dominant, similarity remains HIGH (near 1.0), so sensitivity is LOW.
+    # If the model is audio-aware, similarity should DROP when audio changes, so sensitivity is HIGH.
+    sensitivity_score = 1.0 - (avg_semantic if avg_semantic is not None else avg_overlap)
+
     print(f"\n{'='*55}")
-    print(f"  Text Dominance Analysis")
+    print(f"  AUDIO SENSITIVITY ANALYSIS (Fixed Text, Swapped Audio)")
     print(f"{'='*55}")
     print(f"  Model              : {args.model_id}")
-    print(f"  #Samples           : {len(results)}")
+    print(f"  #Pairs             : {len(results)}")
     print(f"  Question           : {args.question}")
     print(f"{'='*55}")
-    print(f"  Exact match rate   : {exact_rate:.4f}  ({sum(r['exact_match'] for r in results)}/{len(results)})")
-    print(f"  Avg token overlap  : {avg_overlap:.4f}")
-    if avg_semantic is not None:
-        print(f"  Avg semantic sim   : {avg_semantic:.4f}  (1.0 = identical meaning)")
+    print(f"  Avg Semantic Sim   : {avg_semantic:.4f}" if avg_semantic is not None else f"  Avg Token Overlap  : {avg_overlap:.4f}")
+    print(f"  Audio Sensitivity  : {sensitivity_score:.4f} (Goal: High)")
+    print(f"  Identical Response : {exact_rate*100:.2f}% (Goal: Low)")
     print(f"{'='*55}")
 
-    # Threshold on semantic similarity if available, else fall back to token overlap
-    dominance_score = avg_semantic if avg_semantic is not None else avg_overlap
-    if dominance_score > 0.85:
-        print("  ❌ SEVERE: Model almost 100% blindly follows text (ignores audio)")
-    elif dominance_score > 0.65:
-        print("  ⚠️  WARNING: Model largely follows text with minimal audio influence")
-    elif dominance_score > 0.45:
-        print("  ⚡ MODERATE: Model partially uses audio features")
+    if sensitivity_score < 0.15:
+        print("  ❌ SEVERE: Model is 100% TEXT DOMINANT. Ignoring all audio changes.")
+    elif sensitivity_score < 0.35:
+        print("  ⚠️  WARNING: Model largely follows text; audio has minimal impact.")
+    elif sensitivity_score < 0.55:
+        print("  ⚡ MODERATE: Model shows some awareness of acoustic cues.")
     else:
-        print("  ✅ GOOD: Model meaningfully uses audio features")
+        print("  ✅ GOOD: Model is highly sensitive to audio changes.")
 
     # ---- 5. Plots ----
     plot_results(results, out_dir, has_semantic=has_semantic)
@@ -403,9 +404,9 @@ def main():
             question=args.question,
             seed=args.seed,
         ),
-        exact_match_rate=exact_rate,
-        avg_token_overlap=avg_overlap,
         avg_semantic_sim=avg_semantic,
+        audio_sensitivity=sensitivity_score,
+        identical_response_rate=exact_rate,
         results=results,
     )
     report_path = os.path.join(out_dir, "report.json")
@@ -414,14 +415,13 @@ def main():
     print(f"\n💾 Report saved → {report_path}")
 
     # Show a few examples
-    print(f"\n📋 Example comparisons:")
+    print(f"\n📋 Example sensitivity:")
     for r in results[:5]:
         sem_str = f"{r['semantic_sim']:.3f}" if r["semantic_sim"] is not None else "N/A"
-        print(f"  [{r['emotion']}] Audio Text: \"{r['text_real']}\"")
-        print(f"    Normal  : {r['pred_normal'][:150]}")
-        print(f"    Swapped text given: \"{r['text_swapped']}\"")
-        print(f"    Swapped : {r['pred_mismatched'][:150]}")
-        print(f"    Overlap: {r['token_overlap']:.3f}  SemanticSim: {sem_str}  Exact: {r['exact_match']}")
+        print(f"  [Text: \"{r['text']}\"]")
+        print(f"    Audio A ({r['emotion_a']}): {r['pred_a'][:150]}")
+        print(f"    Audio B ({r['emotion_b']}): {r['pred_b'][:150]}")
+        print(f"    Similarity: {sem_str}  Exact: {r['exact_match']}")
         print()
 
 
