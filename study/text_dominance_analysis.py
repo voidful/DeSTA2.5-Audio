@@ -209,7 +209,35 @@ def load_cremad_paired(dataset_name, dataset_split, num_samples, seed):
 #                     Generate with normal / swapped audio              #
 # ===================================================================== #
 
-# (generate_response remains the same)
+@torch.inference_mode()
+def generate_response(model, wav_path, question, provided_text=None):
+    """Generate a text response from the DeSTA model given audio + question."""
+    audio_entry = {"audio": wav_path}
+    if provided_text is not None:
+        audio_entry["text"] = provided_text
+
+    messages = [
+        {
+            "role": "system",
+            "content": "Focus on the audio clips and instructions.",
+        },
+        {
+            "role": "user",
+            "content": f"<|AUDIO|> {question}",
+            "audios": [audio_entry],
+        },
+    ]
+
+    outputs = model.generate(
+        messages=messages,
+        do_sample=False,
+        max_new_tokens=512,
+    )
+
+    pred = outputs.text
+    if isinstance(pred, list):
+        pred = pred[0]
+    return pred.strip() if isinstance(pred, str) else str(pred)
 
 # ===================================================================== #
 #                        Plotting                                       #
