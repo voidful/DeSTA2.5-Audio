@@ -396,7 +396,7 @@ def extract_answer_choice(response, choices=None):
 # DeSTA 推論
 # =====================
 
-SYSTEM_PROMPT = 'You are an audio question answering assistant. You will be given an audio clip and a question with multiple choices. Please think step-by-step in <think> tags, analyzing the audio content and ruling out incorrect options. Then, output the final answer strictly in the format: "The correct answer is: "choice" ".'
+SYSTEM_PROMPT = 'Focus on the audio clips and instructions. Provide your answer by first thinking in <think> tags if needed, and then ending with "The correct answer is: \\"___\\" " where ___ is the exact choice from the list.'
 
 DEFAULT_MAX_NEW_TOKENS = 512
 
@@ -440,13 +440,13 @@ def _run_desta_generate(model, wav_path, question, transcription=None,
     ]
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            outputs = model.generate(
-                messages=messages,
-                do_sample=False,
-                max_new_tokens=max_new_tokens,
-                repetition_penalty=1.5
-            )
+        outputs = model.generate(
+            messages=messages,
+            do_sample=False,
+            top_p=0.85,
+            temperature=0.0,
+            max_new_tokens=max_new_tokens,
+        )
 
     pred = outputs.text
     if isinstance(pred, list):
@@ -679,6 +679,10 @@ def _build_judge_chat_str(tokenizer, item, pred):
 
 
 def _parse_judge_output(raw_text):
+    # Strip Qwen3 thinking tags (closed or unclosed) before parsing
+    raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+    if '<think>' in raw_text:
+        raw_text = raw_text[:raw_text.index('<think>')].strip()
     raw_text = raw_text.strip().upper()
     if raw_text.startswith("CORRECT"):
         return True, raw_text
@@ -694,7 +698,7 @@ def call_judge(tokenizer, model, item, pred):
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=4,
+            max_new_tokens=16,
             do_sample=False,
             temperature=0.0
         )
@@ -725,7 +729,7 @@ def call_judge_batch(tokenizer, model, items_and_preds, batch_size=16):
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=4,
+                max_new_tokens=16,
                 do_sample=False,
                 temperature=0.0
             )
@@ -1101,10 +1105,7 @@ def main():
             print(f"{'─'*60}")
 
             try:
-                model = DeSTA25AudioModel.from_pretrained(
-                    model_id,
-                    torch_dtype=torch.bfloat16
-                )
+                model = DeSTA25AudioModel.from_pretrained(model_id)
                 model.to(device)
                 model.eval()
             except Exception as e:
@@ -1191,10 +1192,7 @@ def main():
     # Standard (non-group-ablation) Mode
     # =======================
     print(f"Loading DeSTA model from {args.model_id}...")
-    model = DeSTA25AudioModel.from_pretrained(
-        args.model_id,
-        torch_dtype=torch.bfloat16
-    )
+    model = DeSTA25AudioModel.from_pretrained(args.model_id)
     model.to(device)
     model.eval()
 
