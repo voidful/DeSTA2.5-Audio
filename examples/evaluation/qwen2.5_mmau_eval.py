@@ -1,6 +1,7 @@
 import os
 import json
 import wave
+import random
 import numpy as np
 import re
 import argparse
@@ -13,6 +14,18 @@ import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM, Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
 logging.basicConfig(level=logging.INFO)
+
+DEFAULT_SEED = 42
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # =====================
 # Basic Configuration
@@ -338,7 +351,12 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
     parser.add_argument("--no_judge", action="store_true", help="Skip LLM judge and use only string matching")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
+
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 

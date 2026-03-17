@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import random
 import argparse
 import numpy as np
 import librosa
@@ -13,6 +14,18 @@ from transformers import (
     AutoModelForCausalLM,
 )
 from tqdm import tqdm
+
+DEFAULT_SEED = 42
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # =====================
 # Basic Configuration
@@ -343,7 +356,12 @@ def main():
     parser.add_argument("--max_samples", type=int, default=0, help="Max samples per dataset/hop for debugging. 0 means all.")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
+
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 

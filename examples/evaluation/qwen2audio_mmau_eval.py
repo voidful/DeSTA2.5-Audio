@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import random
 import argparse
 import numpy as np
 import librosa
@@ -9,6 +10,18 @@ from datasets import load_dataset
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 from tqdm import tqdm
 from collections import defaultdict
+
+DEFAULT_SEED = 42
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # =====================
 # Basic Configuration
@@ -143,7 +156,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--output_dir", type=str, default=RESULT_DIR)
     parser.add_argument("--max_new_tokens", type=int, default=48)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
+
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
