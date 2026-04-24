@@ -32,9 +32,11 @@ python study/text_dominance_analysis.py \\
 """
 
 import argparse
+from collections import Counter, defaultdict
 import json
 import os
 import random
+import re
 import tempfile
 import traceback
 import atexit
@@ -61,8 +63,33 @@ EMOTION_LABELS = {
     4: "Neutral",
     5: "Sad",
 }
+EMOTION_CODE_TO_LABEL = {
+    "ANG": "anger",
+    "DIS": "disgust",
+    "FEA": "fear",
+    "HAP": "happy",
+    "NEU": "neutral",
+    "SAD": "sad",
+}
+CANONICAL_EMOTIONS = ("anger", "disgust", "fear", "happy", "neutral", "sad")
+EMOTION_ALIASES = {
+    "anger": ("anger", "angry", "mad"),
+    "disgust": ("disgust", "disgusted", "disgusting"),
+    "fear": ("fear", "fearful", "afraid", "scared", "anxious", "anxiety"),
+    "happy": ("happy", "happiness", "joy", "joyful", "cheerful", "pleased"),
+    "neutral": ("neutral", "calm", "flat"),
+    "sad": ("sad", "sadness", "sorrowful", "unhappy"),
+}
+ALIAS_TO_EMOTION = {
+    alias: emotion
+    for emotion, aliases in EMOTION_ALIASES.items()
+    for alias in aliases
+}
+ALIAS_PATTERN = "|".join(
+    re.escape(alias) for alias in sorted(ALIAS_TO_EMOTION, key=len, reverse=True)
+)
 
-QUESTION = "What is the emotion of the speaker?"
+QUESTION = "What is the emotion of the speaker? Describe the audio."
 
 _tmp_wav_fd_full, TMP_WAV_FULL = tempfile.mkstemp(suffix=".wav", prefix=f"blind_test_full_{os.getpid()}_")
 os.close(_tmp_wav_fd_full)
@@ -120,18 +147,126 @@ def generate_noise_like(audio_array, seed=0):
     return noise
 
 
+def _normalize_text(text: str) -> str:
+    text = str(text).lower()
+    text = re.sub(r"[^a-z]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def canonicalize_emotion(text) -> str | None:
+    """Map label strings and common adjective forms to the 6 CREMA-D labels."""
+    if text is None:
+        return None
+    code = str(text).strip().upper()
+    if code in EMOTION_CODE_TO_LABEL:
+        return EMOTION_CODE_TO_LABEL[code]
+    normalized = _normalize_text(text)
+    if normalized in ALIAS_TO_EMOTION:
+        return ALIAS_TO_EMOTION[normalized]
+    if normalized in CANONICAL_EMOTIONS:
+        return normalized
+    matches = {
+        ALIAS_TO_EMOTION[match.group(0)]
+        for match in re.finditer(rf"\b(?:{ALIAS_PATTERN})\b", normalized)
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
+
+
+def parse_emotion_prediction(pred_text: str) -> str | None:
+    """Extract a canonical emotion label from free-form model output."""
+    text = _normalize_text(pred_text)
+    if not text:
+        return None
+
+    cue_patterns = [
+        rf"\b(?:emotion|answer|label|prediction)\s*(?:of the speaker\s*)?(?:is|:|-)?\s*(?:the speaker\s*)?(?:is|sounds|seems|appears)?\s*(?P<label>{ALIAS_PATTERN})\b",
+        rf"\bthe speaker\s*(?:is|sounds|seems|appears)\s*(?P<label>{ALIAS_PATTERN})\b",
+    ]
+    for pattern in cue_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return ALIAS_TO_EMOTION[match.group("label")]
+
+    matches = [
+        (match.start(), ALIAS_TO_EMOTION[match.group(0)])
+        for match in re.finditer(rf"\b(?:{ALIAS_PATTERN})\b", text)
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    return matches[0][1]
+
+
 def match_emotion(pred_text: str, gold_label: str) -> bool:
-    """Check if the predicted text contains the gold emotion label."""
-    pred_lower = pred_text.lower().strip()
-    gold_lower = gold_label.lower().strip()
-    return gold_lower in pred_lower
+    """Check whether the parsed prediction matches the gold emotion."""
+    return parse_emotion_prediction(pred_text) == canonicalize_emotion(gold_label)
+
+
+def _extract_source_path(item, audio_obj) -> str:
+    for key in ("path", "source_file", "file", "audio_path"):
+        if item.get(key):
+            return str(item[key])
+    if isinstance(audio_obj, dict) and audio_obj.get("path"):
+        return str(audio_obj["path"])
+    return ""
+
+
+def get_gold_emotion(item, audio_obj, label_names=None) -> str:
+    """Prefer CREMA-D filename codes, then dataset metadata, then label id."""
+    source_path = _extract_source_path(item, audio_obj)
+    code_match = re.search(r"_(ANG|DIS|FEA|HAP|NEU|SAD)_", os.path.basename(source_path).upper())
+    if code_match:
+        return EMOTION_CODE_TO_LABEL[code_match.group(1)]
+
+    for key in ("emotion", "emotion_label"):
+        label = canonicalize_emotion(item.get(key))
+        if label:
+            return label
+
+    label_int = item.get("label")
+    if label_names is not None and label_int is not None:
+        try:
+            label = canonicalize_emotion(label_names[int(label_int)])
+            if label:
+                return label
+        except (IndexError, TypeError, ValueError):
+            pass
+    return canonicalize_emotion(EMOTION_LABELS.get(label_int, str(label_int))) or str(label_int)
+
+
+def get_label_names(ds):
+    label_feature = getattr(ds, "features", {}).get("label") if hasattr(ds, "features") else None
+    return getattr(label_feature, "names", None)
+
+
+def build_user_content(question, prompt_style):
+    choices = ", ".join(CANONICAL_EMOTIONS)
+    if prompt_style == "label_only":
+        return (
+            f"<|AUDIO|>\n\n{question}\n\n"
+            f"Choose exactly one emotion from: {choices}.\n"
+            'Answer in this exact format: "Emotion: <label>".'
+        )
+    if prompt_style == "mcq":
+        return (
+            f"<|AUDIO|>\n\n{question}\n\n"
+            f"Choose from the following options: {choices}.\n"
+            'End with: "The correct answer is: <label>".'
+        )
+    return (
+        f"<|AUDIO|>\n\n{question}\n\n"
+        f"The emotion must be one of: {choices}.\n"
+        'Start with "Emotion: <label>". Then briefly describe the acoustic evidence.'
+    )
 
 
 # =====================
 # DeSTA Inference
 # =====================
 
-def run_desta_inference(model, wav_path, question, transcript=" "):
+def run_desta_inference(model, wav_path, question, transcript=" ", prompt_style="case_study", max_new_tokens=96):
     """Run DeSTA model on a single audio + question.
     
     Args:
@@ -139,15 +274,16 @@ def run_desta_inference(model, wav_path, question, transcript=" "):
                     Use the actual sentence for full-audio, or a space for blind.
     """
     audio_entry = {"audio": wav_path, "text": transcript}
+    user_content = build_user_content(question, prompt_style)
 
     messages = [
         {
             "role": "system",
-            "content": "You are an audio assistant."
+            "content": "Focus on the audio clips and instructions."
         },
         {
             "role": "user",
-            "content": f"<|AUDIO|>\n\n{question}\n\nChoose from: Anger, Disgust, Fear, Happy, Neutral, Sad.\nAnswer with just the emotion label.",
+            "content": user_content,
             "audios": [audio_entry]
         }
     ]
@@ -156,7 +292,7 @@ def run_desta_inference(model, wav_path, question, transcript=" "):
         outputs = model.generate(
             messages=messages,
             do_sample=False,
-            max_new_tokens=64,
+            max_new_tokens=max_new_tokens,
         )
 
     pred = outputs.text
@@ -178,6 +314,9 @@ def evaluate_condition(
     output_dir="results",
     seed=DEFAULT_SEED,
     num_samples=0,
+    prompt_style="case_study",
+    blind_transcript="same",
+    max_new_tokens=96,
 ):
     """Evaluate emotion recognition accuracy under one condition."""
     out_path = os.path.join(output_dir, f"blind_test_{condition}.jsonl")
@@ -190,6 +329,12 @@ def evaluate_condition(
 
     num_correct = 0
     results = []
+    label_names = get_label_names(ds)
+    pred_counter = Counter()
+    gold_counter = Counter()
+    per_label_total = Counter()
+    per_label_correct = Counter()
+    confusion = defaultdict(Counter)
 
     for idx in tqdm(range(total), desc=f"Emotion-{condition}"):
         item = ds[idx]
@@ -198,7 +343,7 @@ def evaluate_condition(
         audio_array, sample_rate = _extract_audio_array_and_sr(audio_obj)
 
         label_int = item["label"]
-        gold = EMOTION_LABELS.get(label_int, str(label_int))
+        gold = get_gold_emotion(item, audio_obj, label_names=label_names)
 
         # Get the sentence text to bypass internal Whisper ASR
         sentence = item.get("sentence") or item.get("text") or " "
@@ -211,25 +356,42 @@ def evaluate_condition(
             noise = generate_noise_like(audio_array, seed=seed + idx)
             write_wav_from_array(noise, sample_rate, TMP_WAV_BLIND)
             wav_path = TMP_WAV_BLIND
-            transcript = " "  # no real transcript for noise
+            transcript = sentence if blind_transcript == "same" else " "
 
         try:
-            pred = run_desta_inference(desta_model, wav_path, QUESTION, transcript=transcript)
+            pred = run_desta_inference(
+                desta_model,
+                wav_path,
+                QUESTION,
+                transcript=transcript,
+                prompt_style=prompt_style,
+                max_new_tokens=max_new_tokens,
+            )
         except Exception as e:
             import traceback
             traceback.print_exc()
             raise  # Stop on first error to see full traceback
 
-        correct = match_emotion(pred, gold)
+        pred_label = parse_emotion_prediction(pred)
+        correct = pred_label == gold
         if correct:
             num_correct += 1
+            per_label_correct[gold] += 1
+        gold_counter[gold] += 1
+        pred_counter[pred_label or "unparsed"] += 1
+        per_label_total[gold] += 1
+        confusion[gold][pred_label or "unparsed"] += 1
 
         result_item = {
             "idx": idx,
             "condition": condition,
+            "label_int": label_int,
             "gold": gold,
             "pred": pred,
+            "pred_label": pred_label,
             "correct": correct,
+            "sentence": sentence,
+            "source_path": _extract_source_path(item, audio_obj),
         }
         results.append(result_item)
 
@@ -238,6 +400,13 @@ def evaluate_condition(
 
     accuracy = num_correct / total if total > 0 else 0.0
     print(f"  [{condition}]: {num_correct}/{total} = {accuracy:.4f}")
+    print(f"  [{condition}] prediction distribution: {dict(pred_counter)}")
+    per_label_accuracy = {
+        label: per_label_correct[label] / per_label_total[label]
+        for label in CANONICAL_EMOTIONS
+        if per_label_total[label] > 0
+    }
+    print(f"  [{condition}] per-label accuracy: {per_label_accuracy}")
 
     return {
         "condition": condition,
@@ -245,6 +414,10 @@ def evaluate_condition(
         "num_correct": num_correct,
         "total": total,
         "results_path": out_path,
+        "gold_distribution": dict(gold_counter),
+        "prediction_distribution": dict(pred_counter),
+        "per_label_accuracy": per_label_accuracy,
+        "confusion": {gold: dict(preds) for gold, preds in confusion.items()},
     }
 
 
@@ -264,6 +437,14 @@ def main():
                         help="Number of samples to evaluate (0 = all)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Random seed for reproducibility")
+    parser.add_argument("--prompt_style", type=str, default="case_study",
+                        choices=["case_study", "label_only", "mcq"],
+                        help="Prompt format for emotion recognition")
+    parser.add_argument("--blind_transcript", type=str, default="same",
+                        choices=["same", "blank"],
+                        help="Use the same transcript for blind noise, or blank it out")
+    parser.add_argument("--max_new_tokens", type=int, default=96,
+                        help="Maximum generated tokens per example")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -272,6 +453,9 @@ def main():
     print(f"Device: {device}")
     print(f"Seed: {args.seed}")
     print(f"Output: {args.output_dir}\n")
+    print(f"Prompt style: {args.prompt_style}")
+    print(f"Blind transcript: {args.blind_transcript}")
+    print(f"Max new tokens: {args.max_new_tokens}\n")
 
     # Load dataset
     print(f"Loading dataset: {DATASET_ID}")
@@ -293,6 +477,9 @@ def main():
         output_dir=args.output_dir,
         seed=args.seed,
         num_samples=args.num_samples,
+        prompt_style=args.prompt_style,
+        blind_transcript=args.blind_transcript,
+        max_new_tokens=args.max_new_tokens,
     )
     stats_blind = evaluate_condition(
         desta_model=desta_model,
@@ -301,6 +488,9 @@ def main():
         output_dir=args.output_dir,
         seed=args.seed,
         num_samples=args.num_samples,
+        prompt_style=args.prompt_style,
+        blind_transcript=args.blind_transcript,
+        max_new_tokens=args.max_new_tokens,
     )
 
     # Compute Gap and print summary
@@ -338,6 +528,9 @@ def main():
         "dataset": DATASET_ID,
         "question": QUESTION,
         "seed": args.seed,
+        "prompt_style": args.prompt_style,
+        "blind_transcript": args.blind_transcript,
+        "max_new_tokens": args.max_new_tokens,
         "full_audio_accuracy": acc_full,
         "blind_audio_accuracy": acc_blind,
         "gap": gap,

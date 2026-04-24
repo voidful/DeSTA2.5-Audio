@@ -1940,7 +1940,7 @@ class DeSTA25AudioModel(PreTrainedModel):
             if is_speech and trans is None:
                 asr_features.append(feature)
                 asr_indices.append(i)
-            if not is_speech:
+            if not is_speech and trans is None:
                 all_transcriptions[i] = " "
         
         batch_features = self.processor(batch_features, sampling_rate=16000, return_tensors="pt").input_features
@@ -2137,7 +2137,7 @@ class DeSTA25AudioModel(PreTrainedModel):
                 if is_speech and trans is None:
                     asr_features.append(feature)
                     asr_indices.append(i)
-                if not is_speech:
+                if not is_speech and trans is None:
                     all_transcriptions[i] = " "
             
             batch_features = self.processor(batch_features, sampling_rate=16000, return_tensors="pt").input_features
