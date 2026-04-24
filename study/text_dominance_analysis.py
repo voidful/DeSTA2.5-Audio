@@ -332,7 +332,8 @@ def main():
 
     # Load models
     print(f"Loading DeSTA model: {args.model_id}")
-    desta_model = DeSTA25AudioModel.from_pretrained(args.model_id)
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    desta_model = DeSTA25AudioModel.from_pretrained(args.model_id, torch_dtype=dtype)
     desta_model.to(device).eval()
 
     print(f"Loading Qwen judge: {JUDGE_MODEL_ID}")
