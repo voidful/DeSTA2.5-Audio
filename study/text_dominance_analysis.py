@@ -130,9 +130,14 @@ def match_emotion(pred_text: str, gold_label: str) -> bool:
 # DeSTA Inference
 # =====================
 
-def run_desta_inference(model, wav_path, question):
-    """Run DeSTA model on a single audio + question."""
-    audio_entry = {"audio": wav_path}
+def run_desta_inference(model, wav_path, question, transcript=" "):
+    """Run DeSTA model on a single audio + question.
+    
+    Args:
+        transcript: Provide a transcription to bypass internal Whisper ASR.
+                    Use the actual sentence for full-audio, or a space for blind.
+    """
+    audio_entry = {"audio": wav_path, "text": transcript}
 
     messages = [
         {
@@ -194,16 +199,21 @@ def evaluate_condition(
         label_int = item["label"]
         gold = EMOTION_LABELS.get(label_int, str(label_int))
 
+        # Get the sentence text to bypass internal Whisper ASR
+        sentence = item.get("sentence") or item.get("text") or " "
+
         if condition == "full":
             write_wav_from_array(audio_array, sample_rate, TMP_WAV_FULL)
             wav_path = TMP_WAV_FULL
+            transcript = sentence
         else:  # blind
             noise = generate_noise_like(audio_array, seed=seed + idx)
             write_wav_from_array(noise, sample_rate, TMP_WAV_BLIND)
             wav_path = TMP_WAV_BLIND
+            transcript = " "  # no real transcript for noise
 
         try:
-            pred = run_desta_inference(desta_model, wav_path, QUESTION)
+            pred = run_desta_inference(desta_model, wav_path, QUESTION, transcript=transcript)
         except Exception as e:
             print(f"Error on item {idx}: {e}")
             pred = "ERROR"
