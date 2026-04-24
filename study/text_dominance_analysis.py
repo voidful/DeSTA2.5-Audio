@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Text Dominance Analysis — "Deaf Test"
+Text Dominance Analysis — "Blind Test"
 ======================================
 Tests whether the model is **text-dominant** by comparing performance when
 real audio is provided versus when the audio is replaced with pure noise.
@@ -9,14 +9,14 @@ Method
 ------
 For each sample, run generation twice:
   A) **Full Input**  : Real audio + ASR transcript
-  B) **Deaf Input**  : Pure Gaussian noise (same duration) + ASR transcript
+  B) **Blind Input**  : Pure Gaussian noise (same duration) + ASR transcript
 
-If the model is text-dominant, Acc(Deaf) stays close to Acc(Full) because it
+If the model is text-dominant, Acc(Blind) stays close to Acc(Full) because it
 ignores the audio and "guesses" from the transcript alone.
 
 Metric
 ------
-  Delta = Acc(Full) - Acc(Deaf)
+  Delta = Acc(Full) - Acc(Blind)
   - Healthy ALM  : Delta is large (audio matters)
   - Text-dominant : Delta is small (audio is ignored)
 
@@ -59,12 +59,12 @@ DATA_SPLIT = "test"
 
 JUDGE_MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 
-_tmp_wav_fd_full, TMP_WAV_FULL = tempfile.mkstemp(suffix=".wav", prefix=f"deaf_test_full_{os.getpid()}_")
+_tmp_wav_fd_full, TMP_WAV_FULL = tempfile.mkstemp(suffix=".wav", prefix=f"blind_test_full_{os.getpid()}_")
 os.close(_tmp_wav_fd_full)
-_tmp_wav_fd_deaf, TMP_WAV_DEAF = tempfile.mkstemp(suffix=".wav", prefix=f"deaf_test_deaf_{os.getpid()}_")
-os.close(_tmp_wav_fd_deaf)
+_tmp_wav_fd_blind, TMP_WAV_BLIND = tempfile.mkstemp(suffix=".wav", prefix=f"blind_test_blind_{os.getpid()}_")
+os.close(_tmp_wav_fd_blind)
 atexit.register(lambda: os.remove(TMP_WAV_FULL) if os.path.exists(TMP_WAV_FULL) else None)
-atexit.register(lambda: os.remove(TMP_WAV_DEAF) if os.path.exists(TMP_WAV_DEAF) else None)
+atexit.register(lambda: os.remove(TMP_WAV_BLIND) if os.path.exists(TMP_WAV_BLIND) else None)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -220,7 +220,7 @@ def call_qwen_binary_judge(tokenizer, model, question, gold, pred):
 def evaluate_condition(
     desta_model, judge_tokenizer, judge_model,
     dataset_id, dataset_name, hop_prefix,
-    condition,  # "full" or "deaf"
+    condition,  # "full" or "blind"
     split=DATA_SPLIT, output_dir="results", seed=DEFAULT_SEED,
 ):
     ds = load_dataset(dataset_id, "default")[split]
@@ -230,7 +230,7 @@ def evaluate_condition(
 
     out_path = os.path.join(
         output_dir,
-        f"deaf_test_{dataset_name.lower()}_{hop_tag}_{condition}.jsonl"
+        f"blind_test_{dataset_name.lower()}_{hop_tag}_{condition}.jsonl"
     )
     with open(out_path, "w", encoding="utf-8") as f:
         pass
@@ -253,10 +253,10 @@ def evaluate_condition(
         if condition == "full":
             write_wav_from_array(audio_array, sample_rate, TMP_WAV_FULL)
             wav_path = TMP_WAV_FULL
-        else:  # deaf
+        else:  # blind
             noise = generate_noise_like(audio_array, sample_rate, seed=seed + idx)
-            write_wav_from_array(noise, sample_rate, TMP_WAV_DEAF)
-            wav_path = TMP_WAV_DEAF
+            write_wav_from_array(noise, sample_rate, TMP_WAV_BLIND)
+            wav_path = TMP_WAV_BLIND
 
         try:
             pred = run_desta_on_item(desta_model, item, hop_prefix, wav_path, transcript=transcript)
@@ -312,7 +312,7 @@ def evaluate_condition(
 # =====================
 
 def main():
-    parser = argparse.ArgumentParser(description="Text Dominance 'Deaf Test' for DeSTA/ORCA models")
+    parser = argparse.ArgumentParser(description="Text Dominance 'Blind Test' for DeSTA/ORCA models")
     parser.add_argument("--model_id", type=str, required=True,
                         help="HuggingFace model ID or local checkpoint path")
     parser.add_argument("--output_dir", type=str, default="study/output_text_dominance",
@@ -347,7 +347,7 @@ def main():
     all_stats = []
     for dataset_name, dataset_id in datasets_to_eval.items():
         for hop_prefix in HOP_SPLITS:
-            for condition in ["full", "deaf"]:
+            for condition in ["full", "blind"]:
                 stats = evaluate_condition(
                     desta_model=desta_model,
                     judge_tokenizer=judge_tokenizer,
@@ -363,10 +363,10 @@ def main():
 
     # Compute Delta and print summary
     print(f"\n{'='*70}")
-    print(f"  TEXT DOMINANCE 'DEAF TEST' SUMMARY")
+    print(f"  TEXT DOMINANCE 'BLIND TEST' SUMMARY")
     print(f"  Model: {args.model_id}")
     print(f"{'='*70}")
-    print(f"  {'Dataset':<12s} {'Hop':<8s} {'Acc(Full)':<12s} {'Acc(Deaf)':<12s} {'Delta':<10s} {'Verdict'}")
+    print(f"  {'Dataset':<12s} {'Hop':<8s} {'Acc(Full)':<12s} {'Acc(Blind)':<12s} {'Delta':<10s} {'Verdict'}")
     print(f"  {'-'*12} {'-'*8} {'-'*12} {'-'*12} {'-'*10} {'-'*20}")
 
     summary_report = {"model_id": args.model_id, "seed": args.seed, "results": []}
@@ -380,8 +380,8 @@ def main():
 
     for (ds_name, hop), conds in sorted(grouped.items()):
         acc_full = conds.get("full", {}).get("accuracy", 0.0)
-        acc_deaf = conds.get("deaf", {}).get("accuracy", 0.0)
-        delta = acc_full - acc_deaf
+        acc_blind = conds.get("blind", {}).get("accuracy", 0.0)
+        delta = acc_full - acc_blind
 
         if delta < 0.05:
             verdict = "TEXT DOMINANT"
@@ -392,25 +392,25 @@ def main():
         else:
             verdict = "Audio-aware"
 
-        print(f"  {ds_name:<12s} {hop:<8s} {acc_full:<12.4f} {acc_deaf:<12.4f} {delta:<10.4f} {verdict}")
+        print(f"  {ds_name:<12s} {hop:<8s} {acc_full:<12.4f} {acc_blind:<12.4f} {delta:<10.4f} {verdict}")
 
         summary_report["results"].append({
             "dataset": ds_name,
             "hop": hop,
             "acc_full": acc_full,
-            "acc_deaf": acc_deaf,
+            "acc_blind": acc_blind,
             "delta": delta,
             "verdict": verdict,
         })
 
     print(f"{'='*70}")
-    print(f"  Delta = Acc(Full) - Acc(Deaf)")
+    print(f"  Delta = Acc(Full) - Acc(Blind)")
     print(f"  Large Delta -> model relies on audio (good)")
     print(f"  Small Delta -> model ignores audio, text dominant (bad)")
     print(f"{'='*70}")
 
     # Save summary
-    report_path = os.path.join(args.output_dir, "deaf_test_summary.json")
+    report_path = os.path.join(args.output_dir, "blind_test_summary.json")
     with open(report_path, "w") as f:
         json.dump(summary_report, f, indent=2, ensure_ascii=False)
     print(f"\nSummary saved to: {report_path}")

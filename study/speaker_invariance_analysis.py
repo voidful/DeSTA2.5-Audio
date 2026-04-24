@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """
-Speaker Invariance Analysis
-============================
+Speaker Invariance Analysis — Cross-speaker Cosine Similarity
+=============================================================
 For each sentence in CREMA-D, many different speakers say the same text.
 If the connector learns a speaker-invariant semantic representation,
 then query vectors for the same sentence (different speakers) should
-cluster tightly → **low variance**.
+cluster tightly → **high cross-speaker cosine similarity (S_same)**.
+
+Because different LLM backbones exhibit different representation
+anisotropies, absolute cosine similarities cannot be compared directly
+across models.  We therefore also compute a *random baseline* S_random:
+the average cosine similarity between queries from randomly paired samples
+that share neither sentence, speaker, nor emotion.
+
+The key metric reported is the *Relative / Corrected Cosine Similarity*:
+    ΔS = S_same − S_random
 
 This script:
 1. Extracts query vectors from a DeSTA model.
 2. Groups samples by sentence (text).
-3. Computes per-query variance across speakers within each sentence group.
-4. Visualises variance per query index and per sentence.
+3. Computes S_same  — cross-speaker cosine similarity (same sentence).
+4. Computes S_random — null-hypothesis baseline (random pairs).
+5. Computes ΔS = S_same − S_random.
+6. Visualises all three metrics per query index and per sentence.
+7. For ORCA models, aggregates by group.
 
 Outputs
 -------
-- variance_per_query.png            : bar chart of avg variance per query slot
-- variance_heatmap.png              : heatmap (rows=sentence, cols=query index)
-- variance_by_group.png             : (ORCA only) variance aggregated by group
-- report.json                       : numeric summary
+- cosine_sim_per_query.png        : bar chart of S_same / S_random / ΔS per query slot
+- cosine_sim_heatmap.png          : heatmap (rows=sentence, cols=query index)
+- cosine_sim_by_group.png         : (ORCA only) per-group summary
+- report.json                     : numeric summary
 
 Usage
 -----
@@ -32,7 +44,7 @@ import gc
 import json
 import os
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -55,7 +67,9 @@ from datasets import load_dataset
 # ===================================================================== #
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Speaker Invariance Analysis")
+    p = argparse.ArgumentParser(
+        description="Speaker Invariance Analysis — Cross-speaker Cosine Similarity"
+    )
     p.add_argument("--model_id", type=str, required=True)
     p.add_argument("--dataset_name", type=str, default="myleslinder/crema-d")
     p.add_argument("--dataset_split", type=str, default="train")
@@ -68,6 +82,8 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--use_projected", action="store_true",
                    help="Analyse queries after LLM projection (default: before).")
+    p.add_argument("--n_random_pairs", type=int, default=2000,
+                   help="Number of random pairs used to estimate S_random.")
     return p.parse_args()
 
 
@@ -101,6 +117,17 @@ def free_mem():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def cosine_similarity_matrix_row(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Compute cosine similarity between each pair (a[i], b[i]).
+    a, b : [N, D]
+    Returns : [N]
+    """
+    a_norm = a / (np.linalg.norm(a, axis=-1, keepdims=True) + 1e-8)
+    b_norm = b / (np.linalg.norm(b, axis=-1, keepdims=True) + 1e-8)
+    return (a_norm * b_norm).sum(axis=-1)
 
 
 # ===================================================================== #
@@ -140,7 +167,7 @@ def load_cremad(dataset_name, dataset_split, num_samples,
 
 
 # ===================================================================== #
-#         2. Load Model & Extract Query Vectors                        #
+#         2. Load Model & Extract Query Vectors                         #
 # ===================================================================== #
 
 def load_model(model_id, device):
@@ -247,147 +274,282 @@ def extract_query_vectors(model, processor, items, device,
 
 
 # ===================================================================== #
-#     3. Variance Analysis: same text, different speakers              #
+#   3. Cross-speaker Cosine Similarity: S_same & S_random               #
 # ===================================================================== #
 
-def compute_per_sentence_variance(queries, items):
+def compute_s_same(queries: np.ndarray, items: List[Dict]) -> Tuple[
+    List[str], np.ndarray, List[int]
+]:
     """
-    Group by text, compute per-query-slot variance across speakers.
+    S_same: average pairwise cosine similarity for (same sentence, different speaker).
+
+    For each sentence group we compute all distinct speaker pairs and
+    average their per-query cosine similarity.
 
     Returns
     -------
     sentence_labels : list[str]        — sorted unique sentences
-    var_matrix      : np.ndarray [S, K] — variance per (sentence, query)
+    ssame_matrix    : np.ndarray [S, K] — S_same per (sentence, query)
     count_per_sent  : list[int]        — #speakers per sentence
     """
     N, K, D = queries.shape
 
-    # Group indices by text
-    groups = defaultdict(list)
+    groups: Dict[str, List[int]] = defaultdict(list)
     for idx, it in enumerate(items):
         groups[it["text"]].append(idx)
 
     sentence_labels = sorted(groups.keys())
     S = len(sentence_labels)
-    var_matrix = np.zeros((S, K), dtype=np.float64)
+    ssame_matrix = np.zeros((S, K), dtype=np.float64)
     count_per_sent = []
 
     for s_i, sent in enumerate(sentence_labels):
         idxs = groups[sent]
         count_per_sent.append(len(idxs))
-        sub_q = queries[idxs]  # [n_speakers, K, D]
+        sub_q = queries[idxs]  # [n_spk, K, D]
+        n_spk = len(idxs)
 
-        # Per-query variance: for each query slot k, compute
-        # trace of covariance = sum of per-dimension variances
-        # then normalise by D to get a per-dimension average
-        for k in range(K):
-            vecs = sub_q[:, k, :]  # [n_speakers, D]
-            # Average per-dimension variance
-            var_matrix[s_i, k] = float(vecs.var(axis=0).mean())
+        if n_spk < 2:
+            # Cannot compute pairwise similarity with one speaker
+            ssame_matrix[s_i] = np.nan
+            continue
 
-    return sentence_labels, var_matrix, count_per_sent
+        # Collect all distinct pairs
+        pair_sims = []  # list of [K] arrays
+        for a in range(n_spk):
+            for b in range(a + 1, n_spk):
+                qa = sub_q[a]  # [K, D]
+                qb = sub_q[b]  # [K, D]
+                # Per-query cosine similarity  [K]
+                sim = cosine_similarity_matrix_row(qa, qb)
+                pair_sims.append(sim)
+
+        ssame_matrix[s_i] = np.stack(pair_sims, axis=0).mean(axis=0)
+
+    return sentence_labels, ssame_matrix, count_per_sent
+
+
+def compute_s_random(
+    queries: np.ndarray,
+    items: List[Dict],
+    n_pairs: int,
+    seed: int,
+) -> np.ndarray:
+    """
+    S_random: null-hypothesis baseline.
+
+    Randomly sample pairs (i, j) where:
+      - items[i].text  ≠ items[j].text
+      - items[i].speaker ≠ items[j].speaker
+      - items[i].emotion ≠ items[j].emotion
+
+    Returns
+    -------
+    s_random : np.ndarray [K]  — per-query average cosine similarity
+    """
+    N, K, D = queries.shape
+    rng = np.random.RandomState(seed)
+
+    texts    = np.array([it["text"]    for it in items])
+    speakers = np.array([it["speaker"] for it in items])
+    emotions = np.array([it["emotion"] for it in items])
+
+    collected_sims = []  # list of [K] arrays
+    attempts = 0
+    max_attempts = n_pairs * 50
+
+    print(f"🎲 Estimating S_random from up to {n_pairs} random pairs …")
+
+    while len(collected_sims) < n_pairs and attempts < max_attempts:
+        i, j = rng.randint(0, N, size=2)
+        attempts += 1
+        if i == j:
+            continue
+        if texts[i] == texts[j]:
+            continue
+        if speakers[i] == speakers[j]:
+            continue
+        if emotions[i] == emotions[j]:
+            continue
+        sim = cosine_similarity_matrix_row(queries[i], queries[j])  # [K]
+        collected_sims.append(sim)
+
+    if len(collected_sims) == 0:
+        raise RuntimeError("Could not sample any valid random pairs. "
+                           "Check that the dataset has sufficient diversity.")
+
+    actual = len(collected_sims)
+    if actual < n_pairs:
+        print(f"   ⚠️  Only {actual} valid random pairs found (requested {n_pairs})")
+    else:
+        print(f"   ✅ Sampled {actual} valid random pairs")
+
+    s_random = np.stack(collected_sims, axis=0).mean(axis=0)  # [K]
+    return s_random
 
 
 # ===================================================================== #
 #                        4. Plotting                                    #
 # ===================================================================== #
 
-def plot_variance_per_query(var_matrix, sentence_labels, out_dir,
-                            num_groups=None, queries_per_group=None):
-    """Bar chart: average variance per query slot (averaged over sentences)."""
-    K = var_matrix.shape[1]
-    avg_var = var_matrix.mean(axis=0)  # [K]
+def plot_cosine_sim_per_query(
+    ssame_matrix: np.ndarray,
+    s_random: np.ndarray,
+    sentence_labels: List[str],
+    out_dir: str,
+    num_groups=None,
+    queries_per_group=None,
+):
+    """
+    Three-panel bar chart per query slot:
+      top    : S_same  (cross-speaker, same sentence)
+      middle : S_random (null-hypothesis baseline)
+      bottom : ΔS = S_same − S_random
+    """
+    K = ssame_matrix.shape[1]
+    # Use nanmean to skip single-speaker sentences
+    s_same_avg = np.nanmean(ssame_matrix, axis=0)   # [K]
+    delta_s    = s_same_avg - s_random               # [K]
 
-    fig, ax = plt.subplots(figsize=(max(8, K * 0.22), 5))
     colors = ["#3498db"] * K
-
-    # If ORCA, color by group
     if num_groups and queries_per_group:
         cmap = plt.cm.get_cmap("tab10", num_groups)
         colors = [cmap(i // queries_per_group) for i in range(K)]
-        # Add group boundary lines
-        for g in range(1, num_groups):
-            ax.axvline(g * queries_per_group - 0.5, color="gray",
-                       ls="--", alpha=0.4, lw=0.8)
 
-    ax.bar(range(K), avg_var, color=colors, alpha=0.85, edgecolor="none")
-    ax.set_xlabel("Query Index")
-    ax.set_ylabel("Avg Variance (per dimension)")
-    ax.set_title("Per-Query Variance Across Speakers (same sentence)")
-    ax.set_xlim(-0.5, K - 0.5)
+    fig, axes = plt.subplots(3, 1, figsize=(max(8, K * 0.22), 11), sharex=True)
 
-    # Annotate overall mean
-    mean_val = avg_var.mean()
-    ax.axhline(mean_val, ls="--", color="red", alpha=0.6)
-    ax.text(K * 0.98, mean_val, f"  mean={mean_val:.4f}",
-            va="bottom", ha="right", color="red", fontsize=9)
+    def _bar(ax, values, title, ylabel, color_list, ref_line=None, ref_label=""):
+        ax.bar(range(K), values, color=color_list, alpha=0.85, edgecolor="none")
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_title(title, fontsize=10)
+        ax.set_xlim(-0.5, K - 0.5)
+        if num_groups and queries_per_group:
+            for g in range(1, num_groups):
+                ax.axvline(g * queries_per_group - 0.5, color="gray",
+                           ls="--", alpha=0.4, lw=0.8)
+        if ref_line is not None:
+            ax.axhline(ref_line, ls="--", color="red", alpha=0.6)
+            ax.text(K * 0.98, ref_line, f"  {ref_label}={ref_line:.4f}",
+                    va="bottom", ha="right", color="red", fontsize=8)
+
+    _bar(axes[0], s_same_avg,
+         "S_same — Cross-Speaker Cosine Similarity (same sentence)",
+         "Avg Cosine Similarity", colors,
+         ref_line=float(s_same_avg.mean()), ref_label="mean")
+
+    _bar(axes[1], s_random,
+         "S_random — Null Hypothesis Baseline (random pairs)",
+         "Avg Cosine Similarity", ["#e67e22"] * K,
+         ref_line=float(s_random.mean()), ref_label="mean")
+
+    delta_colors = ["#27ae60" if v > 0 else "#e74c3c" for v in delta_s]
+    _bar(axes[2], delta_s,
+         "ΔS = S_same − S_random  (Relative / Corrected Cosine Similarity)",
+         "ΔS", delta_colors,
+         ref_line=float(delta_s.mean()), ref_label="mean")
+    axes[2].axhline(0, color="black", lw=0.8, alpha=0.5)
+    axes[2].set_xlabel("Query Index")
 
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "variance_per_query.png"), dpi=150)
+    fig.savefig(os.path.join(out_dir, "cosine_sim_per_query.png"), dpi=150)
     plt.close(fig)
 
-    return avg_var
+    return s_same_avg, delta_s
 
 
-def plot_variance_heatmap(var_matrix, sentence_labels, out_dir):
-    """Heatmap: rows=sentences, cols=query index."""
-    fig, ax = plt.subplots(figsize=(max(8, var_matrix.shape[1] * 0.18),
-                                    max(4, len(sentence_labels) * 0.5)))
-
-    # Truncate long sentence labels for display
+def plot_cosine_sim_heatmap(ssame_matrix, sentence_labels, out_dir):
+    """Heatmap: rows=sentences, cols=query index for S_same."""
+    fig, ax = plt.subplots(
+        figsize=(max(8, ssame_matrix.shape[1] * 0.18),
+                 max(4, len(sentence_labels) * 0.5))
+    )
     short_labels = [s[:35] + "…" if len(s) > 35 else s for s in sentence_labels]
 
-    im = ax.imshow(var_matrix, cmap="YlOrRd", aspect="auto")
+    im = ax.imshow(ssame_matrix, cmap="RdYlGn", aspect="auto",
+                   vmin=0.0, vmax=1.0)
     ax.set_xlabel("Query Index")
     ax.set_ylabel("Sentence")
     ax.set_yticks(range(len(short_labels)))
     ax.set_yticklabels(short_labels, fontsize=8)
-    ax.set_title("Query Variance by Sentence (across speakers)")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="Variance")
+    ax.set_title("S_same — Cross-Speaker Cosine Similarity by Sentence")
+    fig.colorbar(im, ax=ax, shrink=0.8, label="Cosine Similarity")
 
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "variance_heatmap.png"), dpi=150)
+    fig.savefig(os.path.join(out_dir, "cosine_sim_heatmap.png"), dpi=150)
     plt.close(fig)
 
 
-def plot_variance_by_group(var_matrix, num_groups, queries_per_group, out_dir):
-    """For ORCA: grouped bar showing avg variance per group."""
-    K = var_matrix.shape[1]
-    avg_var = var_matrix.mean(axis=0)  # [K]
-
-    group_vars = []
+def plot_cosine_sim_by_group(
+    s_same_avg: np.ndarray,
+    s_random: np.ndarray,
+    num_groups: int,
+    queries_per_group: int,
+    out_dir: str,
+):
+    """For ORCA: grouped bar showing S_same, S_random, ΔS per group."""
+    group_ssame  = []
+    group_srandom = []
+    group_delta  = []
     group_labels = []
+
     for g in range(num_groups):
         start = g * queries_per_group
-        end = start + queries_per_group
-        group_vars.append(avg_var[start:end].mean())
-        group_labels.append(f"Group {g}")
+        end   = start + queries_per_group
+        gs = float(s_same_avg[start:end].mean())
+        gr = float(s_random[start:end].mean())
+        group_ssame.append(gs)
+        group_srandom.append(gr)
+        group_delta.append(gs - gr)
+        group_labels.append(f"Group {g + 1}")
 
-    fig, ax = plt.subplots(figsize=(max(6, num_groups * 0.8), 4.5))
+    x = np.arange(num_groups)
+    width = 0.25
+
+    fig, axes = plt.subplots(1, 2, figsize=(max(8, num_groups * 1.4), 5))
+
+    # Panel 1: S_same vs S_random
     cmap = plt.cm.get_cmap("tab10", num_groups)
-    bars = ax.bar(range(num_groups), group_vars,
-                  color=[cmap(i) for i in range(num_groups)], alpha=0.85)
-    ax.set_xlabel("Group Index")
-    ax.set_ylabel("Avg Variance (per dimension)")
-    ax.set_title("Per-Group Variance Across Speakers")
-    ax.set_xticks(range(num_groups))
-    ax.set_xticklabels(group_labels, fontsize=9)
+    bars1 = axes[0].bar(x - width / 2, group_ssame,  width, label="S_same",
+                        color=[cmap(i) for i in range(num_groups)], alpha=0.85)
+    bars2 = axes[0].bar(x + width / 2, group_srandom, width, label="S_random",
+                        color=[cmap(i) for i in range(num_groups)],
+                        alpha=0.40, hatch="//")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(group_labels, fontsize=9)
+    axes[0].set_ylabel("Cosine Similarity")
+    axes[0].set_title("S_same vs S_random per Group")
+    axes[0].legend()
+    for bar, val in zip(bars1, group_ssame):
+        axes[0].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                     f"{val:.4f}", ha="center", va="bottom", fontsize=7)
+    for bar, val in zip(bars2, group_srandom):
+        axes[0].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                     f"{val:.4f}", ha="center", va="bottom", fontsize=7)
 
-    # Annotate values on bars
-    for bar, val in zip(bars, group_vars):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                f"{val:.4f}", ha="center", va="bottom", fontsize=8)
-
-    overall_mean = np.mean(group_vars)
-    ax.axhline(overall_mean, ls="--", color="red", alpha=0.6)
-    ax.text(num_groups - 0.5, overall_mean, f"  mean={overall_mean:.4f}",
-            va="bottom", ha="right", color="red", fontsize=9)
+    # Panel 2: ΔS = S_same − S_random
+    delta_colors = ["#27ae60" if v >= 0 else "#e74c3c" for v in group_delta]
+    bars3 = axes[1].bar(x, group_delta, color=delta_colors, alpha=0.85)
+    axes[1].axhline(0, color="black", lw=0.8, alpha=0.5)
+    mean_delta = float(np.mean(group_delta))
+    axes[1].axhline(mean_delta, ls="--", color="red", alpha=0.6)
+    axes[1].text(num_groups - 0.5, mean_delta,
+                 f"  mean={mean_delta:.4f}",
+                 va="bottom", ha="right", color="red", fontsize=8)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(group_labels, fontsize=9)
+    axes[1].set_ylabel("ΔS = S_same − S_random")
+    axes[1].set_title("Relative Cosine Similarity per Group")
+    for bar, val in zip(bars3, group_delta):
+        axes[1].text(bar.get_x() + bar.get_width() / 2,
+                     bar.get_height() + (0.001 if val >= 0 else -0.003),
+                     f"{val:.4f}", ha="center",
+                     va="bottom" if val >= 0 else "top", fontsize=7)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "variance_by_group.png"), dpi=150)
+    fig.savefig(os.path.join(out_dir, "cosine_sim_by_group.png"), dpi=150)
     plt.close(fig)
 
-    return group_vars
+    return group_ssame, group_srandom, group_delta
 
 
 # ===================================================================== #
@@ -416,8 +578,8 @@ def main():
     )
 
     # Detect ORCA settings
-    connector_mode = model.config.connector_mode
-    num_groups = getattr(model.config, "orca_r1_num_groups", None)
+    connector_mode   = model.config.connector_mode
+    num_groups       = getattr(model.config, "orca_r1_num_groups", None)
     queries_per_group = getattr(model.config, "orca_r1_queries_per_group", None)
     is_orca = connector_mode in ["orca_r1", "orca_hybrid"]
 
@@ -426,58 +588,77 @@ def main():
 
     N, K, D = queries.shape
 
-    # ---- 3. Compute variance ----
-    print("\n📊 Computing per-sentence variance across speakers …")
-    sentence_labels, var_matrix, count_per_sent = \
-        compute_per_sentence_variance(queries, items)
+    # ---- 3a. Compute S_same (cross-speaker, same sentence) ----
+    print("\n📊 Computing S_same — cross-speaker cosine similarity …")
+    sentence_labels, ssame_matrix, count_per_sent = compute_s_same(queries, items)
+
+    # ---- 3b. Compute S_random (null-hypothesis baseline) ----
+    print("\n📊 Computing S_random — null-hypothesis baseline …")
+    s_random = compute_s_random(queries, items, args.n_random_pairs, args.seed)
 
     # ---- 4. Plot ----
-    avg_var = plot_variance_per_query(
-        var_matrix, sentence_labels, out_dir,
+    s_same_avg, delta_s = plot_cosine_sim_per_query(
+        ssame_matrix, s_random, sentence_labels, out_dir,
         num_groups=num_groups if is_orca else None,
         queries_per_group=queries_per_group if is_orca else None,
     )
-    plot_variance_heatmap(var_matrix, sentence_labels, out_dir)
+    plot_cosine_sim_heatmap(ssame_matrix, sentence_labels, out_dir)
 
-    group_vars = None
+    group_results = None
     if is_orca and num_groups and queries_per_group:
-        group_vars = plot_variance_by_group(
-            var_matrix, num_groups, queries_per_group, out_dir)
+        group_ssame, group_srandom, group_delta = plot_cosine_sim_by_group(
+            s_same_avg, s_random, num_groups, queries_per_group, out_dir
+        )
+        group_results = list(zip(group_ssame, group_srandom, group_delta))
 
     # ---- 5. Print summary ----
-    overall_var = float(avg_var.mean())
-    print(f"\n{'='*55}")
-    print(f"  Speaker Invariance Analysis")
-    print(f"{'='*55}")
+    overall_s_same   = float(np.nanmean(s_same_avg))
+    overall_s_random = float(s_random.mean())
+    overall_delta    = overall_s_same - overall_s_random
+
+    print(f"\n{'='*60}")
+    print(f"  Speaker Invariance Analysis — Cosine Similarity")
+    print(f"{'='*60}")
     print(f"  Model            : {args.model_id}")
     print(f"  Connector        : {connector_mode}")
     print(f"  #Samples         : {N}")
     print(f"  #Sentences       : {len(sentence_labels)}")
     print(f"  K (queries)      : {K}   D (dim) : {D}")
-    print(f"{'='*55}")
+    print(f"{'='*60}")
+    print(f"\n  S_random  (null hypothesis baseline) : {overall_s_random:.6f}")
+    print(f"  S_same    (cross-speaker, same text)  : {overall_s_same:.6f}")
+    print(f"  ΔS = S_same − S_random               : {overall_delta:.6f}")
 
-    print(f"\n  Per-sentence results:")
+    print(f"\n  Per-sentence S_same:")
     for s_i, sent in enumerate(sentence_labels):
-        sent_var = float(var_matrix[s_i].mean())
-        print(f"    \"{sent[:45]}\"  "
+        row = ssame_matrix[s_i]
+        sent_ssame = float(np.nanmean(row))
+        delta_sent = sent_ssame - overall_s_random
+        marker = "✅" if delta_sent > 0.05 else ("⚠️ " if delta_sent > 0 else "❌")
+        print(f"    \"{sent[:40]}\"  "
               f"(n={count_per_sent[s_i]:>4})  "
-              f"avg_var = {sent_var:.6f}")
+              f"S_same={sent_ssame:.4f}  "
+              f"ΔS={delta_sent:+.4f}  {marker}")
 
-    print(f"\n  Overall avg variance : {overall_var:.6f}")
-    if overall_var < 0.01:
-        print(f"  ✅ Variance is very low → strong speaker invariance")
-    elif overall_var < 0.05:
-        print(f"  ⚠️  Moderate variance → partial speaker invariance")
+    print(f"\n  Overall interpretation:")
+    if overall_delta > 0.05:
+        print(f"  ✅ Strong speaker invariance  (ΔS={overall_delta:.4f} >> 0)")
+    elif overall_delta > 0.01:
+        print(f"  ⚠️  Moderate speaker invariance (ΔS={overall_delta:.4f} > 0)")
+    elif overall_delta > 0:
+        print(f"  ⚠️  Weak speaker invariance  (ΔS={overall_delta:.4f} ≈ 0)")
     else:
-        print(f"  ❌ High variance → queries encode speaker-specific info")
+        print(f"  ❌ No speaker invariance detected (ΔS={overall_delta:.4f} ≤ 0)")
 
-    if group_vars is not None:
-        print(f"\n  Per-group avg variance (ORCA):")
-        for g_i, gv in enumerate(group_vars):
-            marker = "✅" if gv < 0.01 else ("⚠️ " if gv < 0.05 else "❌")
-            print(f"    Group {g_i}: {gv:.6f}  {marker}")
+    if group_results is not None:
+        print(f"\n  Per-group results (ORCA):")
+        print(f"  {'Group':<10}  {'S_same':>8}  {'S_random':>8}  {'ΔS':>8}")
+        print(f"  {'-'*44}")
+        for g_i, (gs, gr, gd) in enumerate(group_results):
+            marker = "✅" if gd > 0.05 else ("⚠️ " if gd > 0 else "❌")
+            print(f"  Group {g_i+1:<5}  {gs:>8.4f}  {gr:>8.4f}  {gd:>+8.4f}  {marker}")
 
-    print(f"{'='*55}\n")
+    print(f"{'='*60}\n")
 
     # ---- 6. Save report ----
     report = dict(
@@ -487,20 +668,32 @@ def main():
             num_samples=N, K=K, D=D,
             use_projected=args.use_projected,
             seed=args.seed,
+            n_random_pairs=args.n_random_pairs,
         ),
-        overall_avg_variance=overall_var,
-        per_query_avg_variance=avg_var.tolist(),
+        metrics=dict(
+            s_random_overall=overall_s_random,
+            s_same_overall=overall_s_same,
+            delta_s_overall=overall_delta,
+        ),
+        per_query=dict(
+            s_same=s_same_avg.tolist(),
+            s_random=s_random.tolist(),
+            delta_s=delta_s.tolist(),
+        ),
         per_sentence={
             sent: dict(
                 n_speakers=count_per_sent[s_i],
-                avg_variance=float(var_matrix[s_i].mean()),
-                per_query_variance=var_matrix[s_i].tolist(),
+                s_same_avg=float(np.nanmean(ssame_matrix[s_i])),
+                s_same_per_query=ssame_matrix[s_i].tolist(),
             )
             for s_i, sent in enumerate(sentence_labels)
         },
     )
-    if group_vars is not None:
-        report["per_group_avg_variance"] = group_vars
+    if group_results is not None:
+        report["per_group"] = [
+            dict(group=g_i + 1, s_same=gs, s_random=gr, delta_s=gd)
+            for g_i, (gs, gr, gd) in enumerate(group_results)
+        ]
 
     report_path = os.path.join(out_dir, "report.json")
     with open(report_path, "w") as f:
