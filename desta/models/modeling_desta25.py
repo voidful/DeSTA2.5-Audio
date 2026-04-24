@@ -471,7 +471,108 @@ class WhisperPerception(nn.Module):
         
         # Store group losses for ORCA-R1 (populated during forward)
         self._orca_r1_losses = None
+        self._use_safe_whisper_encoder_layer = False
+        self._warned_safe_whisper_encoder_layer = False
         
+
+    def _forward_encoder_layer(self, encoder_layer, hidden_states, attention_mask=None):
+        """
+        Run a Whisper encoder layer with a fallback explicit attention layout.
+
+        Some Transformers/PyTorch combinations route Whisper through SDPA with
+        query shaped as [B, T, H, D] while key/value are [B, H, T, D], which
+        raises a 1500-vs-head-count shape error. The fallback keeps Q/K/V
+        consistently [B, H, T, D] before calling SDPA.
+        """
+        if not getattr(self, "_use_safe_whisper_encoder_layer", False):
+            try:
+                return encoder_layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    output_attentions=False,
+                )
+            except RuntimeError as exc:
+                if "must match the size of tensor" not in str(exc):
+                    raise
+                self._use_safe_whisper_encoder_layer = True
+                if not getattr(self, "_warned_safe_whisper_encoder_layer", False):
+                    logging.warning(
+                        "Falling back to safe Whisper encoder attention after SDPA shape mismatch: %s",
+                        exc,
+                    )
+                    self._warned_safe_whisper_encoder_layer = True
+
+        residual = hidden_states
+        hidden_states = encoder_layer.self_attn_layer_norm(hidden_states)
+        hidden_states, attn_weights = self._forward_whisper_self_attention(
+            encoder_layer.self_attn,
+            hidden_states,
+            attention_mask=attention_mask,
+        )
+        hidden_states = nn.functional.dropout(hidden_states, p=encoder_layer.dropout, training=encoder_layer.training)
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = encoder_layer.final_layer_norm(hidden_states)
+        hidden_states = encoder_layer.activation_fn(encoder_layer.fc1(hidden_states))
+        hidden_states = nn.functional.dropout(
+            hidden_states,
+            p=encoder_layer.activation_dropout,
+            training=encoder_layer.training,
+        )
+        hidden_states = encoder_layer.fc2(hidden_states)
+        hidden_states = nn.functional.dropout(hidden_states, p=encoder_layer.dropout, training=encoder_layer.training)
+        hidden_states = residual + hidden_states
+
+        if hidden_states.dtype == torch.float16:
+            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+
+        return hidden_states, attn_weights
+
+
+    @staticmethod
+    def _forward_whisper_self_attention(attn_module, hidden_states, attention_mask=None):
+        bsz, tgt_len, _ = hidden_states.size()
+        query_states = attn_module.q_proj(hidden_states) * attn_module.scaling
+        key_states = attn_module.k_proj(hidden_states)
+        value_states = attn_module.v_proj(hidden_states)
+
+        query_states = query_states.view(
+            bsz,
+            tgt_len,
+            attn_module.num_heads,
+            attn_module.head_dim,
+        ).transpose(1, 2).contiguous()
+        key_states = key_states.view(
+            bsz,
+            tgt_len,
+            attn_module.num_heads,
+            attn_module.head_dim,
+        ).transpose(1, 2).contiguous()
+        value_states = value_states.view(
+            bsz,
+            tgt_len,
+            attn_module.num_heads,
+            attn_module.head_dim,
+        ).transpose(1, 2).contiguous()
+
+        dropout_p = attn_module.dropout if attn_module.training else 0.0
+        attn_output = nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attention_mask,
+            dropout_p=dropout_p,
+            scale=1.0,
+            is_causal=False,
+        )
+
+        embed_dim = getattr(attn_module, "embed_dim", attn_module.out_proj.in_features)
+        attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, embed_dim).contiguous()
+        attn_output = attn_module.out_proj(attn_output)
+
+        return attn_output, None
 
 
 
@@ -552,11 +653,7 @@ class WhisperPerception(nn.Module):
             layer_prompt_outputs = []
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 
-                layer_outputs = encoder_layer(
-                    hidden_states,
-                    attention_mask=None,
-                    layer_head_mask=None,
-                )
+                layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
                 hidden_states = layer_outputs[0]
 
                 if idx in self.connector.config.target_layer_ids:
@@ -585,11 +682,7 @@ class WhisperPerception(nn.Module):
         elif self.config.connector_mode == "orca_hybrid":
             # Collect all layer hidden states
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
-                layer_outputs = encoder_layer(
-                    hidden_states,
-                    attention_mask=None,
-                    layer_head_mask=None,
-                )
+                layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
             
@@ -602,11 +695,7 @@ class WhisperPerception(nn.Module):
         elif self.config.connector_mode == "orca_r1":
             # Collect all layer hidden states
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
-                layer_outputs = encoder_layer(
-                    hidden_states,
-                    attention_mask=None,
-                    layer_head_mask=None,
-                )
+                layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
                 hidden_states = layer_outputs[0]
                 all_layer_outputs.append(hidden_states)
             
