@@ -486,11 +486,14 @@ class WhisperPerception(nn.Module):
         """
         if not getattr(self, "_use_safe_whisper_encoder_layer", False):
             try:
-                return encoder_layer(
+                layer_outputs = encoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     output_attentions=False,
                 )
+                if isinstance(layer_outputs, torch.Tensor):
+                    return layer_outputs, None
+                return layer_outputs
             except RuntimeError as exc:
                 if "must match the size of tensor" not in str(exc):
                     raise
