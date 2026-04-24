@@ -36,6 +36,7 @@ import json
 import os
 import random
 import tempfile
+import traceback
 import atexit
 import wave
 
@@ -215,6 +216,8 @@ def evaluate_condition(
         try:
             pred = run_desta_inference(desta_model, wav_path, QUESTION, transcript=transcript)
         except Exception as e:
+            if idx == 0:  # Print full traceback only for first error
+                traceback.print_exc()
             print(f"Error on item {idx}: {e}")
             pred = "ERROR"
 
