@@ -48,6 +48,7 @@ DATASET_ID = "myleslinder/crema-d"
 SPLIT = "train"
 EMOTION_CODE = {"ANG":"anger","DIS":"disgust","FEA":"fear",
                 "HAP":"happy","NEU":"neutral","SAD":"sad"}
+EMOTION_LABELS = {0:"anger",1:"disgust",2:"fear",3:"happy",4:"neutral",5:"sad"}
 SEED = 42
 PCA_DIM = 128          # same for every representation
 N_VERIFY_PAIRS = 4000  # positive + negative speaker-verification pairs
@@ -66,20 +67,38 @@ def trim_audio(arr, sr, max_sec=10.0):
     mx = int(max_sec * sr)
     return arr[:mx].astype(np.float32) if arr.shape[0] > mx else arr.astype(np.float32)
 
-def _speaker_from_path(audio_obj):
-    p = ""
+def _source_path(audio_obj):
     if isinstance(audio_obj, dict):
-        p = audio_obj.get("path", "") or ""
+        return str(audio_obj.get("path", "") or "")
+    return ""
+
+def _speaker_from_path(audio_obj):
+    p = _source_path(audio_obj)
     m = re.match(r"(\d{4})_", os.path.basename(str(p)))
     return m.group(1) if m else None
+
+def _emotion_from_example(ex, audio_obj):
+    p = _source_path(audio_obj)
+    m = re.search(r"_(ANG|DIS|FEA|HAP|NEU|SAD)_", os.path.basename(str(p)).upper())
+    if m:
+        return EMOTION_CODE[m.group(1)]
+    emo = ex.get("emotion")
+    if emo:
+        emo = str(emo).strip().lower()
+        return EMOTION_CODE.get(emo.upper(), emo)
+    label = ex.get("label")
+    try:
+        return EMOTION_LABELS[int(label)]
+    except (TypeError, ValueError, KeyError):
+        return str(label or "unknown")
 
 def extract_pitch(arr, sr):
     """Mean F0 via autocorrelation (no librosa.pyin dependency)."""
     try:
         import librosa
         f0, _, _ = librosa.pyin(arr, fmin=50, fmax=500, sr=sr)
-        v = np.nanmean(f0)
-        return v if np.isfinite(v) else 0.0
+        valid = f0[np.isfinite(f0)]
+        return float(np.mean(valid)) if valid.size else 0.0
     except Exception:
         return 0.0
 
@@ -97,7 +116,7 @@ def load_cremad(num_samples, seed):
         sr  = int(ao["sampling_rate"])
         arr = trim_audio(arr, sr)
         sentence = ex.get("sentence") or ex.get("text") or ""
-        emotion  = str(ex.get("emotion") or ex.get("label") or "unknown")
+        emotion  = _emotion_from_example(ex, ao)
         speaker  = str(ex.get("actor_id") or ex.get("speaker_id")
                        or ex.get("speaker") or _speaker_from_path(ao) or "unk")
         items.append(dict(audio=arr, sr=sr, sentence=sentence,
@@ -124,6 +143,13 @@ def _target_layers(enc_id):
          "openai/whisper-large-v3":[7,15,23,31],
          "openai/whisper-large-v3-turbo":[7,15,23,31]}
     return m[enc_id]
+
+def _forward_whisper_encoder_layer(model, encoder_layer, hidden):
+    perception = getattr(model, "perception", None)
+    if perception is not None and hasattr(perception, "_forward_encoder_layer"):
+        return perception._forward_encoder_layer(encoder_layer, hidden, attention_mask=None)[0]
+    layer_outputs = encoder_layer(hidden, attention_mask=None)
+    return layer_outputs[0] if isinstance(layer_outputs, (tuple, list)) else layer_outputs
 
 @torch.inference_mode()
 def extract_representations(model, fe, items):
@@ -154,7 +180,7 @@ def extract_representations(model, fe, items):
         if is_orca:
             layers_out = []
             for el in enc.layers:
-                hidden = el(hidden, attention_mask=None)[0]
+                hidden = _forward_whisper_encoder_layer(model, el, hidden)
                 layers_out.append(hidden)
             # get global_tokens (before variational)
             saved = connector.variational_enabled
@@ -174,7 +200,7 @@ def extract_representations(model, fe, items):
         else:
             print("⚠️  Non-ORCA connector — extracting Q-Former output only.")
             for el in enc.layers:
-                hidden = el(hidden, attention_mask=None)[0]
+                hidden = _forward_whisper_encoder_layer(model, el, hidden)
             all_gt.append(hidden[0].float().cpu().mean(0).numpy())
 
         if (i+1) % 200 == 0: free_mem()
