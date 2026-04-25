@@ -236,14 +236,14 @@ def extract_query_vectors(model, processor, items, device,
         if is_orca:
             all_layer_outputs = []
             for enc_layer in whisper_enc.layers:
-                hidden = enc_layer(hidden, None, None)[0]
+                hidden = enc_layer(hidden)[0]
                 all_layer_outputs.append(hidden)
             conn_out = connector(all_layer_outputs)
             query_vecs = conn_out[0] if isinstance(conn_out, tuple) else conn_out
         else:
             layer_prompt_outputs = []
             for idx, enc_layer in enumerate(whisper_enc.layers):
-                hidden = enc_layer(hidden, None, None)[0]
+                hidden = enc_layer(hidden)[0]
                 if idx in target_layer_ids:
                     lp = connector.layer_prompts[
                         target_layer_ids.index(idx)

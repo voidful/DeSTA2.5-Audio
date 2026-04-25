@@ -154,7 +154,7 @@ def extract_representations(model, fe, items):
         if is_orca:
             layers_out = []
             for el in enc.layers:
-                hidden = el(hidden, None, None)[0]
+                hidden = el(hidden)[0]
                 layers_out.append(hidden)
             # get global_tokens (before variational)
             saved = connector.variational_enabled
@@ -174,7 +174,7 @@ def extract_representations(model, fe, items):
         else:
             print("⚠️  Non-ORCA connector — extracting Q-Former output only.")
             for el in enc.layers:
-                hidden = el(hidden, None, None)[0]
+                hidden = el(hidden)[0]
             all_gt.append(hidden[0].float().cpu().mean(0).numpy())
 
         if (i+1) % 200 == 0: free_mem()
