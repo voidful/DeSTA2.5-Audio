@@ -1,52 +1,47 @@
 #!/usr/bin/env python3
 """
-Text Dominance Analysis — "Blind Test"
-======================================
-Tests whether the model is **text-dominant** by comparing emotion-recognition
-accuracy when real audio is provided versus when the audio is replaced with
-pure noise.
+Acoustic Preference Violation (APV) Analysis
+=============================================
+Directly corresponds to the ACP (Acoustic Contrastive Preference) loss.
 
-Dataset : myleslinder/crema-d  (6-class emotion: Anger, Disgust, Fear, Happy, Neutral, Sad)
-Question: "What is the emotion of the speaker?"
+For each sample with ground-truth response r (emotion label), compute:
 
-Method
-------
-For each sample in CREMA-D, run generation twice:
-  A) **Full Audio**   : Real audio
-  B) **Blind Audio**  : Pure Gaussian noise (same duration)
+  Δ_ACP = (1/|r|) * [log p(r | audio, text) - log p(r | noise, text)]
 
-Metric
-------
-  Full Audio Accuracy  = correct / total  (condition A)
-  Blind Audio Accuracy = correct / total  (condition B)
-  Gap = Full - Blind
+Metrics
+-------
+  - Mean Δ_ACP : Average acoustic preference margin
+  - Violation Rate (VR) : P[Δ_ACP ≤ 0]
+    Fraction of samples where the model prefers the text-only prediction
 
-  - Healthy ALM  : Gap is large  (audio matters)
-  - Text-dominant: Gap is small  (audio is ignored)
+Dataset : CREMA-D matched-transcript counterfactual subsets
+          Same sentence text, different emotion audio
+          → model MUST use audio to distinguish emotions
+
+This is structurally isomorphic to ACP's optimisation objective:
+ACP maximises ℓ_full − ℓ_blind; this experiment measures exactly that gap.
 
 Usage
 -----
 python study/text_dominance_analysis.py \\
     --model_id <hf_or_local_desta_model_path> \\
-    --output_dir study/output_text_dominance
+    --output_dir study/output_apv
 """
 
 import argparse
 from collections import Counter, defaultdict
+import gc
 import json
 import os
 import random
 import re
-import tempfile
-import traceback
-import atexit
 import wave
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 from datasets import load_dataset
-from desta import DeSTA25AudioModel
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -55,55 +50,22 @@ DEFAULT_SEED = 42
 DATASET_ID = "myleslinder/crema-d"
 DATASET_SPLIT = "train"
 
-EMOTION_LABELS = {
-    0: "Anger",
-    1: "Disgust",
-    2: "Fear",
-    3: "Happy",
-    4: "Neutral",
-    5: "Sad",
-}
+# 6-class CREMA-D emotions
+EMOTION_LABELS = {0: "Anger", 1: "Disgust", 2: "Fear", 3: "Happy", 4: "Neutral", 5: "Sad"}
 EMOTION_CODE_TO_LABEL = {
-    "ANG": "anger",
-    "DIS": "disgust",
-    "FEA": "fear",
-    "HAP": "happy",
-    "NEU": "neutral",
-    "SAD": "sad",
+    "ANG": "anger", "DIS": "disgust", "FEA": "fear",
+    "HAP": "happy", "NEU": "neutral", "SAD": "sad",
 }
 CANONICAL_EMOTIONS = ("anger", "disgust", "fear", "happy", "neutral", "sad")
-EMOTION_ALIASES = {
-    "anger": ("anger", "angry", "mad"),
-    "disgust": ("disgust", "disgusted", "disgusting"),
-    "fear": ("fear", "fearful", "afraid", "scared", "anxious", "anxiety"),
-    "happy": ("happy", "happiness", "joy", "joyful", "cheerful", "pleased"),
-    "neutral": ("neutral", "calm", "flat"),
-    "sad": ("sad", "sadness", "sorrowful", "unhappy"),
-}
-ALIAS_TO_EMOTION = {
-    alias: emotion
-    for emotion, aliases in EMOTION_ALIASES.items()
-    for alias in aliases
-}
-ALIAS_PATTERN = "|".join(
-    re.escape(alias) for alias in sorted(ALIAS_TO_EMOTION, key=len, reverse=True)
-)
 
-QUESTION = "What is the emotion of the speaker? Describe the audio."
-
-_tmp_wav_fd_full, TMP_WAV_FULL = tempfile.mkstemp(suffix=".wav", prefix=f"blind_test_full_{os.getpid()}_")
-os.close(_tmp_wav_fd_full)
-_tmp_wav_fd_blind, TMP_WAV_BLIND = tempfile.mkstemp(suffix=".wav", prefix=f"blind_test_blind_{os.getpid()}_")
-os.close(_tmp_wav_fd_blind)
-atexit.register(lambda: os.remove(TMP_WAV_FULL) if os.path.exists(TMP_WAV_FULL) else None)
-atexit.register(lambda: os.remove(TMP_WAV_BLIND) if os.path.exists(TMP_WAV_BLIND) else None)
+QUESTION = "What is the emotion of the speaker?"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# =====================
-# Utilities
-# =====================
+# =====================================================================
+#  Utility helpers
+# =====================================================================
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -111,340 +73,435 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
-def write_wav_from_array(audio_array, sample_rate, wav_path):
-    audio_array = np.asarray(audio_array, dtype=np.float32)
-    audio_array = np.clip(audio_array, -1.0, 1.0)
-    audio_int16 = (audio_array * 32767.0).astype(np.int16)
-    with wave.open(wav_path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(int(sample_rate))
-        wf.writeframes(audio_int16.tobytes())
-    return wav_path
+def free_mem():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
-def _extract_audio_array_and_sr(audio_obj):
-    if isinstance(audio_obj, dict):
-        arr = np.asarray(audio_obj["array"], dtype=np.float32)
-        sr = audio_obj.get("sampling_rate", 16000)
-    else:
-        arr = np.asarray(
-            audio_obj["array"] if hasattr(audio_obj, '__getitem__') else audio_obj.array,
-            dtype=np.float32,
-        )
-        sr = getattr(audio_obj, "sampling_rate", 16000)
-    return arr, sr
+def trim_audio(arr, sr, max_seconds=10.0):
+    """Trim audio to max_seconds to keep memory bounded."""
+    max_len = int(max_seconds * sr)
+    if arr.shape[0] <= max_len:
+        return arr.astype(np.float32)
+    return arr[:max_len].astype(np.float32)
 
 
 def generate_noise_like(audio_array, seed=0):
-    """Generate pure Gaussian noise with the same length."""
+    """Generate pure Gaussian noise with the same length and energy."""
     rng = np.random.default_rng(seed)
     noise = rng.normal(0, 0.02, len(audio_array)).astype(np.float32)
     return noise
 
 
-def _normalize_text(text: str) -> str:
-    text = str(text).lower()
-    text = re.sub(r"[^a-z]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def canonicalize_emotion(text) -> str | None:
-    """Map label strings and common adjective forms to the 6 CREMA-D labels."""
-    if text is None:
-        return None
-    code = str(text).strip().upper()
-    if code in EMOTION_CODE_TO_LABEL:
-        return EMOTION_CODE_TO_LABEL[code]
-    normalized = _normalize_text(text)
-    if normalized in ALIAS_TO_EMOTION:
-        return ALIAS_TO_EMOTION[normalized]
-    if normalized in CANONICAL_EMOTIONS:
-        return normalized
-    matches = {
-        ALIAS_TO_EMOTION[match.group(0)]
-        for match in re.finditer(rf"\b(?:{ALIAS_PATTERN})\b", normalized)
-    }
-    if len(matches) == 1:
-        return next(iter(matches))
-    return None
-
-
-def parse_emotion_prediction(pred_text: str) -> str | None:
-    """Extract a canonical emotion label from free-form model output."""
-    text = _normalize_text(pred_text)
-    if not text:
-        return None
-
-    cue_patterns = [
-        rf"\b(?:emotion|answer|label|prediction)\s*(?:of the speaker\s*)?(?:is|:|-)?\s*(?:the speaker\s*)?(?:is|sounds|seems|appears)?\s*(?P<label>{ALIAS_PATTERN})\b",
-        rf"\bthe speaker\s*(?:is|sounds|seems|appears)\s*(?P<label>{ALIAS_PATTERN})\b",
-    ]
-    for pattern in cue_patterns:
-        match = re.search(pattern, text)
-        if match:
-            return ALIAS_TO_EMOTION[match.group("label")]
-
-    matches = [
-        (match.start(), ALIAS_TO_EMOTION[match.group(0)])
-        for match in re.finditer(rf"\b(?:{ALIAS_PATTERN})\b", text)
-    ]
-    if not matches:
-        return None
-    matches.sort(key=lambda item: item[0])
-    return matches[0][1]
-
-
-def match_emotion(pred_text: str, gold_label: str) -> bool:
-    """Check whether the parsed prediction matches the gold emotion."""
-    return parse_emotion_prediction(pred_text) == canonicalize_emotion(gold_label)
-
-
-def _extract_source_path(item, audio_obj) -> str:
-    for key in ("path", "source_file", "file", "audio_path"):
-        if item.get(key):
-            return str(item[key])
-    if isinstance(audio_obj, dict) and audio_obj.get("path"):
-        return str(audio_obj["path"])
-    return ""
-
-
-def get_gold_emotion(item, audio_obj, label_names=None) -> str:
-    """Prefer CREMA-D filename codes, then dataset metadata, then label id."""
-    source_path = _extract_source_path(item, audio_obj)
-    code_match = re.search(r"_(ANG|DIS|FEA|HAP|NEU|SAD)_", os.path.basename(source_path).upper())
-    if code_match:
-        return EMOTION_CODE_TO_LABEL[code_match.group(1)]
-
-    for key in ("emotion", "emotion_label"):
-        label = canonicalize_emotion(item.get(key))
-        if label:
-            return label
-
+def get_gold_emotion(item) -> str:
+    """Extract canonical emotion label from CREMA-D item."""
+    audio_obj = item.get("audio", {})
+    # Try filename-based code first
+    for key in ("path", "source_file", "file"):
+        source = item.get(key) or (audio_obj.get("path") if isinstance(audio_obj, dict) else "")
+        if source:
+            m = re.search(r"_(ANG|DIS|FEA|HAP|NEU|SAD)_", os.path.basename(str(source)).upper())
+            if m:
+                return EMOTION_CODE_TO_LABEL[m.group(1)]
+    # Fallback to label field
     label_int = item.get("label")
-    if label_names is not None and label_int is not None:
-        try:
-            label = canonicalize_emotion(label_names[int(label_int)])
-            if label:
-                return label
-        except (IndexError, TypeError, ValueError):
-            pass
-    return canonicalize_emotion(EMOTION_LABELS.get(label_int, str(label_int))) or str(label_int)
+    if label_int is not None:
+        label_str = EMOTION_LABELS.get(int(label_int), "")
+        return label_str.lower() if label_str else str(label_int)
+    return "unknown"
 
 
-def get_label_names(ds):
-    label_feature = getattr(ds, "features", {}).get("label") if hasattr(ds, "features") else None
-    return getattr(label_feature, "names", None)
+def get_sentence(item) -> str:
+    """Extract sentence text from CREMA-D item."""
+    return item.get("sentence") or item.get("text") or ""
 
 
-def build_user_content(question, prompt_style):
+# =====================================================================
+#  Model loading (same approach as speaker_invariance_analysis.py)
+# =====================================================================
+
+def load_model(model_id):
+    from desta.models.modeling_desta25 import DeSTA25AudioModel
+    from transformers import AutoFeatureExtractor
+
+    print(f"🔄 Loading DeSTA model: {model_id}")
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    model = DeSTA25AudioModel.from_pretrained(model_id, torch_dtype=dtype)
+    model.to(device).eval()
+
+    # Load feature extractor (mel spectrogram processor)
+    encoder_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
+    feat_extractor = AutoFeatureExtractor.from_pretrained(encoder_id)
+
+    # Setup tokenizer for generation context
+    if not hasattr(model, "tokenizer"):
+        model._setup_generation()
+
+    return model, feat_extractor
+
+
+# =====================================================================
+#  Core: compute log p(target | audio, text) via teacher-forced forward
+# =====================================================================
+
+def _get_audio_token_size(model):
+    """Determine how many tokens the audio connector produces."""
+    cfg = model.config
+    if cfg.connector_mode == "orca_r1":
+        return cfg.orca_r1_num_groups * cfg.orca_r1_queries_per_group
+    return cfg.prompt_size
+
+
+@torch.inference_mode()
+def compute_target_log_prob(model, feat_extractor, audio_array, sr,
+                            target_text, transcript=" "):
+    """
+    Compute average per-token log p(target_text | audio, prompt).
+
+    Instead of calling model.generate() (which triggers the buggy Whisper
+    decoder), we replicate the audio → encoder → connector → LLM forward
+    path and do a teacher-forced log-prob computation.
+
+    Returns:
+        avg_log_prob : float  — (1/|r|) * Σ log p(r_t | r_{<t}, audio, text)
+        total_log_prob : float
+        num_tokens : int — |r|
+    """
+    from desta.models.modeling_desta25 import _prepare_audio_context_and_start_positions
+
+    tokenizer = model.tokenizer
+    audio_locator = model.audio_locator
+    placeholder_token = model.placeholder_token
+    audio_token_size = _get_audio_token_size(model)
+
+    # --- 1. Prepare mel features ---
+    audio_float = audio_array.astype(np.float32)
+    feats = feat_extractor(audio_float, sampling_rate=sr, return_tensors="pt")
+    batch_features = feats.input_features.to(device)
+
+    # --- 2. Prepare transcription ---
+    trans_ids = tokenizer.encode(transcript, add_special_tokens=False, return_tensors="pt")
+    trans_ids = trans_ids.long().to(device)
+    transcription_size = trans_ids.size(1)
+
+    # --- 3. Build chat prompt (without target) ---
     choices = ", ".join(CANONICAL_EMOTIONS)
-    if prompt_style == "label_only":
-        return (
-            f"<|AUDIO|>\n\n{question}\n\n"
-            f"Choose exactly one emotion from: {choices}.\n"
-            'Answer in this exact format: "Emotion: <label>".'
-        )
-    if prompt_style == "mcq":
-        return (
-            f"<|AUDIO|>\n\n{question}\n\n"
-            f"Choose from the following options: {choices}.\n"
-            'End with: "The correct answer is: <label>".'
-        )
-    return (
-        f"<|AUDIO|>\n\n{question}\n\n"
-        f"The emotion must be one of: {choices}.\n"
-        'Start with "Emotion: <label>". Then briefly describe the acoustic evidence.'
+    user_content = (
+        f"<|AUDIO|>\n\n{QUESTION}\n\n"
+        f"Choose exactly one emotion from: {choices}.\n"
+        'Answer with just the emotion label.'
+    )
+    messages = [
+        {"role": "system", "content": "Focus on the audio clips and instructions."},
+        {"role": "user", "content": user_content},
+    ]
+    prompt_str = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+    )
+    prompt_str = prompt_str.replace(
+        audio_locator, f"<start_audio>{audio_locator}<end_audio>"
     )
 
+    # Expand audio placeholder tokens
+    prompt_tokens, start_positions = _prepare_audio_context_and_start_positions(
+        token_list=tokenizer.tokenize(prompt_str),
+        audio_locator=audio_locator,
+        audio_size_list=[audio_token_size],
+        transcription_size_list=[transcription_size],
+        placeholder_token=placeholder_token,
+    )
+    prompt_str_expanded = tokenizer.convert_tokens_to_string(prompt_tokens)
 
-# =====================
-# DeSTA Inference
-# =====================
+    # --- 4. Tokenize prompt + target together ---
+    full_str = prompt_str_expanded + target_text
+    prompt_input = tokenizer(prompt_str_expanded, return_tensors="pt",
+                             add_special_tokens=False)
+    full_input = tokenizer(full_str, return_tensors="pt",
+                           add_special_tokens=False)
 
-def run_desta_inference(model, wav_path, question, transcript=" ", prompt_style="case_study", max_new_tokens=96):
-    """Run DeSTA model on a single audio + question.
-    
-    Args:
-        transcript: Provide a transcription to bypass internal Whisper ASR.
-                    Use the actual sentence for full-audio, or a space for blind.
-    """
-    audio_entry = {"audio": wav_path, "text": transcript}
-    user_content = build_user_content(question, prompt_style)
+    context_len = prompt_input["input_ids"].size(1)
+    input_ids = full_input["input_ids"].to(device)
+    attention_mask = full_input["attention_mask"].to(device)
+    num_target_tokens = input_ids.size(1) - context_len
 
-    messages = [
-        {
-            "role": "system",
-            "content": "Focus on the audio clips and instructions."
-        },
-        {
-            "role": "user",
-            "content": user_content,
-            "audios": [audio_entry]
-        }
-    ]
+    if num_target_tokens <= 0:
+        return 0.0, 0.0, 0
 
-    with torch.no_grad():
-        outputs = model.generate(
-            messages=messages,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
+    # --- 5. Prepare inputs_embeds with audio injection ---
+    batch_start_positions = [(0, start_positions[0])]
+    batch_transcription_ids = [trans_ids]
+
+    prepare_result = model._prepare_inputs_for_llm(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        batch_features=batch_features,
+        batch_transcription_ids=batch_transcription_ids,
+        batch_start_positions=batch_start_positions,
+    )
+
+    # Handle ORCA mode
+    is_orca = model.config.connector_mode == "orca_hybrid"
+    if is_orca and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
+        inputs_embeds = prepare_result[0]
+        # Set deep injection tokens if needed
+        if len(prepare_result) == 4:
+            _, global_tok, local_tok, trans_pos = prepare_result
+        else:
+            _, global_tok, local_tok = prepare_result
+            trans_pos = None
+        model._orca_transcription_positions = trans_pos
+        if getattr(model.config, 'orca_deep_injection_enabled', True):
+            if getattr(model.config, 'orca_global_cross_attn', False):
+                if local_tok is not None and global_tok is not None:
+                    model._orca_audio_local = torch.cat([global_tok, local_tok], dim=1)
+                elif global_tok is not None:
+                    model._orca_audio_local = global_tok
+                else:
+                    model._orca_audio_local = local_tok
+            else:
+                model._orca_audio_local = local_tok
+        else:
+            model._orca_audio_local = None
+        model._orca_audio_local_mask = None
+    elif isinstance(prepare_result, tuple):
+        inputs_embeds = prepare_result[0]
+    else:
+        inputs_embeds = prepare_result
+
+    # --- 6. LLM forward pass (teacher-forced) ---
+    try:
+        outputs = model.llm_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
         )
+    finally:
+        if hasattr(model, '_orca_audio_local'):
+            model._orca_audio_local = None
+            model._orca_audio_local_mask = None
+        if hasattr(model, '_orca_transcription_positions'):
+            model._orca_transcription_positions = None
 
-    pred = outputs.text
-    if isinstance(pred, list):
-        pred = pred[0]
-    if isinstance(pred, str):
-        pred = pred.strip()
-    return pred
+    # --- 7. Extract log probs for target tokens ---
+    logits = outputs.logits  # [1, seq_len, vocab_size]
+    # Autoregressive: logit at position t predicts token at position t+1
+    target_ids = input_ids[0, context_len:]              # [T]
+    target_logits = logits[0, context_len - 1: -1]       # [T, V]
+
+    log_probs = F.log_softmax(target_logits.float(), dim=-1)
+    target_log_probs = log_probs.gather(1, target_ids.unsqueeze(1)).squeeze(1)  # [T]
+
+    avg_lp = target_log_probs.mean().item()
+    total_lp = target_log_probs.sum().item()
+    return avg_lp, total_lp, num_target_tokens
 
 
-# =====================
-# Single Condition Eval
-# =====================
+# =====================================================================
+#  Experiment runner
+# =====================================================================
 
-def evaluate_condition(
-    desta_model,
-    ds,
-    condition,  # "full" or "blind"
-    output_dir="results",
-    seed=DEFAULT_SEED,
-    num_samples=0,
-    prompt_style="case_study",
-    blind_transcript="same",
-    max_new_tokens=96,
-):
-    """Evaluate emotion recognition accuracy under one condition."""
-    out_path = os.path.join(output_dir, f"blind_test_{condition}.jsonl")
-    with open(out_path, "w", encoding="utf-8") as f:
-        pass
+def run_apv_experiment(model, feat_extractor, ds, num_samples=0, seed=42,
+                       output_dir="results"):
+    """
+    Run the Acoustic Preference Violation experiment.
 
+    For each CREMA-D sample:
+      1. target_text = correct emotion label (e.g. "anger")
+      2. log_full  = log p(target | real_audio, text)
+      3. log_blind = log p(target | noise_audio, text)
+      4. Δ_ACP = log_full - log_blind   (per-token average)
+      5. violation = 1 if Δ_ACP ≤ 0
+    """
     total = len(ds)
     if num_samples > 0:
         total = min(num_samples, total)
 
-    num_correct = 0
     results = []
-    label_names = get_label_names(ds)
-    pred_counter = Counter()
-    gold_counter = Counter()
-    per_label_total = Counter()
-    per_label_correct = Counter()
-    confusion = defaultdict(Counter)
+    jsonl_path = os.path.join(output_dir, "apv_results.jsonl")
+    with open(jsonl_path, "w") as f:
+        pass  # truncate
 
-    for idx in tqdm(range(total), desc=f"Emotion-{condition}"):
+    for idx in tqdm(range(total), desc="APV"):
         item = ds[idx]
-
         audio_obj = item["audio"]
-        audio_array, sample_rate = _extract_audio_array_and_sr(audio_obj)
+        audio_array = np.asarray(audio_obj["array"], dtype=np.float32)
+        sr = int(audio_obj["sampling_rate"])
+        audio_array = trim_audio(audio_array, sr, max_seconds=10.0)
 
-        label_int = item["label"]
-        gold = get_gold_emotion(item, audio_obj, label_names=label_names)
+        gold = get_gold_emotion(item)
+        sentence = get_sentence(item)
+        target_text = gold  # the correct emotion label
 
-        # Get the sentence text to bypass internal Whisper ASR
-        sentence = item.get("sentence") or item.get("text") or " "
-
-        if condition == "full":
-            write_wav_from_array(audio_array, sample_rate, TMP_WAV_FULL)
-            wav_path = TMP_WAV_FULL
-            transcript = sentence
-        else:  # blind
-            noise = generate_noise_like(audio_array, seed=seed + idx)
-            write_wav_from_array(noise, sample_rate, TMP_WAV_BLIND)
-            wav_path = TMP_WAV_BLIND
-            transcript = sentence if blind_transcript == "same" else " "
+        # Noise with same length
+        noise = generate_noise_like(audio_array, seed=seed + idx)
 
         try:
-            pred = run_desta_inference(
-                desta_model,
-                wav_path,
-                QUESTION,
-                transcript=transcript,
-                prompt_style=prompt_style,
-                max_new_tokens=max_new_tokens,
+            # Full audio condition
+            avg_lp_full, total_lp_full, n_tok = compute_target_log_prob(
+                model, feat_extractor, audio_array, sr,
+                target_text=target_text, transcript=sentence or " ",
+            )
+            # Blind (noise) condition
+            avg_lp_blind, total_lp_blind, _ = compute_target_log_prob(
+                model, feat_extractor, noise, sr,
+                target_text=target_text, transcript=sentence or " ",
             )
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise  # Stop on first error to see full traceback
+            if idx < 3:
+                import traceback
+                traceback.print_exc()
+            print(f"Error on item {idx}: {e}")
+            continue
 
-        pred_label = parse_emotion_prediction(pred)
-        correct = pred_label == gold
-        if correct:
-            num_correct += 1
-            per_label_correct[gold] += 1
-        gold_counter[gold] += 1
-        pred_counter[pred_label or "unparsed"] += 1
-        per_label_total[gold] += 1
-        confusion[gold][pred_label or "unparsed"] += 1
+        delta_acp = avg_lp_full - avg_lp_blind
+        violation = int(delta_acp <= 0)
 
-        result_item = {
+        row = {
             "idx": idx,
-            "condition": condition,
-            "label_int": label_int,
             "gold": gold,
-            "pred": pred,
-            "pred_label": pred_label,
-            "correct": correct,
             "sentence": sentence,
-            "source_path": _extract_source_path(item, audio_obj),
+            "n_tokens": n_tok,
+            "avg_lp_full": round(avg_lp_full, 6),
+            "avg_lp_blind": round(avg_lp_blind, 6),
+            "delta_acp": round(delta_acp, 6),
+            "violation": violation,
         }
-        results.append(result_item)
+        results.append(row)
 
-        with open(out_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(result_item, ensure_ascii=False) + "\n")
+        with open(jsonl_path, "a") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    accuracy = num_correct / total if total > 0 else 0.0
-    print(f"  [{condition}]: {num_correct}/{total} = {accuracy:.4f}")
-    print(f"  [{condition}] prediction distribution: {dict(pred_counter)}")
-    per_label_accuracy = {
-        label: per_label_correct[label] / per_label_total[label]
-        for label in CANONICAL_EMOTIONS
-        if per_label_total[label] > 0
+        if (idx + 1) % 200 == 0:
+            free_mem()
+
+    return results
+
+
+# =====================================================================
+#  Analysis & Reporting
+# =====================================================================
+
+def analyse_results(results, model_id, output_dir):
+    """Compute aggregate metrics and per-sentence / per-emotion breakdowns."""
+    if not results:
+        print("No results to analyse.")
+        return
+
+    deltas = np.array([r["delta_acp"] for r in results])
+    violations = np.array([r["violation"] for r in results])
+
+    mean_delta = float(deltas.mean())
+    median_delta = float(np.median(deltas))
+    std_delta = float(deltas.std())
+    vr = float(violations.mean())
+
+    # Per-emotion
+    by_emotion = defaultdict(list)
+    for r in results:
+        by_emotion[r["gold"]].append(r["delta_acp"])
+
+    per_emotion = {}
+    for emo in CANONICAL_EMOTIONS:
+        vals = by_emotion.get(emo, [])
+        if vals:
+            arr = np.array(vals)
+            per_emotion[emo] = {
+                "n": len(vals),
+                "mean_delta": round(float(arr.mean()), 6),
+                "vr": round(float((arr <= 0).mean()), 4),
+            }
+
+    # Per-sentence (matched-transcript analysis)
+    by_sentence = defaultdict(list)
+    for r in results:
+        by_sentence[r["sentence"]].append(r)
+
+    per_sentence = {}
+    for sent, rows in sorted(by_sentence.items()):
+        arr = np.array([r["delta_acp"] for r in rows])
+        per_sentence[sent] = {
+            "n": len(rows),
+            "emotions": sorted(set(r["gold"] for r in rows)),
+            "mean_delta": round(float(arr.mean()), 6),
+            "vr": round(float((arr <= 0).mean()), 4),
+        }
+
+    # Verdict
+    if vr > 0.40:
+        verdict = "⚠️  HIGH VIOLATION — model often ignores audio (text-dominant)"
+    elif vr > 0.20:
+        verdict = "⚠️  Moderate violation — inconsistent audio usage"
+    elif vr > 0.10:
+        verdict = "Mild violation — mostly audio-aware"
+    else:
+        verdict = "✅ Low violation — strong acoustic grounding"
+
+    # Print summary
+    print(f"\n{'='*65}")
+    print(f"  ACOUSTIC PREFERENCE VIOLATION (APV) SUMMARY")
+    print(f"  Model: {model_id}")
+    print(f"{'='*65}")
+    print(f"  N samples           : {len(results)}")
+    print(f"  Mean Δ_ACP          : {mean_delta:+.4f}")
+    print(f"  Median Δ_ACP        : {median_delta:+.4f}")
+    print(f"  Std Δ_ACP           : {std_delta:.4f}")
+    print(f"  Violation Rate (VR) : {vr:.4f}  ({int(violations.sum())}/{len(results)})")
+    print(f"  Verdict             : {verdict}")
+    print(f"{'='*65}")
+    print(f"  Δ_ACP > 0 → model prefers audio  (good)")
+    print(f"  Δ_ACP ≤ 0 → model prefers text   (violation)")
+    print(f"{'='*65}")
+
+    print(f"\n  Per-emotion breakdown:")
+    for emo in CANONICAL_EMOTIONS:
+        info = per_emotion.get(emo)
+        if info:
+            print(f"    {emo:>8s}  n={info['n']:>4d}  Δ_ACP={info['mean_delta']:+.4f}  VR={info['vr']:.3f}")
+
+    print(f"\n  Per-sentence (matched-transcript) breakdown:")
+    for sent, info in per_sentence.items():
+        emos = ",".join(info["emotions"])
+        print(f"    \"{sent[:40]:40s}\"  n={info['n']:>4d}  Δ_ACP={info['mean_delta']:+.4f}  VR={info['vr']:.3f}  [{emos}]")
+
+    # Save report
+    report = {
+        "model_id": model_id,
+        "dataset": DATASET_ID,
+        "n_samples": len(results),
+        "mean_delta_acp": mean_delta,
+        "median_delta_acp": median_delta,
+        "std_delta_acp": std_delta,
+        "violation_rate": vr,
+        "verdict": verdict,
+        "per_emotion": per_emotion,
+        "per_sentence": per_sentence,
     }
-    print(f"  [{condition}] per-label accuracy: {per_label_accuracy}")
+    report_path = os.path.join(output_dir, "apv_summary.json")
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(f"\n📄 Summary saved to: {report_path}")
 
-    return {
-        "condition": condition,
-        "accuracy": accuracy,
-        "num_correct": num_correct,
-        "total": total,
-        "results_path": out_path,
-        "gold_distribution": dict(gold_counter),
-        "prediction_distribution": dict(pred_counter),
-        "per_label_accuracy": per_label_accuracy,
-        "confusion": {gold: dict(preds) for gold, preds in confusion.items()},
-    }
+    return report
 
 
-# =====================
-# Main
-# =====================
+# =====================================================================
+#  Main
+# =====================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Text Dominance 'Blind Test' — Emotion Recognition on CREMA-D"
+        description="Acoustic Preference Violation (APV) — ACP-aligned ablation"
     )
     parser.add_argument("--model_id", type=str, required=True,
                         help="HuggingFace model ID or local checkpoint path")
-    parser.add_argument("--output_dir", type=str, default="study/output_text_dominance",
+    parser.add_argument("--output_dir", type=str, default="study/output_apv",
                         help="Directory to save results")
     parser.add_argument("--num_samples", type=int, default=0,
                         help="Number of samples to evaluate (0 = all)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Random seed for reproducibility")
-    parser.add_argument("--prompt_style", type=str, default="case_study",
-                        choices=["case_study", "label_only", "mcq"],
-                        help="Prompt format for emotion recognition")
-    parser.add_argument("--blind_transcript", type=str, default="same",
-                        choices=["same", "blank"],
-                        help="Use the same transcript for blind noise, or blank it out")
-    parser.add_argument("--max_new_tokens", type=int, default=96,
-                        help="Maximum generated tokens per example")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -453,96 +510,28 @@ def main():
     print(f"Device: {device}")
     print(f"Seed: {args.seed}")
     print(f"Output: {args.output_dir}\n")
-    print(f"Prompt style: {args.prompt_style}")
-    print(f"Blind transcript: {args.blind_transcript}")
-    print(f"Max new tokens: {args.max_new_tokens}\n")
 
     # Load dataset
-    print(f"Loading dataset: {DATASET_ID}")
+    print(f"📦 Loading dataset: {DATASET_ID}")
     ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
     ds = ds.shuffle(seed=args.seed)
-    print(f"  Total samples: {len(ds)}")
+    print(f"   Total samples: {len(ds)}")
 
-    # Load DeSTA model
-    print(f"Loading DeSTA model: {args.model_id}")
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    desta_model = DeSTA25AudioModel.from_pretrained(args.model_id, torch_dtype=dtype)
-    desta_model.to(device).eval()
+    # Load model
+    model, feat_extractor = load_model(args.model_id)
+    print(f"   Connector mode: {model.config.connector_mode}")
+    print(f"   Audio token size: {_get_audio_token_size(model)}")
 
-    # Run evaluation: full audio and blind audio
-    stats_full = evaluate_condition(
-        desta_model=desta_model,
-        ds=ds,
-        condition="full",
-        output_dir=args.output_dir,
-        seed=args.seed,
+    # Run APV experiment
+    results = run_apv_experiment(
+        model, feat_extractor, ds,
         num_samples=args.num_samples,
-        prompt_style=args.prompt_style,
-        blind_transcript=args.blind_transcript,
-        max_new_tokens=args.max_new_tokens,
-    )
-    stats_blind = evaluate_condition(
-        desta_model=desta_model,
-        ds=ds,
-        condition="blind",
-        output_dir=args.output_dir,
         seed=args.seed,
-        num_samples=args.num_samples,
-        prompt_style=args.prompt_style,
-        blind_transcript=args.blind_transcript,
-        max_new_tokens=args.max_new_tokens,
+        output_dir=args.output_dir,
     )
 
-    # Compute Gap and print summary
-    acc_full = stats_full["accuracy"]
-    acc_blind = stats_blind["accuracy"]
-    gap = acc_full - acc_blind
-
-    if gap < 0.05:
-        verdict = "⚠️  TEXT DOMINANT — audio is ignored"
-    elif gap < 0.15:
-        verdict = "⚠️  Weak audio reliance"
-    elif gap < 0.30:
-        verdict = "Moderate audio reliance"
-    else:
-        verdict = "✅ Audio-aware"
-
-    print(f"\n{'='*60}")
-    print(f"  TEXT DOMINANCE 'BLIND TEST' SUMMARY")
-    print(f"  Model: {args.model_id}")
-    print(f"  Dataset: {DATASET_ID}")
-    print(f"  Question: {QUESTION}")
-    print(f"{'='*60}")
-    print(f"  Full Audio Accuracy  : {acc_full:.4f}  ({stats_full['num_correct']}/{stats_full['total']})")
-    print(f"  Blind Audio Accuracy : {acc_blind:.4f}  ({stats_blind['num_correct']}/{stats_blind['total']})")
-    print(f"  Gap = Full - Blind   : {gap:.4f}")
-    print(f"  Verdict              : {verdict}")
-    print(f"{'='*60}")
-    print(f"  Large Gap  → model relies on audio (good)")
-    print(f"  Small Gap  → model ignores audio, text dominant (bad)")
-    print(f"{'='*60}")
-
-    # Save summary
-    summary_report = {
-        "model_id": args.model_id,
-        "dataset": DATASET_ID,
-        "question": QUESTION,
-        "seed": args.seed,
-        "prompt_style": args.prompt_style,
-        "blind_transcript": args.blind_transcript,
-        "max_new_tokens": args.max_new_tokens,
-        "full_audio_accuracy": acc_full,
-        "blind_audio_accuracy": acc_blind,
-        "gap": gap,
-        "verdict": verdict,
-        "full": stats_full,
-        "blind": stats_blind,
-    }
-
-    report_path = os.path.join(args.output_dir, "blind_test_summary.json")
-    with open(report_path, "w") as f:
-        json.dump(summary_report, f, indent=2, ensure_ascii=False)
-    print(f"\nSummary saved to: {report_path}")
+    # Analyse and report
+    analyse_results(results, args.model_id, args.output_dir)
 
 
 if __name__ == "__main__":
