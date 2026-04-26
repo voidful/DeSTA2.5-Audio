@@ -3,8 +3,8 @@
 # Script to check checkpoint structure in existing experiment directories
 # Run this on the cluster to diagnose checkpoint detection issues
 
-output_root="/work/voidful2nlp/desta/outputs/desta25_qwen3_0.6b_orca"
-name="qwen3-0.6b-inorca-r1"
+output_root="/work/voidful2nlp/desta/outputs/desta25_qwen3_0.6b_orca_desta"
+name="qwen3-0.6b-orca-desta"
 
 echo "=== Checking checkpoint directories ==="
 echo "Output root: $output_root"

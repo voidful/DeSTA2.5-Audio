@@ -1,10 +1,23 @@
+##############################################################################
+# Ablation Exp 4: Full Model (All Components + ASR Dropout)
+#
+# Complete ORCA-DeSTA with all three proposed components plus ASR dropout:
+#   1. Groupwise Orthogonality (inter/intra losses)
+#   2. Stochastic Perturbation Encoding (variational + KL annealing)
+#   3. Acoustic-Contrastive Preference (Modality-DPO)
+#   4. ASR Transcript Dropout (p=0.2)
+#
+# Paper reference: Section 5.2 (Table 5)
+# - Full model achieves 61.60% total on MMAU-mini
+# - ASR dropout recovers Sound/Music degradation from stochastic perturbation
+##############################################################################
 hydra:
   run:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_4b_orca_desta
-name: desta25_qwen3_4b_orca_desta
+project: desta25_ablation
+name: ablation_4_full_model
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,11 +26,11 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_4b_orca_desta
+  project: desta25_ablation
   log_model: all
 
 trainer:
-  devices: [0,1,2,3,]
+  devices: [0,1,2,3]
   num_nodes: 1
   max_epochs: 5
   max_steps: -1
@@ -46,12 +59,14 @@ model:
     num_hidden_layers: 6
     use_flash_attention: true
 
+  # ORCA connector with Groupwise Orthogonality ENABLED
   orca_desta:
     num_groups: 8
     queries_per_group: 8
     inter_group_weight: 0.1
     intra_group_weight: 0.01
 
+  # Component 2: Stochastic Perturbation Encoding — ENABLED
   variational_grouping:
     enabled: true
     kl_weight: 0.01
@@ -63,13 +78,14 @@ model:
     free_bits: 0.1
     inference_alpha: 0.0
 
+  # Component 3: Acoustic-Contrastive Preference — ENABLED
   modality_dpo:
     enabled: true
     beta: 0.1
 
+  # ASR Dropout — ENABLED (Full model)
   asr_dropout:
     prob: 0.2
-
 
   placeholder_token: "<|video_pad|>"
   audio_locator: "<|AUDIO|>"
@@ -81,9 +97,9 @@ model:
     top_p: 1
 
 optim:
-  name: adafactor  # Memory-efficient optimizer
+  name: adafactor
   lr: 1e-4
-  weight_decay: 0  # Required by training script
+  weight_decay: 0
   scale_parameter: false
   relative_step: false
   warmup_init: false

@@ -57,8 +57,8 @@ class DeSTA25Trainer(Trainer):
         inputs["global_step"] = self.state.global_step
         
         outputs = model(**inputs)
-        lm_loss = outputs.loss
-        total_loss = lm_loss
+        lm_loss = getattr(outputs, "lm_loss", outputs.loss)
+        total_loss = outputs.loss
         
         # Prepare comprehensive logging dictionary
         log_dict = {
@@ -73,41 +73,25 @@ class DeSTA25Trainer(Trainer):
         
         orca_total = 0.0
         if config is not None:
-            # Check for ORCA mode using connector_mode
             connector_mode = getattr(config, "connector_mode", "")
-            is_orca = connector_mode == "orca_hybrid"
-            is_orca_r1 = connector_mode == "orca_r1"
+            is_orca_desta = connector_mode in ("orca_desta", "orca_r1")
             
-            if is_orca:
-                orca_losses = getattr(outputs, "orca_losses", None)
-                if orca_losses is not None:
-                    for name, l in orca_losses.items():
-                        if l is not None:
-                            total_loss = total_loss + l
-                            orca_total += l.item()
-                            # Log weighted loss
-                            log_dict[f"train/{name}"] = l.item()
-                    
-                    # Log total ORCA loss
-                    if orca_total > 0:
-                        log_dict["train/orca_total"] = orca_total
-            
-            elif is_orca_r1:
-                # ORCA-R1: losses are already added to outputs.loss in forward()
-                # Here we just read the detached values for logging (no gradient flow)
-                orca_loss_log = getattr(actual_model, "_orca_r1_loss_log", None)
-                orca_total = getattr(actual_model, "_orca_r1_loss_total", 0.0)
+            if is_orca_desta:
+                # ORCA-DeSTA losses are already added to outputs.loss in forward().
+                # Here we only read detached values for logging.
+                orca_loss_log = getattr(actual_model, "_orca_desta_loss_log", None)
+                orca_total = getattr(actual_model, "_orca_desta_loss_total", 0.0)
                 
                 if orca_loss_log is not None:
                     for name, value in orca_loss_log.items():
                         log_dict[f"train/{name}"] = value
                     
                     if orca_total > 0:
-                        log_dict["train/orca_r1_total"] = orca_total
+                        log_dict["train/orca_desta_total"] = orca_total
                     
                     # Clear after logging
-                    actual_model._orca_r1_loss_log = None
-                    actual_model._orca_r1_loss_total = 0.0
+                    actual_model._orca_desta_loss_log = None
+                    actual_model._orca_desta_loss_total = 0.0
         
         # Log total loss and loss breakdown
         log_dict["train/loss"] = total_loss.item()

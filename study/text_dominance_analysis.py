@@ -150,7 +150,7 @@ def load_model(model_id):
 def _get_audio_token_size(model):
     """Determine how many tokens the audio connector produces."""
     cfg = model.config
-    if cfg.connector_mode == "orca_r1":
+    if cfg.connector_mode in ("orca_desta", "orca_r1"):
         return cfg.orca_r1_num_groups * cfg.orca_r1_queries_per_group
     return cfg.prompt_size
 
@@ -242,31 +242,7 @@ def compute_target_log_prob(model, feat_extractor, audio_array, sr,
         batch_start_positions=batch_start_positions,
     )
 
-    # Handle ORCA mode
-    is_orca = model.config.connector_mode == "orca_hybrid"
-    if is_orca and isinstance(prepare_result, tuple) and len(prepare_result) >= 3:
-        inputs_embeds = prepare_result[0]
-        # Set deep injection tokens if needed
-        if len(prepare_result) == 4:
-            _, global_tok, local_tok, trans_pos = prepare_result
-        else:
-            _, global_tok, local_tok = prepare_result
-            trans_pos = None
-        model._orca_transcription_positions = trans_pos
-        if getattr(model.config, 'orca_deep_injection_enabled', True):
-            if getattr(model.config, 'orca_global_cross_attn', False):
-                if local_tok is not None and global_tok is not None:
-                    model._orca_audio_local = torch.cat([global_tok, local_tok], dim=1)
-                elif global_tok is not None:
-                    model._orca_audio_local = global_tok
-                else:
-                    model._orca_audio_local = local_tok
-            else:
-                model._orca_audio_local = local_tok
-        else:
-            model._orca_audio_local = None
-        model._orca_audio_local_mask = None
-    elif isinstance(prepare_result, tuple):
+    if isinstance(prepare_result, tuple):
         inputs_embeds = prepare_result[0]
     else:
         inputs_embeds = prepare_result

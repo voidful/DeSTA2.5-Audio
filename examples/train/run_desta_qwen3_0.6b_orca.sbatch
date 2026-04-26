@@ -37,11 +37,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-0.6b_ORCAHybrid
+config=desta25_qwen3-0.6b_ORCA
 dataset_config=DestaAQA-5M_0.6b_orca
 
-project=desta25_qwen3_0.6b_orca
-name="qwen3-0.6b-inorca-r1"
+project=desta25_qwen3_0.6b_orca_desta
+name="qwen3-0.6b-orca-desta"
 output_root="/work/voidful2nlp/desta/outputs/${project}"
 
 # ===== 自動檢測並 Resume Checkpoint =====

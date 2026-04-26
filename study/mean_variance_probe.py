@@ -235,7 +235,7 @@ def extract_representations(model, fe, items):
               "— will extract global_tokens only.")
     enc = model.perception.whisper.model.encoder
     enc_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
-    is_orca = model.config.connector_mode in ("orca_r1", "orca_hybrid")
+    is_orca = model.config.connector_mode in ("orca_desta", "orca_r1")
 
     all_mu, all_lv, all_z, all_gt = [], [], [], []
     for i, item in enumerate(tqdm(items, desc="Extracting representations")):

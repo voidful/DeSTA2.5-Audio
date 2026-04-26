@@ -439,9 +439,9 @@ def main():
 
     # Verify this is an ORCA model
     connector_mode = model.config.connector_mode
-    if connector_mode not in ("orca_r1", "orca_hybrid"):
+    if connector_mode not in ("orca_desta", "orca_r1"):
         raise ValueError(f"Model connector_mode is '{connector_mode}', "
-                         f"but this script requires ORCA (orca_r1 or orca_hybrid).")
+                         f"but this script requires ORCA-DeSTA (orca_desta).")
 
     connector = model.perception.connector
     num_groups = connector.num_groups

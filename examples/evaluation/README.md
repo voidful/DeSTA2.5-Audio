@@ -4,9 +4,9 @@
 
 The evaluation scripts (`mmau_eval.py` and `sakura_eval.py`) automatically load model configuration from the pretrained checkpoint using `DeSTA25AudioModel.from_pretrained()`.
 
-## Expected ORCA Configuration
+## Expected ORCA-DeSTA Configuration
 
-When evaluating models trained with the current ORCA architecture, ensure your checkpoint includes:
+When evaluating models trained with the paper method, ensure your checkpoint includes:
 
 ### **Model Components**
 
@@ -20,34 +20,28 @@ llm:
   freeze: true
 
 connector:
-  mode: orca_hybrid
+  mode: orca_desta
 ```
 
-### **ORCA Settings**
+### **ORCA-DeSTA Settings**
 
 ```yaml
-orca:
+orca_desta:
+  num_groups: 8
+  queries_per_group: 8
+  inter_group_weight: 0.1
+  intra_group_weight: 0.01
+
+variational_grouping:
   enabled: true
-  
-  # Global Branch
-  global_num_tokens: 64
-  global_cross_attn: true
-  target_layer_ids: [7, 15, 23, 31]  # 4 selected layers
-  
-  # Local Branch
-  local_enabled: true
-  local_downsample: 4                # 4x downsample for efficiency
-  local_kernel_size: 5
-  
-  # Deep Injection
-  deep_injection_enabled: true
-  gate_init: 0.1
-  audio_position_scale: 2.5          # Adjusted for 4x downsample
-  
-  # Losses (with Global-Local orthogonality)
-  ortho_diversity_weight: 0.05       # L_ortho_diversity
-  ortho_weight_qformer_local: 0.05   # L_ortho_qformer_local (new!)
-  align_weight_local: 0.05           # L_align_layerwise
+  kl_weight: 0.01
+
+modality_dpo:
+  enabled: true
+  beta: 0.1
+
+asr_dropout:
+  prob: 0.2
 ```
 
 ## Usage
@@ -118,8 +112,11 @@ from desta import DeSTA25AudioModel
 
 model = DeSTA25AudioModel.from_pretrained("your_model_id")
 print(f"Whisper: {model.config.encoder_model_id}")
-print(f"Local downsample: {model.config.orca_local_downsample}")
-print(f"Target layers: {model.connector.target_layer_ids}")
+print(f"Connector mode: {model.config.connector_mode}")
+print(f"Groups: {model.config.orca_r1_num_groups}")
+print(f"Queries/group: {model.config.orca_r1_queries_per_group}")
+print(f"Variational: {model.config.variational_grouping_enabled}")
+print(f"ACP: {model.config.modality_dpo_enabled}")
 ```
 
 ### OOM Issues

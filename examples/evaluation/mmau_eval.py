@@ -1141,7 +1141,7 @@ def main():
             # Compute query diagnostics
             connector_mode = model.config.connector_mode
             mean_cos_sim = None
-            if connector_mode in ("orca_r1", "orca_hybrid"):
+            if connector_mode in ("orca_desta", "orca_r1"):
                 queries = extract_query_vectors_from_mmau(model, ds, device)
                 mean_cos_sim = compute_mean_offdiag_cosine_similarity(queries)
 

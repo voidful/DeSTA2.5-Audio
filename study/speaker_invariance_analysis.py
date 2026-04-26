@@ -207,7 +207,7 @@ def extract_query_vectors(model, processor, items, device,
     K = model.config.prompt_size
     encoder_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
     target_layer_ids = _get_target_layer_ids(encoder_id)
-    is_orca = model.config.connector_mode in ["orca_r1", "orca_hybrid"]
+    is_orca = model.config.connector_mode in ["orca_desta", "orca_r1"]
 
     if is_orca and not use_projected:
         print("ℹ️  ORCA connectors fuse projection — using projected tokens.")
@@ -581,7 +581,7 @@ def main():
     connector_mode   = model.config.connector_mode
     num_groups       = getattr(model.config, "orca_r1_num_groups", None)
     queries_per_group = getattr(model.config, "orca_r1_queries_per_group", None)
-    is_orca = connector_mode in ["orca_r1", "orca_hybrid"]
+    is_orca = connector_mode in ["orca_desta", "orca_r1"]
 
     del model, processor
     free_mem()

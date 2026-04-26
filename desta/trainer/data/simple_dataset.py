@@ -337,10 +337,10 @@ class BaseAudioTextDataset:
         self.tokenizer = tokenizer
         self.processor = processor
         
-        # ORCA configuration: use global_num_tokens for audio size in ORCA mode
         self.connector_mode = cfg.model.connector.mode
-        orca_cfg = cfg.model.get("orca", {})
-        self.orca_global_num_tokens = orca_cfg.get("global_num_tokens", 4)
+        orca_cfg = cfg.model.get("orca_desta", cfg.model.get("orca_r1", {}))
+        self.orca_num_groups = orca_cfg.get("num_groups", 8)
+        self.orca_queries_per_group = orca_cfg.get("queries_per_group", 8)
         
         model_cfg = cfg.model
         if isinstance(model_cfg, DictConfig):
@@ -659,9 +659,8 @@ class BaseAudioTextDataset:
                     self._first_missing_audio_logged = True
                 continue
 
-            # Use appropriate audio size based on connector mode
-            if self.connector_mode == "orca_hybrid":
-                audio_size = self.orca_global_num_tokens
+            if self.connector_mode in ("orca_desta", "orca_r1"):
+                audio_size = self.orca_num_groups * self.orca_queries_per_group
             else:
                 audio_size = self.prompt_size
             audio_size_list = [audio_size] * len(new_audios)

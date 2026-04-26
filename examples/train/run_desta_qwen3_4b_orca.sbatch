@@ -38,8 +38,8 @@ ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
 config=desta25_qwen3-4B_ORCA
 dataset_config=DestaAQA-5M_local
 
-project=desta25_qwen3_4b_orca
-name="qwen3-4b-inorca-r1"
+project=desta25_qwen3_4b_orca_desta
+name="qwen3-4b-orca-desta"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
