@@ -131,7 +131,34 @@ def load_model(model_id):
     from desta.models.modeling_desta25 import DeSTA25AudioModel
     from transformers import AutoFeatureExtractor
     dtype = torch.float16 if device == "cuda" else torch.float32
-    model = DeSTA25AudioModel.from_pretrained(model_id, torch_dtype=dtype)
+
+    # Pre-check: if config says variational=False but checkpoint has mu_proj weights,
+    # override the config BEFORE model construction so the layers are created.
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    if not getattr(cfg, "variational_grouping_enabled", False):
+        # Peek at the checkpoint keys to see if variational weights exist
+        import glob
+        from safetensors import safe_open
+        ckpt_dir = model_id
+        try:
+            from huggingface_hub import snapshot_download
+            ckpt_dir = snapshot_download(model_id, allow_patterns=["*.safetensors", "*.bin"])
+        except Exception:
+            pass
+        st_files = glob.glob(os.path.join(ckpt_dir, "*.safetensors"))
+        has_mu_proj = False
+        for sf in st_files:
+            with safe_open(sf, framework="pt") as f:
+                if any("mu_proj" in k for k in f.keys()):
+                    has_mu_proj = True
+                    break
+        if has_mu_proj:
+            print("🔧 Config says variational_grouping_enabled=False but mu_proj weights "
+                  "found in checkpoint. Overriding to True.")
+            cfg.variational_grouping_enabled = True
+
+    model = DeSTA25AudioModel.from_pretrained(model_id, config=cfg, torch_dtype=dtype)
     model.to(device).eval()
     enc_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
     fe = AutoFeatureExtractor.from_pretrained(enc_id)
