@@ -128,22 +128,27 @@ def load_cremad(num_samples, seed):
 
 # ── model + representation extraction ──────────────────────────────────
 def load_model(model_id):
-    from desta.models.modeling_desta25 import DeSTA25AudioModel
+    from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config
     from transformers import AutoFeatureExtractor
     dtype = torch.float16 if device == "cuda" else torch.float32
 
     # Pre-check: if config says variational=False but checkpoint has mu_proj weights,
     # override the config BEFORE model construction so the layers are created.
-    from transformers import AutoConfig
-    cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    cfg = DeSTA25Config.from_pretrained(model_id, cache_dir=os.getenv("HF_HOME"))
     if not getattr(cfg, "variational_grouping_enabled", False):
         # Peek at the checkpoint keys to see if variational weights exist
         import glob
         from safetensors import safe_open
         ckpt_dir = model_id
         try:
-            from huggingface_hub import snapshot_download
-            ckpt_dir = snapshot_download(model_id, allow_patterns=["*.safetensors", "*.bin"])
+            from huggingface_hub import hf_hub_download
+            ckpt_dir = os.path.dirname(
+                hf_hub_download(
+                    repo_id=model_id,
+                    filename="model.safetensors",
+                    cache_dir=os.getenv("HF_HOME"),
+                )
+            )
         except Exception:
             pass
         st_files = glob.glob(os.path.join(ckpt_dir, "*.safetensors"))

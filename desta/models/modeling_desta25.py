@@ -2309,7 +2309,9 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         cache_dir = kwargs.get("cache_dir", os.getenv("HF_HOME"))
 
-        config = cls.config_class.from_pretrained(pretrained_model_name_or_path, cache_dir=cache_dir)
+        config = kwargs.pop("config", None)
+        if config is None:
+            config = cls.config_class.from_pretrained(pretrained_model_name_or_path, cache_dir=cache_dir)
 
         model = cls(config)
         
