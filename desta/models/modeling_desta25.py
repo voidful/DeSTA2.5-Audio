@@ -2316,14 +2316,19 @@ class DeSTA25AudioModel(PreTrainedModel):
         model = cls(config)
         
         if os.path.isdir(pretrained_model_name_or_path):
-            model.load_state_dict(
-                load_file(os.path.join(pretrained_model_name_or_path, "model.safetensors")), strict=False
-            )
+            path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
         else:
             from huggingface_hub import hf_hub_download
             path = hf_hub_download(repo_id=pretrained_model_name_or_path, filename="model.safetensors", cache_dir=cache_dir)
-            model.load_state_dict(
-                load_file(path), strict=False
-            )
+
+        state_dict = load_file(path)
+        load_result = model.load_state_dict(state_dict, strict=False)
+        model._desta_load_missing_keys = list(load_result.missing_keys)
+        model._desta_load_unexpected_keys = list(load_result.unexpected_keys)
+        model._desta_checkpoint_variational_keys = [
+            key for key in state_dict
+            if "mu_proj" in key or "logvar_proj" in key
+        ]
+        del state_dict
 
         return model

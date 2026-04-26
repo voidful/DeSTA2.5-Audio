@@ -53,6 +53,13 @@ SEED = 42
 PCA_DIM = 128          # same for every representation
 N_VERIFY_PAIRS = 4000  # positive + negative speaker-verification pairs
 device = "cuda" if torch.cuda.is_available() else "cpu"
+VARIATIONAL_KEY_MARKERS = (
+    "mu_proj",
+    "logvar_proj",
+    "log_var_proj",
+    "logsigma_proj",
+    "log_sigma_proj",
+)
 
 # ── helpers ────────────────────────────────────────────────────────────
 def set_seed(s):
@@ -127,7 +134,7 @@ def load_cremad(num_samples, seed):
     return items
 
 # ── model + representation extraction ──────────────────────────────────
-def load_model(model_id):
+def load_model(model_id, force_variational=False):
     from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config
     from transformers import AutoFeatureExtractor
     dtype = torch.float16 if device == "cuda" else torch.float32
@@ -135,6 +142,9 @@ def load_model(model_id):
     # Pre-check: if config says variational=False but checkpoint has mu_proj weights,
     # override the config BEFORE model construction so the layers are created.
     cfg = DeSTA25Config.from_pretrained(model_id, cache_dir=os.getenv("HF_HOME"))
+    if force_variational and not getattr(cfg, "variational_grouping_enabled", False):
+        print("🔧 --force_variational set. Overriding variational_grouping_enabled=True before model construction.")
+        cfg.variational_grouping_enabled = True
     if not getattr(cfg, "variational_grouping_enabled", False):
         # Peek at the checkpoint keys to see if variational weights exist
         import glob
@@ -152,19 +162,37 @@ def load_model(model_id):
         except Exception:
             pass
         st_files = glob.glob(os.path.join(ckpt_dir, "*.safetensors"))
-        has_mu_proj = False
+        variational_keys = []
         for sf in st_files:
             with safe_open(sf, framework="pt") as f:
-                if any("mu_proj" in k for k in f.keys()):
-                    has_mu_proj = True
+                variational_keys.extend(
+                    k for k in f.keys()
+                    if any(marker in k for marker in VARIATIONAL_KEY_MARKERS)
+                )
+                if variational_keys:
                     break
-        if has_mu_proj:
+        if variational_keys:
             print("🔧 Config says variational_grouping_enabled=False but mu_proj weights "
                   "found in checkpoint. Overriding to True.")
             cfg.variational_grouping_enabled = True
 
     model = DeSTA25AudioModel.from_pretrained(model_id, config=cfg, torch_dtype=dtype)
     model.to(device).eval()
+    connector = model.perception.connector
+    has_variational_params = _connector_has_variational_params(connector)
+    loaded_var_keys = getattr(model, "_desta_checkpoint_variational_keys", [])
+    if has_variational_params and not getattr(connector, "variational_enabled", False):
+        print("🔧 Connector has mu_proj/logvar_proj modules but variational_enabled=False. "
+              "Enabling variational extraction for this probe.")
+        connector.variational_enabled = True
+        model.config.variational_grouping_enabled = True
+    print(f"  Connector mode: {model.config.connector_mode}")
+    print(f"  Variational flag: {getattr(connector, 'variational_enabled', False)} | "
+          f"params present: {has_variational_params}")
+    print(f"  Variational checkpoint keys loaded: {len(loaded_var_keys)}")
+    if force_variational and not loaded_var_keys:
+        print("  ⚠️  --force_variational created mu/logvar modules, but no matching "
+              "mu_proj/logvar_proj weights were found in the checkpoint.")
     enc_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
     fe = AutoFeatureExtractor.from_pretrained(enc_id)
     return model, fe
@@ -183,6 +211,9 @@ def _forward_whisper_encoder_layer(model, encoder_layer, hidden):
     layer_outputs = encoder_layer(hidden, attention_mask=None)
     return layer_outputs[0] if isinstance(layer_outputs, (tuple, list)) else layer_outputs
 
+def _connector_has_variational_params(connector):
+    return hasattr(connector, "mu_proj") and hasattr(connector, "logvar_proj")
+
 @torch.inference_mode()
 def extract_representations(model, fe, items):
     """
@@ -190,9 +221,12 @@ def extract_representations(model, fe, items):
     each np.ndarray [N, D] (mean-pooled over token dim).
     """
     connector = model.perception.connector
-    var_ok = getattr(connector, "variational_enabled", False)
+    var_ok = getattr(connector, "variational_enabled", False) or _connector_has_variational_params(connector)
+    if var_ok and not getattr(connector, "variational_enabled", False):
+        connector.variational_enabled = True
     if not var_ok:
-        print("⚠️  variational_enabled=False — will extract global_tokens only.")
+        print("⚠️  variational_enabled=False and no mu_proj/logvar_proj modules were found "
+              "— will extract global_tokens only.")
     enc = model.perception.whisper.model.encoder
     enc_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
     is_orca = model.config.connector_mode in ("orca_r1", "orca_hybrid")
@@ -465,6 +499,8 @@ def main():
     p.add_argument("--out_dir", type=str, default="study/output_mv_probe")
     p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--skip_pitch", action="store_true")
+    p.add_argument("--force_variational", action="store_true",
+                   help="Force construction of mu/logvar modules even if config disables variational grouping")
     args = p.parse_args()
 
     set_seed(args.seed)
@@ -480,7 +516,7 @@ def main():
         pitches = [extract_pitch(it["audio"], it["sr"]) for it in tqdm(items, desc="Pitch")]
 
     # 3. Load model & extract representations
-    model, fe = load_model(args.model_id)
+    model, fe = load_model(args.model_id, force_variational=args.force_variational)
     reps_raw = extract_representations(model, fe, items)
     del model; free_mem()
     print(f"  Representation shapes: { {k: v.shape for k, v in reps_raw.items()} }")
