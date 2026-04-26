@@ -967,6 +967,8 @@ class DeSTA25AudioModel(PreTrainedModel):
             # Attach losses to outputs
             outputs.orca_losses = orca_loss_log
             outputs.orca_total_loss = orca_total
+            self._orca_r1_loss_log = orca_loss_log
+            self._orca_r1_loss_total = orca_total
             
             return outputs
             
@@ -2327,7 +2329,13 @@ class DeSTA25AudioModel(PreTrainedModel):
         model._desta_load_unexpected_keys = list(load_result.unexpected_keys)
         model._desta_checkpoint_variational_keys = [
             key for key in state_dict
-            if "mu_proj" in key or "logvar_proj" in key
+            if (
+                "mu_proj" in key
+                or "logvar_proj" in key
+                or "log_var_proj" in key
+                or "logsigma_proj" in key
+                or "log_sigma_proj" in key
+            )
         ]
         del state_dict
 

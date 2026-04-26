@@ -100,6 +100,137 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
     
     # Extract ORCA-R1 config if present
     orca_r1_cfg = cfg.model.get("orca_r1", {})
+
+    # Extract variational/S1 config. Older experiment YAMLs used a few names,
+    # so accept all of them and map to DeSTA25Config's flat fields.
+    variational_cfg = cfg.model.get("variational_grouping", cfg.model.get("variational", {}))
+    orca_variational_cfg = orca_r1_cfg.get("variational_grouping", orca_r1_cfg.get("variational", {}))
+    s1_cfg = cfg.model.get("s1", cfg.model.get("s1_variational", {}))
+    orca_s1_cfg = orca_r1_cfg.get("s1", orca_r1_cfg.get("s1_variational", {}))
+    variational_grouping_enabled = cfg.model.get(
+        "variational_grouping_enabled",
+        variational_cfg.get(
+            "enabled",
+            orca_variational_cfg.get(
+                "enabled",
+                orca_r1_cfg.get("variational_grouping_enabled", False),
+            ),
+        ),
+    )
+    variational_kl_weight = cfg.model.get(
+        "variational_kl_weight",
+        variational_cfg.get(
+            "kl_weight",
+            orca_variational_cfg.get(
+                "kl_weight",
+                orca_r1_cfg.get("variational_kl_weight", 0.01),
+            ),
+        ),
+    )
+    s1_kl_annealing_enabled = cfg.model.get(
+        "s1_kl_annealing_enabled",
+        s1_cfg.get(
+            "kl_annealing_enabled",
+            orca_s1_cfg.get(
+                "kl_annealing_enabled",
+                orca_r1_cfg.get("s1_kl_annealing_enabled", False),
+            ),
+        ),
+    )
+    s1_kl_annealing_warmup_steps = cfg.model.get(
+        "s1_kl_annealing_warmup_steps",
+        s1_cfg.get(
+            "kl_annealing_warmup_steps",
+            orca_s1_cfg.get(
+                "kl_annealing_warmup_steps",
+                orca_r1_cfg.get("s1_kl_annealing_warmup_steps", 2000),
+            ),
+        ),
+    )
+    s1_kl_annealing_cycle_steps = cfg.model.get(
+        "s1_kl_annealing_cycle_steps",
+        s1_cfg.get(
+            "kl_annealing_cycle_steps",
+            orca_s1_cfg.get(
+                "kl_annealing_cycle_steps",
+                orca_r1_cfg.get("s1_kl_annealing_cycle_steps", 0),
+            ),
+        ),
+    )
+    s1_free_bits = cfg.model.get(
+        "s1_free_bits",
+        s1_cfg.get(
+            "free_bits",
+            orca_s1_cfg.get(
+                "free_bits",
+                orca_r1_cfg.get("s1_free_bits", 0.0),
+            ),
+        ),
+    )
+    s1_mu_invariance_enabled = cfg.model.get(
+        "s1_mu_invariance_enabled",
+        s1_cfg.get(
+            "mu_invariance_enabled",
+            orca_s1_cfg.get(
+                "mu_invariance_enabled",
+                orca_r1_cfg.get("s1_mu_invariance_enabled", False),
+            ),
+        ),
+    )
+    s1_mu_invariance_weight = cfg.model.get(
+        "s1_mu_invariance_weight",
+        s1_cfg.get(
+            "mu_invariance_weight",
+            orca_s1_cfg.get(
+                "mu_invariance_weight",
+                orca_r1_cfg.get("s1_mu_invariance_weight", 0.1),
+            ),
+        ),
+    )
+    s1_inference_alpha = cfg.model.get(
+        "s1_inference_alpha",
+        s1_cfg.get(
+            "inference_alpha",
+            orca_s1_cfg.get(
+                "inference_alpha",
+                orca_r1_cfg.get("s1_inference_alpha", 0.5),
+            ),
+        ),
+    )
+    s1_augment_freq_mask = cfg.model.get(
+        "s1_augment_freq_mask",
+        s1_cfg.get(
+            "augment_freq_mask",
+            orca_s1_cfg.get(
+                "augment_freq_mask",
+                orca_r1_cfg.get("s1_augment_freq_mask", 0.1),
+            ),
+        ),
+    )
+    s1_augment_time_mask = cfg.model.get(
+        "s1_augment_time_mask",
+        s1_cfg.get(
+            "augment_time_mask",
+            orca_s1_cfg.get(
+                "augment_time_mask",
+                orca_r1_cfg.get("s1_augment_time_mask", 0.1),
+            ),
+        ),
+    )
+    modality_dpo_cfg = cfg.model.get("modality_dpo", {})
+    modality_dpo_enabled = cfg.model.get(
+        "modality_dpo_enabled",
+        modality_dpo_cfg.get("enabled", orca_r1_cfg.get("modality_dpo_enabled", False)),
+    )
+    modality_dpo_beta = cfg.model.get(
+        "modality_dpo_beta",
+        modality_dpo_cfg.get("beta", orca_r1_cfg.get("modality_dpo_beta", 0.1)),
+    )
+    asr_dropout_cfg = cfg.model.get("asr_dropout", {})
+    asr_dropout_prob = cfg.model.get(
+        "asr_dropout_prob",
+        asr_dropout_cfg.get("prob", orca_r1_cfg.get("asr_dropout_prob", 0.0)),
+    )
     
     model_config = DeSTA25Config(
         llm_model_id=cfg.model.llm.model_id,
@@ -108,6 +239,7 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         qformer_num_hidden_layers=cfg.model.connector.num_hidden_layers,
         prompt_size=cfg.model.connector.prompt_size,
         use_lora=getattr(cfg.model.llm, "use_lora", False),
+        use_flash_attention=cfg.model.connector.get("use_flash_attention", True),
         audio_locator=cfg.model.audio_locator,
         placeholder_token=cfg.model.placeholder_token,
         # ORCA-DeSTA configuration
@@ -131,6 +263,31 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         orca_r1_intra_group_weight=orca_r1_cfg.get("intra_group_weight", 0.01),
         orca_r1_iv_weight=orca_r1_cfg.get("iv_weight", 0.1),
         orca_r1_acd_alpha=orca_r1_cfg.get("acd_alpha", 0.5),
+        # Variational grouping / S1 configuration
+        variational_grouping_enabled=variational_grouping_enabled,
+        variational_kl_weight=variational_kl_weight,
+        s1_kl_annealing_enabled=s1_kl_annealing_enabled,
+        s1_kl_annealing_warmup_steps=s1_kl_annealing_warmup_steps,
+        s1_kl_annealing_cycle_steps=s1_kl_annealing_cycle_steps,
+        s1_free_bits=s1_free_bits,
+        s1_mu_invariance_enabled=s1_mu_invariance_enabled,
+        s1_mu_invariance_weight=s1_mu_invariance_weight,
+        s1_inference_alpha=s1_inference_alpha,
+        s1_augment_freq_mask=s1_augment_freq_mask,
+        s1_augment_time_mask=s1_augment_time_mask,
+        modality_dpo_enabled=modality_dpo_enabled,
+        modality_dpo_beta=modality_dpo_beta,
+        asr_dropout_prob=asr_dropout_prob,
+    )
+    logging.info(
+        "Variational grouping config: enabled=%s, kl_weight=%s, "
+        "s1_mu_invariance=%s, s1_kl_annealing=%s, modality_dpo=%s, asr_dropout=%s",
+        model_config.variational_grouping_enabled,
+        model_config.variational_kl_weight,
+        model_config.s1_mu_invariance_enabled,
+        model_config.s1_kl_annealing_enabled,
+        model_config.modality_dpo_enabled,
+        model_config.asr_dropout_prob,
     )
     
     model = DeSTA25AudioModel(model_config)

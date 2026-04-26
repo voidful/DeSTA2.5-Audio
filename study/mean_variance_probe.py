@@ -187,12 +187,18 @@ def load_model(model_id, force_variational=False):
         connector.variational_enabled = True
         model.config.variational_grouping_enabled = True
     print(f"  Connector mode: {model.config.connector_mode}")
+    print(f"  ACP / modality_dpo flag: {getattr(model.config, 'modality_dpo_enabled', False)} | "
+          f"beta: {getattr(model.config, 'modality_dpo_beta', None)}")
+    print(f"  ASR dropout prob: {getattr(model.config, 'asr_dropout_prob', 0.0)}")
     print(f"  Variational flag: {getattr(connector, 'variational_enabled', False)} | "
           f"params present: {has_variational_params}")
     print(f"  Variational checkpoint keys loaded: {len(loaded_var_keys)}")
     if force_variational and not loaded_var_keys:
-        print("  ⚠️  --force_variational created mu/logvar modules, but no matching "
-              "mu_proj/logvar_proj weights were found in the checkpoint.")
+        raise RuntimeError(
+            "--force_variational created mu/logvar modules, but no matching "
+            "mu_proj/logvar_proj weights were found in the checkpoint. "
+            "Stopping to avoid probing randomly initialized variational heads."
+        )
     enc_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
     fe = AutoFeatureExtractor.from_pretrained(enc_id)
     return model, fe
