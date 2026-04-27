@@ -11,6 +11,8 @@ setup(
         "transformers>=4.49.0",
         "safetensors",
         "omegaconf",
+        "datasets",
+        "librosa"
         "peft",
     ],
     description='DeSTA2.5-Audio',

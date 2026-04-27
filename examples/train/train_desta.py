@@ -265,7 +265,6 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
     )
 
 
-@hydra.main(config_path="config", config_name="desta25", version_base=None)
 def main(cfg: DictConfig):
     """Main training function."""
     # Setup
@@ -335,4 +334,49 @@ def main(cfg: DictConfig):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    import warnings
+    # Suppress UserWarning about interpolations when initially loading
+    warnings.filterwarnings("ignore", category=UserWarning, module="omegaconf")
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config-path", type=str, default="config")
+    parser.add_argument("--config-name", type=str, default="desta25")
+    args, unknown = parser.parse_known_args()
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    main_config_path = os.path.join(base_dir, args.config_path, f"{args.config_name}.yaml")
+    
+    if not os.path.exists(main_config_path):
+        raise FileNotFoundError(f"Config file not found: {main_config_path}")
+        
+    cfg = OmegaConf.load(main_config_path)
+    
+    # Process unknown args to find overrides and additional configs (like +dataset=)
+    cli_args = []
+    for arg in unknown:
+        # Strip hydra's + or ++ prefixes
+        clean_arg = arg.lstrip("+")
+            
+        # Check if it's loading a sub-config, e.g. dataset=DestaAQA-5M_4b_ablation
+        if "=" in clean_arg:
+            key, val = clean_arg.split("=", 1)
+            # Check if this maps to a yaml file in the subfolder (e.g. config/dataset/XYZ.yaml)
+            sub_config_path = os.path.join(base_dir, args.config_path, key, f"{val}.yaml")
+            if os.path.exists(sub_config_path):
+                sub_cfg = OmegaConf.load(sub_config_path)
+                # Assign sub-config to the key in the main config
+                cfg[key] = sub_cfg
+                continue
+                
+        cli_args.append(clean_arg)
+        
+    # Apply CLI overrides
+    if cli_args:
+        cli_cfg = OmegaConf.from_cli(cli_args)
+        cfg = OmegaConf.merge(cfg, cli_cfg)
+        
+    # Resolve interpolations
+    OmegaConf.resolve(cfg)
+    
+    main(cfg)
