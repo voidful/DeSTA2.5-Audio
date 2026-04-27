@@ -1,13 +1,17 @@
 ##############################################################################
 # Ablation Exp 4: Full Model (All Components + ASR Dropout)
 #
-# Complete ORCA-DeSTA with all three proposed components plus ASR dropout:
-#   1. Groupwise Orthogonality (inter/intra losses)
-#   2. Stochastic Perturbation Encoding (variational + KL annealing)
-#   3. Acoustic-Contrastive Preference (Modality-DPO)
-#   4. ASR Transcript Dropout (p=0.2)
+# Complete ORCA-DeSTA with all three proposed components plus ASR dropout
+# (p=0.2). Matches the base config; this file only relabels the run.
 #
 # Paper reference: Section 5.2 (Table 5)
-# - Full model achieves 61.60% total on MMAU-mini
-# - ASR dropout recovers Sound/Music degradation from stochastic perturbation
 ##############################################################################
+
+defaults:
+  - desta25_qwen3-4B_ORCA
+
+project: desta25_ablation
+name: ablation_4_full_model
+
+wandb:
+  project: desta25_ablation

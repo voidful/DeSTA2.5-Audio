@@ -1,16 +1,22 @@
 ##############################################################################
 # Ablation Exp 3: + Groupwise Orthogonality + ACP + Stochastic Perturbation
-#                  (Components 1+3+2)
+#                 (Components 1+3+2)
 #
-# Adds Stochastic Perturbation Encoding on top of orthogonality + ACP.
-# Each connector token is represented as a diagonal Gaussian during
-# training, reducing deterministic point collapse for acoustic variants.
+# Adds Stochastic Perturbation Encoding on top of orthogonality + ACP. Each
+# connector token is represented as a diagonal Gaussian during training.
 #
 # Paper reference: Section 4.3 (Stochastic Perturbation Encoding)
-# - Reparameterization: z = μ + σ ⊙ ε, ε ~ N(0,I)
-# - KL penalty with free bits and warmup annealing
-# - Inference uses deterministic μ (alpha=0)
-#
-# Note: The paper shows this configuration achieves highest Speech accuracy
-# but can slightly degrade Sound/Music due to noise injection.
 ##############################################################################
+
+defaults:
+  - desta25_qwen3-4B_ORCA
+
+project: desta25_ablation
+name: ablation_3_plus_stochastic
+
+wandb:
+  project: desta25_ablation
+
+model:
+  asr_dropout:
+    prob: 0.0

@@ -1,0 +1,92 @@
+hydra:
+  run:
+    dir: ${exp_dir}
+
+
+project: desta25_qwen3_4b_orca_desta
+name: desta25_qwen3_4b_orca_desta
+exp_dir: ???
+
+resume_from_checkpoint: null
+init_from_pretrained_weights: null
+
+ptl_module: default
+
+wandb:
+  project: desta25_qwen3_4b_orca_desta
+  log_model: all
+
+trainer:
+  devices: [0,1,2,3,]
+  num_nodes: 1
+  max_epochs: 5
+  max_steps: -1
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"
+  accelerator: gpu
+  log_every_n_steps: 10
+  val_check_interval: 0.5
+  num_sanity_val_steps: 0
+  enable_checkpointing: True
+
+
+model:
+  llm:
+    model_id: Qwen/Qwen3-4B-Instruct-2507
+    freeze: True
+
+  encoder:
+    model_id: openai/whisper-large-v3
+    freeze: True
+
+  connector:
+    mode: orca_desta
+    prompt_size: 64
+    num_hidden_layers: 6
+    use_flash_attention: true
+
+  orca_desta:
+    num_groups: 8
+    queries_per_group: 8
+    inter_group_weight: 0.1
+    intra_group_weight: 0.01
+
+  variational_grouping:
+    enabled: true
+    kl_weight: 0.01
+
+  s1:
+    kl_annealing_enabled: true
+    kl_annealing_warmup_steps: 2000
+    kl_annealing_cycle_steps: 0
+    free_bits: 0.1
+    inference_alpha: 0.0
+
+  modality_dpo:
+    enabled: true
+    beta: 0.1
+
+  asr_dropout:
+    prob: 0.2
+
+
+  placeholder_token: "<|video_pad|>"
+  audio_locator: "<|AUDIO|>"
+
+  generation_kwargs:
+    max_new_tokens: 512
+    do_sample: False
+    temperature: 1
+    top_p: 1
+
+optim:
+  name: adafactor
+  lr: 1e-4
+  weight_decay: 0
+  scale_parameter: false
+  relative_step: false
+  warmup_init: false
+
+  sched:
+    warmup_steps: 5000

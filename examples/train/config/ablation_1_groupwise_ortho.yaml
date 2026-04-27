@@ -1,11 +1,26 @@
 ##############################################################################
 # Ablation Exp 1: + Groupwise Orthogonality (Component 1)
 #
-# Adds inter-group and intra-group orthogonality losses on top of baseline.
-# This reduces query redundancy by encouraging different groups to encode
-# complementary information.
+# Adds inter/intra-group orthogonality losses on top of baseline. Reduces
+# query redundancy by encouraging different groups to encode complementary
+# information.
 #
 # Paper reference: Section 4.2 (Groupwise Orthogonal Connector)
-# - L_inter: penalizes similarity between group centroids
-# - L_intra: keeps within-group token similarity near moderate target
 ##############################################################################
+
+defaults:
+  - desta25_qwen3-4B_ORCA
+
+project: desta25_ablation
+name: ablation_1_groupwise_ortho
+
+wandb:
+  project: desta25_ablation
+
+model:
+  variational_grouping:
+    enabled: false
+  modality_dpo:
+    enabled: false
+  asr_dropout:
+    prob: 0.0

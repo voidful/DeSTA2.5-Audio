@@ -1,10 +1,33 @@
 ##############################################################################
 # Ablation Exp 0: Baseline (standard DeSTA Q-Former)
 #
-# This is the controlled DeSTA baseline for component ablation:
-#   - Standard Q-Former connector
+# Controlled DeSTA baseline for component ablation:
+#   - Standard Q-Former connector (not orca_desta)
 #   - No groupwise orthogonality
 #   - No stochastic perturbation encoding
 #   - No Acoustic-Contrastive Preference / Modality-DPO
 #   - No ASR dropout
 ##############################################################################
+
+defaults:
+  - desta25_qwen3-4B_ORCA
+
+project: desta25_ablation
+name: ablation_0_baseline_qformer
+
+wandb:
+  project: desta25_ablation
+
+model:
+  connector:
+    mode: qformer_1
+  # Ignored by qformer_1, but zeroed out for clarity.
+  orca_desta:
+    inter_group_weight: 0.0
+    intra_group_weight: 0.0
+  variational_grouping:
+    enabled: false
+  modality_dpo:
+    enabled: false
+  asr_dropout:
+    prob: 0.0
