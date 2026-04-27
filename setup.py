@@ -10,6 +10,7 @@ setup(
         "lulutils @ git+https://github.com/kehanlu/lulutils.git",
         "transformers>=4.49.0",
         "safetensors",
+        "omegaconf",
         "peft",
     ],
     description='DeSTA2.5-Audio',
