@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 
+
 class GradientReversal(torch.autograd.Function):
     """
-    Gradient Reversal Layer for adversarial training.
+    Gradient reversal layer used by legacy adversarial-erasure experiments.
     """
     @staticmethod
     def forward(ctx, x, alpha):
@@ -18,18 +19,18 @@ class GradientReversal(torch.autograd.Function):
             grad_input = -ctx.alpha * grad_output
         return grad_input, None
 
+
 class TranscriptionDiscriminator(nn.Module):
     """
-    Discriminator to predict transcription embedding from audio tokens.
-    Used for adversarial erasure of linguistic content.
+    Legacy discriminator for predicting transcription embeddings from audio tokens.
     """
     def __init__(self, hidden_size, output_size=None):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
-            nn.Linear(hidden_size, hidden_size if output_size is None else output_size)
+            nn.Linear(hidden_size, hidden_size if output_size is None else output_size),
         )
-        
+
     def forward(self, x):
         return self.net(x)

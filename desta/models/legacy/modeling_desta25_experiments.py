@@ -18,7 +18,7 @@ from transformers.models.bert.modeling_bert import BertEncoder
 from transformers import WhisperForConditionalGeneration, BertConfig
 from safetensors.torch import load_file
 import torch.distributed as dist
-from desta.models.helper_modules import GradientReversal, TranscriptionDiscriminator
+from desta.models.legacy.helper_modules import GradientReversal, TranscriptionDiscriminator
 
 
 

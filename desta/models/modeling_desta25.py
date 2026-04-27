@@ -738,7 +738,7 @@ class DeSTA25Config(PretrainedConfig):
                  s1_kl_annealing_warmup_steps=2000,
                  s1_kl_annealing_cycle_steps=0,  # 0 = no cycling, just linear warmup
                  s1_free_bits=0.0,  # Minimum KL per dimension to prevent σ collapse
-                 s1_inference_alpha=0.5,          # σ scaling for inference (0=deterministic, 1=full sampling)
+                 s1_inference_alpha=0.0,          # σ scaling for inference (0=deterministic, 1=full sampling)
                  
                  # Optimization flags
                  use_flash_attention=True,
@@ -1070,15 +1070,18 @@ class DeSTA25AudioModel(PreTrainedModel):
         Returns:
             [B] mean log probability over target tokens per sample
         """
-        labels = labels.clone()
-        loss_mask = labels != -100
-        labels[labels == -100] = 0  # Replace -100 with 0 for gather
+        # Match Hugging Face causal LM loss semantics: logits at position t
+        # predict the label at position t+1.
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:].clone()
+        loss_mask = shift_labels != -100
+        shift_labels[shift_labels == -100] = 0  # Replace -100 with 0 for gather
         
         # Get log probs for target tokens
         log_probs = torch.gather(
-            logits.log_softmax(-1), 
+            shift_logits.log_softmax(-1), 
             dim=2, 
-            index=labels.unsqueeze(2)
+            index=shift_labels.unsqueeze(2)
         ).squeeze(2)  # [B, T]
         
         token_counts = loss_mask.sum(-1).clamp_min(1)

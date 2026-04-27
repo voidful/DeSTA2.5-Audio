@@ -1,15 +1,12 @@
 ##############################################################################
-# Ablation Exp 0: Baseline (ORCA connector structure, NO aux losses)
+# Ablation Exp 0: Baseline (standard DeSTA Q-Former)
 #
-# This uses the GroupwiseOrthogonalConnector but disables all three
-# proposed components:
-#   - Groupwise Orthogonality losses (inter/intra weights = 0)
-#   - Stochastic Perturbation Encoding (variational = disabled)
-#   - Acoustic-Contrastive Preference / Modality-DPO (disabled)
-#   - ASR Dropout (prob = 0)
-#
-# This isolates the pure ORCA connector architecture effect without
-# any of the proposed training objectives.
+# This is the controlled DeSTA baseline for component ablation:
+#   - Standard Q-Former connector
+#   - No groupwise orthogonality
+#   - No stochastic perturbation encoding
+#   - No Acoustic-Contrastive Preference / Modality-DPO
+#   - No ASR dropout
 ##############################################################################
 hydra:
   run:
@@ -17,7 +14,7 @@ hydra:
 
 
 project: desta25_ablation
-name: ablation_0_baseline
+name: ablation_0_baseline_qformer
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -54,17 +51,17 @@ model:
     freeze: True
 
   connector:
-    mode: orca_desta
+    mode: qformer_1
     prompt_size: 64
     num_hidden_layers: 6
     use_flash_attention: true
 
-  # ORCA connector structure (groups exist, but no orthogonality losses)
+  # Ignored by qformer_1. Kept only so the ablation YAMLs share the same shape.
   orca_desta:
     num_groups: 8
     queries_per_group: 8
-    inter_group_weight: 0.0    # DISABLED: no inter-group orthogonality
-    intra_group_weight: 0.0    # DISABLED: no intra-group coherence
+    inter_group_weight: 0.0
+    intra_group_weight: 0.0
 
   # Component 2: Stochastic Perturbation Encoding — DISABLED
   variational_grouping:

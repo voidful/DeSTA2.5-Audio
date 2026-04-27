@@ -3,7 +3,7 @@
 # ORCA-DeSTA Component Ablation Study — SLURM Batch Script
 #
 # Runs 5 progressive ablation experiments (Table 5 in the paper):
-#   Exp 0: Baseline (ORCA connector, no aux losses)
+#   Exp 0: Baseline (standard DeSTA Q-Former)
 #   Exp 1: + Groupwise Orthogonality
 #   Exp 2: + ACP (Acoustic-Contrastive Preference)
 #   Exp 3: + Stochastic Perturbation Encoding
@@ -30,9 +30,52 @@
 set -e
 
 # ===== Environment Setup =====
+# Load module system (HPC clusters)
 module load anaconda 2>/dev/null || module load miniconda 2>/dev/null || true
-source activate desta25 2>/dev/null || conda activate desta25 2>/dev/null || true
-conda activate desta25-qwen3
+
+# Bootstrap conda shell functions (required in non-interactive sbatch shells)
+# Try, in order: CONDA_PREFIX (already active), module-set path, common HPC paths
+__conda_setup_done=0
+for __try_base in \
+    "${CONDA_PREFIX:-__none__}" \
+    "$(command -v conda 2>/dev/null | sed 's|/bin/conda$||')" \
+    "${HOME}/miniconda3" \
+    "${HOME}/anaconda3" \
+    "/opt/conda" \
+    "/usr/local/anaconda3" \
+    "/work/opt/conda"; do
+    [ "$__try_base" = "__none__" ] && continue
+    if [ -f "${__try_base}/etc/profile.d/conda.sh" ]; then
+        source "${__try_base}/etc/profile.d/conda.sh"
+        __conda_setup_done=1
+        echo "[env] conda initialised from ${__try_base}"
+        break
+    fi
+done
+if [ "$__conda_setup_done" -eq 0 ]; then
+    echo "[env] ERROR: cannot find conda installation. Aborting." >&2
+    exit 1
+fi
+unset __conda_setup_done __try_base
+
+# Target environment name
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-desta25-qwen3}"
+
+# Auto-create environment if it doesn't exist
+if ! conda env list | grep -qw "$CONDA_ENV_NAME"; then
+    echo "[env] Environment '$CONDA_ENV_NAME' not found. Creating..."
+    ENV_YML="/work/voidful2nlp/DeSTA2.5-Audio/environment.yml"
+    if [ -f "$ENV_YML" ]; then
+        conda env create -n "$CONDA_ENV_NAME" -f "$ENV_YML" -y
+    else
+        echo "[env] No environment.yml found — creating minimal env"
+        conda create -n "$CONDA_ENV_NAME" python=3.10 -y
+    fi
+fi
+
+# Activate
+conda activate "$CONDA_ENV_NAME"
+echo "[env] active env: $(conda info --envs | grep '*')"
 
 # Working directory
 cd /work/voidful2nlp/DeSTA2.5-Audio
@@ -61,7 +104,7 @@ ABLATION_EXPS="${ABLATION_EXPS:-0 1 2 3 4}"
 # Ablation experiment definitions
 # Format: config_name|experiment_label|description
 declare -A ABLATION_CONFIGS
-ABLATION_CONFIGS[0]="ablation_0_baseline|baseline|Baseline (no aux losses)"
+ABLATION_CONFIGS[0]="ablation_0_baseline|baseline_qformer|Baseline (standard DeSTA Q-Former)"
 ABLATION_CONFIGS[1]="ablation_1_groupwise_ortho|plus_ortho|+ Groupwise Orthogonality"
 ABLATION_CONFIGS[2]="ablation_2_plus_acp|plus_acp|+ ACP"
 ABLATION_CONFIGS[3]="ablation_3_plus_stochastic|plus_stoch|+ Stochastic Perturbation"
