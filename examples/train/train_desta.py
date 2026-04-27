@@ -36,7 +36,6 @@ if not _is_main_process:
     sys.stdout = open(os.devnull, 'w')
 
 import logging
-import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 from transformers import TrainingArguments
