@@ -16,42 +16,65 @@
 #   ABLATION_EXPS="0 1 2" sbatch examples/train/run_ablation_component_study.sbatch
 
 #SBATCH --job-name=orca_ablation
-#SBATCH --partition=normal
+#SBATCH --partition=dev
 #SBATCH --account=MST115022
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:H200:8
+#SBATCH --cpus-per-task=12
 #SBATCH --mem=200G
-#SBATCH --time=96:00:00
+#SBATCH --time=1:00:00
 #SBATCH --output=./slurm-report/orca_ablation_%j.out
 #SBATCH --error=./slurm-report/orca_ablation_%j.out
 
 set -e
 
 # ===== Environment Setup =====
-# Load module system (HPC clusters)
-module load anaconda 2>/dev/null || module load miniconda 2>/dev/null || true
-
-# Bootstrap conda shell functions (required in non-interactive sbatch shells)
-# Try, in order: CONDA_PREFIX (already active), module-set path, common HPC paths
+# Initialize conda
 __conda_setup_done=0
-for __try_base in \
-    "${CONDA_PREFIX:-__none__}" \
-    "$(command -v conda 2>/dev/null | sed 's|/bin/conda$||')" \
-    "${HOME}/miniconda3" \
-    "${HOME}/anaconda3" \
-    "/opt/conda" \
-    "/usr/local/anaconda3" \
-    "/work/opt/conda"; do
-    [ "$__try_base" = "__none__" ] && continue
-    if [ -f "${__try_base}/etc/profile.d/conda.sh" ]; then
-        source "${__try_base}/etc/profile.d/conda.sh"
-        __conda_setup_done=1
-        echo "[env] conda initialised from ${__try_base}"
-        break
+
+# 1. If CONDA_EXE is inherited from the submitting shell
+if [ -n "${CONDA_EXE:-}" ] && [ -x "${CONDA_EXE}" ]; then
+    eval "$("${CONDA_EXE}" shell.bash hook)"
+    __conda_setup_done=1
+    echo "[env] conda initialised via CONDA_EXE (${CONDA_EXE})"
+fi
+
+# 2. Try module load
+if [ "$__conda_setup_done" -eq 0 ]; then
+    if ! type module >/dev/null 2>&1; then
+        source /etc/profile.d/modules.sh 2>/dev/null || true
     fi
-done
+    module load anaconda3 2>/dev/null || module load miniconda3 2>/dev/null || module load anaconda 2>/dev/null || true
+    if command -v conda >/dev/null 2>&1; then
+        eval "$(conda shell.bash hook)"
+        __conda_setup_done=1
+        echo "[env] conda initialised via module load"
+    fi
+fi
+
+# 3. Try common base directories
+if [ "$__conda_setup_done" -eq 0 ]; then
+    for __try_base in \
+        "${HOME}/miniconda3" \
+        "${HOME}/anaconda3" \
+        "${HOME}/.local/miniconda3" \
+        "/work/${USER:-$(whoami)}/miniconda3" \
+        "/work/${USER:-$(whoami)}/anaconda3" \
+        "/work/voidful2nlp/miniconda3" \
+        "/work/voidful2nlp/anaconda3" \
+        "/opt/conda" \
+        "/pkg/miniconda3" \
+        "/pkg/anaconda3"; do
+        if [ -f "${__try_base}/etc/profile.d/conda.sh" ]; then
+            source "${__try_base}/etc/profile.d/conda.sh"
+            __conda_setup_done=1
+            echo "[env] conda initialised from ${__try_base}"
+            break
+        fi
+    done
+fi
+
 if [ "$__conda_setup_done" -eq 0 ]; then
     echo "[env] ERROR: cannot find conda installation. Aborting." >&2
     exit 1
