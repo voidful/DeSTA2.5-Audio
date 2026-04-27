@@ -1,12 +1,23 @@
 ##############################################################################
 # Ablation Exp 2: + Groupwise Orthogonality + ACP (Components 1+3)
 #
-# Adds Acoustic-Contrastive Preference (Modality-DPO) on top of
-# groupwise orthogonality. ACP compares full-audio vs zero-audio views,
-# penalizing cases where the blind path explains the target as well as
-# the audio-conditioned path.
+# Adds Acoustic-Contrastive Preference (Modality-DPO) on top of groupwise
+# orthogonality. ACP compares full-audio vs zero-audio views.
 #
 # Paper reference: Section 4.4 (Acoustic-Contrastive Preference)
-# - Computes L_ACP = -log_sigmoid(beta * (ℓ_full - ℓ_blind))
-# - Largest single-component accuracy gain in ablation (+1.7%)
 ##############################################################################
+
+defaults:
+  - desta25_qwen3-4B_ORCA
+
+project: desta25_ablation
+name: ablation_2_plus_acp
+
+wandb:
+  project: desta25_ablation
+
+model:
+  variational_grouping:
+    enabled: false
+  asr_dropout:
+    prob: 0.0

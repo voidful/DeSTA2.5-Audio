@@ -12,7 +12,7 @@ setup(
         "safetensors",
         "omegaconf",
         "datasets",
-        "librosa"
+        "librosa",
         "peft",
     ],
     description='DeSTA2.5-Audio',

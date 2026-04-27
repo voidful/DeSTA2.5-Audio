@@ -1,0 +1,63 @@
+hydra:
+  run:
+    dir: ${exp_dir}
+
+
+project: a100
+name: desta25
+exp_dir: ???
+
+resume_from_checkpoint: null
+init_from_pretrained_weights: null
+
+ptl_module: default
+
+wandb:
+  project: desta25
+  log_model: all
+
+trainer:
+  devices: 8
+  num_nodes: 1
+  max_epochs: 2
+  max_steps: -1
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"
+  accelerator: gpu
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  num_sanity_val_steps: 0
+  enable_checkpointing: True
+
+
+model:
+  llm:
+    model_id: Qwen/Qwen3-4B-Instruct-2507
+    freeze: True
+
+  encoder:
+    model_id: openai/whisper-tiny
+    freeze: True
+
+  connector:
+    mode: qformer_1
+    prompt_size: 64
+    num_hidden_layers: 2
+
+  placeholder_token: "<|video_pad|>"
+  audio_locator: "<|AUDIO|>"
+
+  generation_kwargs:
+    max_new_tokens: 16
+    do_sample: False
+    temperature: 1
+    top_p: 1
+
+optim:
+  lr: 1e-4
+  betas: [0.9, 0.98]
+  weight_decay: 0.01
+
+  sched:
+    warmup_steps: 5000

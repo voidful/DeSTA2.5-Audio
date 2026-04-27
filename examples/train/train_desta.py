@@ -333,50 +333,91 @@ def main(cfg: DictConfig):
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
 
 
+def _load_config_with_defaults(config_path, config_dir, _seen=None):
+    """Load a YAML config, resolving a top-level Hydra-style `defaults:` list.
+
+    Each entry in `defaults` is a string naming another config file in
+    `config_dir` (without the `.yaml` suffix). Parents are merged in list order,
+    then the current file's own keys override them. Nesting is supported.
+    """
+    config_path = os.path.abspath(config_path)
+    _seen = _seen or set()
+    if config_path in _seen:
+        raise ValueError(f"Cyclic defaults reference detected at {config_path}")
+    _seen = _seen | {config_path}
+
+    cfg = OmegaConf.load(config_path)
+    if not isinstance(cfg, DictConfig):
+        return cfg
+
+    defaults = cfg.pop("defaults", None)
+    if not defaults:
+        return cfg
+
+    merged = OmegaConf.create({})
+    for entry in defaults:
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"defaults entries must be strings (got {entry!r} in {config_path})"
+            )
+        parent_path = os.path.join(config_dir, f"{entry}.yaml")
+        if not os.path.exists(parent_path):
+            raise FileNotFoundError(
+                f"defaults entry '{entry}' in {config_path} -> missing {parent_path}"
+            )
+        parent_cfg = _load_config_with_defaults(parent_path, config_dir, _seen)
+        merged = OmegaConf.merge(merged, parent_cfg)
+
+    return OmegaConf.merge(merged, cfg)
+
+
 if __name__ == "__main__":
     import argparse
     import warnings
     # Suppress UserWarning about interpolations when initially loading
     warnings.filterwarnings("ignore", category=UserWarning, module="omegaconf")
-    
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", type=str, default="config")
     parser.add_argument("--config-name", type=str, default="desta25")
     args, unknown = parser.parse_known_args()
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    main_config_path = os.path.join(base_dir, args.config_path, f"{args.config_name}.yaml")
-    
+    config_dir = os.path.join(base_dir, args.config_path)
+    main_config_path = os.path.join(config_dir, f"{args.config_name}.yaml")
+
     if not os.path.exists(main_config_path):
         raise FileNotFoundError(f"Config file not found: {main_config_path}")
-        
-    cfg = OmegaConf.load(main_config_path)
-    
+
+    cfg = _load_config_with_defaults(main_config_path, config_dir)
+
     # Process unknown args to find overrides and additional configs (like +dataset=)
     cli_args = []
     for arg in unknown:
         # Strip hydra's + or ++ prefixes
         clean_arg = arg.lstrip("+")
-            
+
         # Check if it's loading a sub-config, e.g. dataset=DestaAQA-5M_4b_ablation
         if "=" in clean_arg:
             key, val = clean_arg.split("=", 1)
             # Check if this maps to a yaml file in the subfolder (e.g. config/dataset/XYZ.yaml)
-            sub_config_path = os.path.join(base_dir, args.config_path, key, f"{val}.yaml")
+            sub_config_path = os.path.join(config_dir, key, f"{val}.yaml")
             if os.path.exists(sub_config_path):
-                sub_cfg = OmegaConf.load(sub_config_path)
+                sub_cfg = _load_config_with_defaults(
+                    sub_config_path, os.path.join(config_dir, key)
+                )
                 # Assign sub-config to the key in the main config
                 cfg[key] = sub_cfg
                 continue
-                
+
         cli_args.append(clean_arg)
-        
+
     # Apply CLI overrides
     if cli_args:
         cli_cfg = OmegaConf.from_cli(cli_args)
         cfg = OmegaConf.merge(cfg, cli_cfg)
-        
+
     # Resolve interpolations
     OmegaConf.resolve(cfg)
-    
+
     main(cfg)
