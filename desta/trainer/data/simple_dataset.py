@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 import datasets
+import numpy as np
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig
@@ -135,9 +136,11 @@ class BaseCollateFn:
         # Pre-validate audio files and filter out samples with undecodable audio
         valid_batch = []
         valid_audio_features = []  # List of list of features per sample
+        valid_audio_paths = []
         
         for item in batch:
             sample_features = []
+            sample_paths = []
             audio_valid = True
             
             for audio_dict in item["processed_audios"]:
@@ -147,8 +150,16 @@ class BaseCollateFn:
                         target_sr=16000,
                         channel_selector="average"
                     ).samples
+                    if len(feature) == 0 or not np.isfinite(feature).all():
+                        logging.warning(
+                            "Skipping sample due to non-finite or empty audio waveform: %s",
+                            audio_dict["audio"],
+                        )
+                        audio_valid = False
+                        break
                     # Convert to list for numpy 2.0 / torch compatibility
                     sample_features.append(feature.tolist())
+                    sample_paths.append(audio_dict["audio"])
                 except Exception as e:
                     logging.warning(f"Skipping sample due to audio decode error: {audio_dict['audio']} - {e}")
                     audio_valid = False
@@ -157,6 +168,7 @@ class BaseCollateFn:
             if audio_valid:
                 valid_batch.append(item)
                 valid_audio_features.append(sample_features)
+                valid_audio_paths.append(sample_paths)
         
         # If no valid samples remain, return an empty batch marker
         # This can happen in rare cases (e.g., file system issues, race conditions)
@@ -241,6 +253,17 @@ class BaseCollateFn:
             sampling_rate=16000, 
             return_tensors="pt"
         ).input_features
+        if not torch.isfinite(batch_features).all():
+            flat_paths = [path for paths in valid_audio_paths for path in paths]
+            bad_feature_mask = ~torch.isfinite(batch_features).flatten(1).all(dim=1)
+            bad_paths = [
+                path for path, is_bad in zip(flat_paths, bad_feature_mask.tolist()) if is_bad
+            ]
+            logging.warning(
+                "Non-finite Whisper input features detected; replacing with zeros. Bad audio paths: %s",
+                bad_paths[:5],
+            )
+            batch_features = torch.nan_to_num(batch_features, nan=0.0, posinf=0.0, neginf=0.0)
 
         assert len(batch_features) == len(batch_start_positions) == len(batch_transcription_ids), \
             f"Length mismatch: features={len(batch_features)}, positions={len(batch_start_positions)}, transcriptions={len(batch_transcription_ids)}"

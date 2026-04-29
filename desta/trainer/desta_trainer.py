@@ -96,8 +96,10 @@ class DeSTA25Trainer(Trainer):
         # Log total loss and loss breakdown
         log_dict["train/loss"] = total_loss.item()
         if orca_total > 0:
-            log_dict["train/lm_ratio"] = lm_loss.item() / total_loss.item()
-            log_dict["train/orca_ratio"] = orca_total / total_loss.item()
+            total_loss_value = total_loss.detach().float().item()
+            if torch.isfinite(total_loss.detach()).all() and total_loss_value != 0:
+                log_dict["train/lm_ratio"] = lm_loss.detach().float().item() / total_loss_value
+                log_dict["train/orca_ratio"] = orca_total / total_loss_value
         
         # Log learning rate
         if self.lr_scheduler is not None:
@@ -105,6 +107,11 @@ class DeSTA25Trainer(Trainer):
         
         # Log to WandB
         self.log(log_dict)
+
+        if not torch.isfinite(total_loss.detach()).all():
+            logging.warning("Skipping non-finite training loss at step %s", self.state.global_step)
+            zero_loss = torch.tensor(0.0, device=total_loss.device, requires_grad=True)
+            return (zero_loss, outputs) if return_outputs else zero_loss
         
         return (total_loss, outputs) if return_outputs else total_loss
 

@@ -249,7 +249,12 @@ class GroupwiseOrthogonalConnector(nn.Module):
             # Project from d_llm to mu and logvar
             self.mu_proj = nn.Linear(d_llm, d_llm)
             self.logvar_proj = nn.Linear(d_llm, d_llm)
-        
+
+    @staticmethod
+    def _sanitize_token_tensor(tensor: torch.Tensor, clip_value: float = 5.0) -> torch.Tensor:
+        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=clip_value, neginf=-clip_value)
+        return tensor.clamp(min=-clip_value, max=clip_value)
+
     
     def forward(
         self, 
@@ -281,7 +286,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
         target_layer_outputs = []
         for idx, hidden_state in enumerate(encoder_hidden_states):
             if idx in self.target_layer_ids:
-                target_layer_outputs.append(hidden_state.to(dtype=target_dtype, device=target_device))
+                hidden_state = hidden_state.to(dtype=target_dtype, device=target_device)
+                target_layer_outputs.append(self._sanitize_token_tensor(hidden_state))
         
         num_layers = len(target_layer_outputs)
         
@@ -307,7 +313,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
                 hidden_states=combined_queries,
                 encoder_hidden_states=hidden_state,
             )
-            layer_outputs.append(qformer_out.last_hidden_state)  # [B, total_queries, d_encoder]
+            layer_outputs.append(self._sanitize_token_tensor(qformer_out.last_hidden_state))  # [B, total_queries, d_encoder]
         
         # Stack layer outputs: [num_layers, B, total_queries, d_encoder]
         layer_outputs = torch.stack(layer_outputs, dim=0)
@@ -327,6 +333,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
             weights = torch.softmax(self.group_layer_weights[group_idx], dim=-1).unsqueeze(-1)  # [K, L, 1]
             group_tokens = (group_layer_outputs * weights).sum(dim=2)  # [B, K, D]
             group_tokens = self.proj(group_tokens)  # [B, K, d_llm]
+            group_tokens = self._sanitize_token_tensor(group_tokens)
             
             all_group_tokens.append(group_tokens)
             
@@ -336,6 +343,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
         
         # Concatenate all groups: [B, num_groups * queries_per_group, d_llm]
         global_tokens = torch.cat(all_group_tokens, dim=1)
+        global_tokens = self._sanitize_token_tensor(global_tokens)
         
 
         
@@ -379,7 +387,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
             if self.training:
                 group_losses['kl_weight_effective'] = torch.tensor(kl_weight, device=z.device)
             
-            z = torch.nan_to_num(z, nan=0.0, posinf=30.0, neginf=-30.0).clamp(min=-30.0, max=30.0)
+            z = self._sanitize_token_tensor(z)
             return z, group_losses
         
         return global_tokens, group_losses
@@ -428,8 +436,9 @@ class GroupwiseOrthogonalConnector(nn.Module):
         
         # === Inter-group orthogonality loss ===
         # Group centroids should be orthogonal to each other
-        centroids = torch.stack(group_centroids, dim=1)  # [B, num_groups, d_llm]
-        centroids_norm = F.normalize(centroids, dim=-1)  # [B, num_groups, d_llm]
+        centroids = torch.stack(group_centroids, dim=1).float()  # [B, num_groups, d_llm]
+        centroids = self._sanitize_token_tensor(centroids)
+        centroids_norm = F.normalize(centroids, dim=-1, eps=1e-6)  # [B, num_groups, d_llm]
         
         # Gram matrix of centroids: should be close to identity
         gram = torch.einsum("bgh,bih->bgi", centroids_norm, centroids_norm)  # [B, G, G]
@@ -442,7 +451,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
         L_intra_total = 0.0
         for group_idx, group_tokens in enumerate(all_group_tokens):
             # group_tokens: [B, K, d_llm]
-            tokens_norm = F.normalize(group_tokens, dim=-1)
+            group_tokens = self._sanitize_token_tensor(group_tokens.float())
+            tokens_norm = F.normalize(group_tokens, dim=-1, eps=1e-6)
             intra_gram = torch.einsum("bkh,bqh->bkq", tokens_norm, tokens_norm)  # [B, K, K]
             
             # Light diversity: penalize if all queries are identical (but allow some correlation)
@@ -642,6 +652,7 @@ class WhisperPerception(nn.Module):
         target_dtype = self.whisper.model.encoder.conv1.weight.dtype
         target_device = self.whisper.model.encoder.conv1.weight.device
         input_features = input_features.to(dtype=target_dtype, device=target_device)
+        input_features = torch.nan_to_num(input_features, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=-80.0, max=80.0)
         
         expected_seq_length = self.whisper.model.encoder.config.max_source_positions * self.whisper.model.encoder.conv1.stride[0] * self.whisper.model.encoder.conv2.stride[0]
 
@@ -659,6 +670,7 @@ class WhisperPerception(nn.Module):
         embed_pos = embed_pos.to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos
+        hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
         
         # Collect all layer outputs for ORCA
         all_layer_outputs = []
@@ -669,6 +681,7 @@ class WhisperPerception(nn.Module):
                 
                 layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
                 hidden_states = layer_outputs[0]
+                hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
 
                 if idx in self.connector.config.target_layer_ids:
                     # use different prompt for different layers
@@ -698,6 +711,7 @@ class WhisperPerception(nn.Module):
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
                 hidden_states = layer_outputs[0]
+                hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
                 all_layer_outputs.append(hidden_states)
             
             return self.connector(all_layer_outputs, global_step=global_step)
@@ -936,6 +950,10 @@ class DeSTA25AudioModel(PreTrainedModel):
                     logging.warning("Skipping non-finite Modality-DPO loss: %s", loss_dpo_value)
             
             outputs.loss = total_loss
+            try:
+                outputs["loss"] = total_loss
+            except TypeError:
+                pass
             # Attach losses to outputs
             outputs.orca_losses = orca_loss_log
             outputs.orca_total_loss = orca_total
@@ -1055,6 +1073,7 @@ class DeSTA25AudioModel(PreTrainedModel):
 
             # # concat the speech features and transcription embeddings
             audio_embeddings = torch.cat([audio_features, transcription_embeddings], dim=0)
+            audio_embeddings = torch.nan_to_num(audio_embeddings, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
 
             assert audio_embeddings.size(0) == (speech_feature_length + trans_len)
 
