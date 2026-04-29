@@ -489,6 +489,7 @@ class WhisperPerception(nn.Module):
                 layer_outputs = encoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
+                    layer_head_mask=None,
                     output_attentions=False,
                 )
                 if isinstance(layer_outputs, torch.Tensor):
