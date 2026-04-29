@@ -335,9 +335,10 @@ class GroupwiseOrthogonalConnector(nn.Module):
             # Predict mu and logvar from global_tokens
             mu = self.mu_proj(global_tokens)  # [B, total_queries, d_llm]
             logvar = self.logvar_proj(global_tokens)  # [B, total_queries, d_llm]
+            logvar_fp32 = logvar.float().clamp(min=-10.0, max=2.0)
             
             # Reparameterization trick
-            std = torch.exp(0.5 * logvar)
+            std = torch.exp(0.5 * logvar_fp32).to(dtype=mu.dtype)
             eps = torch.randn_like(std)
             if self.training:
                 z = mu + eps * std
@@ -348,7 +349,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
             
             # KL Divergence per dimension: D_KL(q(z|x) || N(0,I))
             # = -0.5 * (1 + log(sigma^2) - mu^2 - sigma^2) per dimension
-            kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+            mu_fp32 = mu.float()
+            kl_per_dim = -0.5 * (1 + logvar_fp32 - mu_fp32.pow(2) - logvar_fp32.exp())
             
             # S1: Free Bits - clamp minimum KL per dimension to prevent σ collapse
             if self.s1_free_bits > 0:
@@ -369,6 +371,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
             if self.training and self.s1_mu_invariance_enabled:
                 self._cached_mu = mu
             
+            z = torch.nan_to_num(z, nan=0.0, posinf=30.0, neginf=-30.0).clamp(min=-30.0, max=30.0)
             return z, group_losses
         
         return global_tokens, group_losses
@@ -1388,10 +1391,11 @@ class DeSTA25AudioModel(PreTrainedModel):
         
         # Get log probs for target tokens
         log_probs = torch.gather(
-            logits.log_softmax(-1), 
-            dim=2, 
+            F.log_softmax(logits.float(), dim=-1),
+            dim=2,
             index=labels.unsqueeze(2)
         ).squeeze(2)  # [B, T]
+        log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=-1e4)
         
         # Sum over valid positions
         return (log_probs * loss_mask).sum(-1)  # [B]

@@ -347,9 +347,10 @@ class GroupwiseOrthogonalConnector(nn.Module):
             # Predict mu and logvar from global_tokens
             mu = self.mu_proj(global_tokens)  # [B, total_queries, d_llm]
             logvar = self.logvar_proj(global_tokens)  # [B, total_queries, d_llm]
+            logvar_fp32 = logvar.float().clamp(min=-10.0, max=2.0)
             
             # Reparameterization trick
-            std = torch.exp(0.5 * logvar)
+            std = torch.exp(0.5 * logvar_fp32).to(dtype=mu.dtype)
             eps = torch.randn_like(std)
             if self.training:
                 z = mu + eps * std
@@ -360,7 +361,8 @@ class GroupwiseOrthogonalConnector(nn.Module):
             
             # KL Divergence per dimension: D_KL(q(z|x) || N(0,I))
             # = -0.5 * (1 + log(sigma^2) - mu^2 - sigma^2) per dimension
-            kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+            mu_fp32 = mu.float()
+            kl_per_dim = -0.5 * (1 + logvar_fp32 - mu_fp32.pow(2) - logvar_fp32.exp())
             
             # S1: Free Bits - clamp minimum KL per dimension to prevent σ collapse
             if self.s1_free_bits > 0:
@@ -377,6 +379,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
             if self.training:
                 group_losses['kl_weight_effective'] = torch.tensor(kl_weight, device=z.device)
             
+            z = torch.nan_to_num(z, nan=0.0, posinf=30.0, neginf=-30.0).clamp(min=-30.0, max=30.0)
             return z, group_losses
         
         return global_tokens, group_losses
@@ -869,7 +872,9 @@ class DeSTA25AudioModel(PreTrainedModel):
                 labels=labels,
                 output_hidden_states=False,
             )
-            outputs.lm_loss = outputs.loss
+            lm_loss = outputs.loss
+            total_loss = lm_loss
+            outputs.lm_loss = lm_loss
             
             # Collect ORCA-DeSTA connector losses.
             orca_losses = getattr(self.perception, "_orca_r1_losses", None)
@@ -886,8 +891,11 @@ class DeSTA25AudioModel(PreTrainedModel):
                         loss_value = loss.detach().float().item()
                         orca_loss_log[name] = loss_value
                         if name.startswith("L_"):
-                            outputs.loss = outputs.loss + loss
-                            orca_total += loss_value
+                            if torch.isfinite(loss.detach()).all():
+                                total_loss = total_loss + loss
+                                orca_total += loss_value
+                            else:
+                                logging.warning("Skipping non-finite ORCA loss %s=%s", name, loss_value)
             
             # === G1: Modality-DPO Loss ===
             # Make the model prefer predictions WITH audio over predictions WITHOUT audio
@@ -911,13 +919,23 @@ class DeSTA25AudioModel(PreTrainedModel):
                     log_probs_blind = self._get_target_log_probs(outputs_blind.logits, labels)
                 
                 # DPO Loss: -log_sigmoid(beta * (log_probs_full - log_probs_blind))
-                logits_diff = log_probs_full - log_probs_blind
+                logits_diff = torch.nan_to_num(
+                    log_probs_full - log_probs_blind,
+                    nan=0.0,
+                    posinf=50.0,
+                    neginf=-50.0,
+                ).clamp(min=-50.0, max=50.0)
                 loss_dpo = -F.logsigmoid(beta * logits_diff).mean()
                 
-                outputs.loss = outputs.loss + loss_dpo
-                orca_total += loss_dpo.item()
-                orca_loss_log["L_dpo"] = loss_dpo.item()
+                loss_dpo_value = loss_dpo.detach().float().item()
+                orca_loss_log["L_dpo"] = loss_dpo_value
+                if torch.isfinite(loss_dpo.detach()).all():
+                    total_loss = total_loss + loss_dpo
+                    orca_total += loss_dpo_value
+                else:
+                    logging.warning("Skipping non-finite Modality-DPO loss: %s", loss_dpo_value)
             
+            outputs.loss = total_loss
             # Attach losses to outputs
             outputs.orca_losses = orca_loss_log
             outputs.orca_total_loss = orca_total
@@ -1073,17 +1091,18 @@ class DeSTA25AudioModel(PreTrainedModel):
         """
         # Match Hugging Face causal LM loss semantics: logits at position t
         # predict the label at position t+1.
-        shift_logits = logits[:, :-1, :]
+        shift_logits = logits[:, :-1, :].float()
         shift_labels = labels[:, 1:].clone()
         loss_mask = shift_labels != -100
         shift_labels[shift_labels == -100] = 0  # Replace -100 with 0 for gather
         
         # Get log probs for target tokens
         log_probs = torch.gather(
-            shift_logits.log_softmax(-1), 
+            F.log_softmax(shift_logits, dim=-1),
             dim=2, 
             index=shift_labels.unsqueeze(2)
         ).squeeze(2)  # [B, T]
+        log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=-1e4)
         
         token_counts = loss_mask.sum(-1).clamp_min(1)
         return (log_probs * loss_mask).sum(-1) / token_counts  # [B]

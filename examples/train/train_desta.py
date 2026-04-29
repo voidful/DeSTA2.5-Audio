@@ -245,6 +245,7 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         learning_rate=cfg.optim.lr,
         weight_decay=cfg.optim.weight_decay,
         warmup_steps=cfg.optim.sched.warmup_steps,
+        max_grad_norm=getattr(cfg.trainer, "gradient_clip_val", 1.0),
         logging_steps=cfg.trainer.log_every_n_steps,
         save_strategy="epoch" if cfg.trainer.enable_checkpointing else "no",
         eval_strategy="steps" if isinstance(cfg.trainer.val_check_interval, int) else "epoch",

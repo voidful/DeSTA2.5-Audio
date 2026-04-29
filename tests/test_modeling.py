@@ -142,6 +142,36 @@ def test_stochastic_perturbation_adds_kl_loss(monkeypatch):
     assert "kl_weight_effective" in losses
 
 
+def test_variational_connector_clamps_extreme_logvar(monkeypatch):
+    config = make_config(
+        monkeypatch,
+        connector_mode="orca_desta",
+        orca_r1_num_groups=2,
+        orca_r1_queries_per_group=2,
+        variational_grouping_enabled=True,
+        variational_kl_weight=0.01,
+    )
+    connector = GroupwiseOrthogonalConnector(config)
+    connector.train()
+
+    with torch.no_grad():
+        connector.logvar_proj.weight.zero_()
+        connector.logvar_proj.bias.fill_(100.0)
+
+    batch_size = 2
+    seq_len = 64
+    d_model = config.encoder_config.d_model
+    encoder_hidden_states = [
+        torch.randn(batch_size, seq_len, d_model)
+        for _ in range(config.encoder_config.num_hidden_layers)
+    ]
+
+    z, losses = connector(encoder_hidden_states, global_step=1)
+
+    assert torch.isfinite(z).all()
+    assert torch.isfinite(losses["L_kl"]).all()
+
+
 def test_target_log_probs_use_causal_shift():
     logits = torch.zeros(1, 4, 5)
     labels = torch.tensor([[-100, 2, 3, -100]])
