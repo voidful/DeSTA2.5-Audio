@@ -1,5 +1,5 @@
 #!/bin/bash
-# DeSTA2.5-Audio Qwen3-4B 本地訓練腳本
+# DeSTA2.5-Audio Qwen3-4B groupwise-orthogonal 本地訓練腳本
 # 用法: bash examples/train/train_qwen3_4b.sh
 
 set -e
@@ -11,15 +11,15 @@ DATA_ROOT="/work/voidful2nlp/desta"
 OUTPUT_BASE="/work/voidful2nlp/desta/outputs"
 
 # 模型和數據集配置
-config=desta25_qwen3-4B_Qformer6L
+config=desta25_qwen3-4B_groupwise_ortho
 dataset_config=DestaAQA-5M_local
 
 # GPU 設定 (可用逗號分隔多個 GPU，如 "0,1,2,3")
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3,4,5,6,7"}
 
 # 實驗名稱
-project="desta25_qwen3_4b"
-name="qwen3-4b-instruct"
+project="desta25_qwen3_4b_groupwise_ortho"
+name="qwen3-4b-groupwise-ortho"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="${OUTPUT_BASE}/${project}/${exp_name}"
 
@@ -35,7 +35,7 @@ export TRANSFORMERS_CACHE="${HF_HOME}"
 mkdir -p "${exp_dir}"
 
 echo "=========================================="
-echo "DeSTA2.5-Audio Qwen3-4B Training"
+echo "DeSTA2.5-Audio Qwen3-4B Groupwise-Ortho Training"
 echo "=========================================="
 echo "Config: ${config}"
 echo "Dataset: ${dataset_config}"
@@ -83,4 +83,3 @@ python examples/train/train_desta.py \
 
 echo "Training finished at $(date)"
 echo "Output saved to: ${exp_dir}"
-

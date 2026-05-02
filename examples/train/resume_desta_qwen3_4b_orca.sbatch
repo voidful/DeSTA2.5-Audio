@@ -43,11 +43,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-4B_ORCA
+config=desta25_qwen3-4B_groupwise_ortho
 dataset_config=DestaAQA-5M_local
 
-project=desta25_qwen3_4b_orca_desta
-name="qwen3-4b-orca-desta"
+project=desta25_qwen3_4b_groupwise_ortho
+name="qwen3-4b-groupwise-ortho"
 
 # 使用原始實驗目錄
 exp_dir="${RESUME_EXP_DIR}"

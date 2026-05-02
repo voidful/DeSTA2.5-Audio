@@ -1,4 +1,4 @@
-## Ablation dataset config for Qwen3-4B ORCA component study
+## Dataset config for Qwen3-4B groupwise-orthogonal runs
 ## Uses a sampled subset (~5k per source) for faster iteration
 train_ds:
   data_root: "/work/voidful2nlp/desta"

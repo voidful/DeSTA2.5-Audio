@@ -150,32 +150,19 @@ def load_model(model_id: str, device: str):
     return model, processor
 
 
-def _get_target_layer_ids(encoder_model_id: str) -> List[int]:
-    mapping = {
-        "openai/whisper-tiny": [0, 1, 2, 3],
-        "openai/whisper-small": [2, 5, 8, 11],
-        "openai/whisper-medium": [5, 11, 17, 23],
-        "openai/whisper-large-v3": [7, 15, 23, 31],
-        "openai/whisper-large-v3-turbo": [7, 15, 23, 31],
-    }
-    if encoder_model_id not in mapping:
-        raise NotImplementedError(f"encoder {encoder_model_id} not supported")
-    return mapping[encoder_model_id]
-
-
 @torch.inference_mode()
 def extract_query_vectors(model, processor, items, device,
                           use_projected=False) -> np.ndarray:
     """Return query vectors as np.ndarray [N, K, D]."""
     perception = model.perception
     connector = perception.connector
-    K = model.config.prompt_size
-    encoder_id = getattr(model.config, "encoder_model_id", "openai/whisper-large-v3")
-    target_layer_ids = _get_target_layer_ids(encoder_id)
-    is_orca = model.config.connector_mode in ["orca_desta", "orca_r1"]
+    is_groupwise = model.config.connector_mode in ["groupwise_ortho", "orca_desta", "orca_r1"]
+    if not is_groupwise:
+        raise ValueError("query redundancy probing expects connector_mode=groupwise_ortho")
 
-    if is_orca and not use_projected:
-        print("ℹ️  ORCA connectors fuse projection — using projected tokens.")
+    K = connector.num_groups * connector.queries_per_group
+    if not use_projected:
+        print("Groupwise connectors fuse projection; using projected tokens.")
 
     all_queries: List[np.ndarray] = []
     print(f"🎧 Extracting {K} query vectors from {len(items)} samples …")
@@ -198,37 +185,12 @@ def extract_query_vectors(model, processor, items, device,
         ].to(dtype=h.dtype, device=h.device)
         hidden = h + pos
 
-        if is_orca:
-            # Collect all layer outputs and use connector's own forward
-            all_layer_outputs = []
-            for enc_layer in whisper_enc.layers:
-                hidden = enc_layer(hidden, None, None)[0]
-                all_layer_outputs.append(hidden)
-            conn_out = connector(all_layer_outputs)
-            query_vecs = conn_out[0] if isinstance(conn_out, tuple) else conn_out
-        else:
-            # Standard qformer_1 path
-            layer_prompt_outputs = []
-            for idx, enc_layer in enumerate(whisper_enc.layers):
-                hidden = enc_layer(hidden, None, None)[0]
-                if idx in target_layer_ids:
-                    lp = connector.layer_prompts[
-                        target_layer_ids.index(idx)
-                    ].expand(1, -1, -1)
-                    qf_out = connector.qformer(
-                        lp, encoder_hidden_states=hidden,
-                    )
-                    layer_prompt_outputs.append(
-                        qf_out.last_hidden_state[:, :K, :]
-                    )
-
-            stacked = torch.stack(layer_prompt_outputs, dim=0)
-            stacked = stacked.permute(1, 2, 0, 3)
-            norm_w = torch.softmax(connector.layer_weights, dim=-1).unsqueeze(-1)
-            query_vecs = (stacked * norm_w).sum(dim=2)
-
-            if use_projected:
-                query_vecs = connector.proj(query_vecs)
+        all_layer_outputs = []
+        for enc_layer in whisper_enc.layers:
+            hidden = enc_layer(hidden, None, None)[0]
+            all_layer_outputs.append(hidden)
+        conn_out = connector(all_layer_outputs)
+        query_vecs = conn_out[0] if isinstance(conn_out, tuple) else conn_out
 
         all_queries.append(query_vecs[0].float().cpu().numpy())
 

@@ -8,7 +8,6 @@ Diagnostic analysis scripts for understanding and validating ORCA model behavior
 
 | Script | Priority | Purpose |
 |--------|----------|---------|
-| `divergence_analysis.py` | P0-3 | Measure training data divergence rate (y_w ≠ y_l) |
 | `match_rate_analysis.py` | P0-1 | Compare predictions with/without audio |
 | `refusal_analysis.py` | P1-2 | Count "cannot determine" responses |
 
@@ -33,9 +32,6 @@ Diagnostic analysis scripts for understanding and validating ORCA model behavior
 ## Usage
 
 ```bash
-# P0-3: Quick divergence check
-python divergence_analysis.py --manifest <path> --samples 1000 --dry-run
-
 # P0-1: Match rate analysis
 python match_rate_analysis.py --model <model_path> --samples-per-task 250
 

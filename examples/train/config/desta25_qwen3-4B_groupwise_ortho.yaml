@@ -3,8 +3,8 @@ hydra:
     dir: ${exp_dir}
 
 
-project: desta25_qwen3_4b_orca_desta
-name: desta25_qwen3_4b_orca_desta
+project: desta25_qwen3_4b_groupwise_ortho
+name: desta25_qwen3_4b_groupwise_ortho
 exp_dir: ???
 
 resume_from_checkpoint: null
@@ -13,7 +13,7 @@ init_from_pretrained_weights: null
 ptl_module: default
 
 wandb:
-  project: desta25_qwen3_4b_orca_desta
+  project: desta25_qwen3_4b_groupwise_ortho
   log_model: all
 
 trainer:
@@ -41,35 +41,16 @@ model:
     freeze: True
 
   connector:
-    mode: orca_desta
+    mode: groupwise_ortho
     prompt_size: 64
     num_hidden_layers: 6
     use_flash_attention: true
 
-  orca_desta:
+  groupwise_ortho:
     num_groups: 8
     queries_per_group: 8
     inter_group_weight: 0.1
     intra_group_weight: 0.01
-
-  variational_grouping:
-    enabled: true
-    kl_weight: 0.01
-
-  s1:
-    kl_annealing_enabled: true
-    kl_annealing_warmup_steps: 2000
-    kl_annealing_cycle_steps: 0
-    free_bits: 0.1
-    inference_alpha: 0.0
-
-  modality_dpo:
-    enabled: true
-    beta: 0.1
-
-  asr_dropout:
-    prob: 0.2
-
 
   placeholder_token: "<|video_pad|>"
   audio_locator: "<|AUDIO|>"

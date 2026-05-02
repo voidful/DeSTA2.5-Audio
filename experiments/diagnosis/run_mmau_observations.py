@@ -123,10 +123,7 @@ def extract_representations_from_mmau(
                 # Returns (global_tokens, speech_feature_lengths) tuple
                 with torch.no_grad():
                     outputs = model.perception(input_features=feature)
-                    # perception returns:
-                    # - (tokens, lengths) for orca_r1
-                    # - (tokens, lengths) for orca_hybrid (now potentially with losses in tuple)
-                    # - (tokens, lengths) for qformer_1
+                    # perception returns (tokens, lengths) for groupwise_ortho.
                     
                     if isinstance(outputs, tuple):
                         # outputs could be (tokens, lengths) OR ((tokens, loss), lengths)
@@ -988,5 +985,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

@@ -37,11 +37,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-0.6b_ORCA
+config=desta25_qwen3-0.6b_groupwise_ortho
 dataset_config=DestaAQA-5M_0.6b_orca
 
-project=desta25_qwen3_0.6b_orca_desta
-name="qwen3-0.6b-orca-desta"
+project=desta25_qwen3_0.6b_groupwise_ortho
+name="qwen3-0.6b-groupwise-ortho"
 output_root="/work/voidful2nlp/desta/outputs/${project}"
 
 # ===== 自動檢測並 Resume Checkpoint =====
@@ -80,7 +80,7 @@ echo "Start Time: $(date)" >> ${exp_dir}/run_info.txt
 echo "Config: ${config}" >> ${exp_dir}/run_info.txt
 echo "Dataset Config: ${dataset_config}" >> ${exp_dir}/run_info.txt
 echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
-echo "ORCA Mode: enabled" >> ${exp_dir}/run_info.txt
+echo "Groupwise-Ortho Mode: enabled" >> ${exp_dir}/run_info.txt
 if [ -n "$resume_args" ]; then
     echo "Resume: Yes (from ${latest_checkpoint})" >> ${exp_dir}/run_info.txt
 else

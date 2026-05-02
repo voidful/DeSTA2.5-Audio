@@ -9,7 +9,7 @@
 ##############################################################################
 
 defaults:
-  - desta25_qwen3-4B_ORCA
+  - desta25_qwen3-4B_groupwise_ortho
 
 project: desta25_ablation
 name: ablation_1_groupwise_ortho
@@ -18,9 +18,5 @@ wandb:
   project: desta25_ablation
 
 model:
-  variational_grouping:
-    enabled: false
-  modality_dpo:
-    enabled: false
-  asr_dropout:
-    prob: 0.0
+  connector:
+    mode: groupwise_ortho

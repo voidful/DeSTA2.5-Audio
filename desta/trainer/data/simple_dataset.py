@@ -361,9 +361,12 @@ class BaseAudioTextDataset:
         self.processor = processor
         
         self.connector_mode = cfg.model.connector.mode
-        orca_cfg = cfg.model.get("orca_desta", cfg.model.get("orca_r1", {}))
-        self.orca_num_groups = orca_cfg.get("num_groups", 8)
-        self.orca_queries_per_group = orca_cfg.get("queries_per_group", 8)
+        groupwise_cfg = cfg.model.get(
+            "groupwise_ortho",
+            cfg.model.get("orca_desta", cfg.model.get("orca_r1", {})),
+        )
+        self.groupwise_num_groups = groupwise_cfg.get("num_groups", 8)
+        self.groupwise_queries_per_group = groupwise_cfg.get("queries_per_group", 8)
         
         model_cfg = cfg.model
         if isinstance(model_cfg, DictConfig):
@@ -682,8 +685,8 @@ class BaseAudioTextDataset:
                     self._first_missing_audio_logged = True
                 continue
 
-            if self.connector_mode in ("orca_desta", "orca_r1"):
-                audio_size = self.orca_num_groups * self.orca_queries_per_group
+            if self.connector_mode in ("groupwise_ortho", "orca_desta", "orca_r1"):
+                audio_size = self.groupwise_num_groups * self.groupwise_queries_per_group
             else:
                 audio_size = self.prompt_size
             audio_size_list = [audio_size] * len(new_audios)

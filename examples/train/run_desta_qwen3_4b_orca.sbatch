@@ -35,11 +35,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-4B_ORCA
+config=desta25_qwen3-4B_groupwise_ortho
 dataset_config=DestaAQA-5M_local
 
-project=desta25_qwen3_4b_orca_desta
-name="qwen3-4b-orca-desta"
+project=desta25_qwen3_4b_groupwise_ortho
+name="qwen3-4b-groupwise-ortho"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -58,7 +58,7 @@ echo "Start Time: $(date)" >> ${exp_dir}/run_info.txt
 echo "Config: ${config}" >> ${exp_dir}/run_info.txt
 echo "Dataset Config: ${dataset_config}" >> ${exp_dir}/run_info.txt
 echo "Output Dir: ${exp_dir}" >> ${exp_dir}/run_info.txt
-echo "ORCA Mode: enabled" >> ${exp_dir}/run_info.txt
+echo "Groupwise-Ortho Mode: enabled" >> ${exp_dir}/run_info.txt
 echo "========================================" >> ${exp_dir}/run_info.txt
 
 # ===== 啟動訓練 (使用 torchrun 進行 DDP 分布式訓練) =====

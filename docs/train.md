@@ -30,7 +30,7 @@ bash ./examples/train/train_example.sh
 
 #### DeSTA2.5-Audio Training Configs
 
-- Config: `examples/train/config/desta25_llama31-8B_Qformer6L.yaml`
+- Config: `examples/train/config/desta25_qwen3-4B_groupwise_ortho.yaml`
 - Dataset: `examples/train/config/dataset/desta-AQA5M.yaml`
 
 

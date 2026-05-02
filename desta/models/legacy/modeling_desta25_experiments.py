@@ -2165,7 +2165,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             # RUN ASR
             if asr_features:
                 asr_features = self.processor(asr_features, sampling_rate=16000, return_tensors="pt").input_features
-                asr_features = asr_features.to(self.device).half()
+                whisper_encoder = self.perception.whisper.model.encoder
+                asr_features = asr_features.to(
+                    device=whisper_encoder.conv1.weight.device,
+                    dtype=whisper_encoder.conv1.weight.dtype,
+                )
 
                 transcriptions = self.perception.whisper.generate(
                     input_features=asr_features,

@@ -14,7 +14,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer
 
-from desta.models.modeling_desta25 import DeSTA25AudioModel
+from desta.models.modeling_desta25 import GROUPWISE_ORTHO_ALIASES, DeSTA25AudioModel
 from desta.utils.metrics import ConsecutiveWordsAccuracyMetric
 from desta.utils.utils import run
 from lulutils import get_unique_filepath
@@ -47,14 +47,11 @@ class DeSTA25Trainer(Trainer):
         return_outputs: bool = False,
         **kwargs
     ):
-        """Compute loss with comprehensive WandB logging including all ORCA auxiliary losses."""
+        """Compute loss with WandB logging for groupwise auxiliary losses."""
         if self._is_empty_batch(inputs):
             logging.warning("Skipping empty batch (audio decode errors)")
             zero_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
             return (zero_loss, None) if return_outputs else zero_loss
-        
-        # S1: Inject global_step for KL annealing
-        inputs["global_step"] = self.state.global_step
         
         outputs = model(**inputs)
         lm_loss = getattr(outputs, "lm_loss", outputs.loss)
@@ -66,7 +63,7 @@ class DeSTA25Trainer(Trainer):
             "train/ppl": torch.exp(lm_loss).item(),
         }
         
-        # Add ORCA auxiliary losses if present
+        # Add groupwise auxiliary losses if present.
         # Handle DDP-wrapped models by accessing .module if needed
         actual_model = model.module if hasattr(model, "module") else model
         config = getattr(actual_model, "config", None)
@@ -74,24 +71,24 @@ class DeSTA25Trainer(Trainer):
         orca_total = 0.0
         if config is not None:
             connector_mode = getattr(config, "connector_mode", "")
-            is_orca_desta = connector_mode in ("orca_desta", "orca_r1")
+            is_groupwise_ortho = connector_mode in GROUPWISE_ORTHO_ALIASES
             
-            if is_orca_desta:
-                # ORCA-DeSTA losses are already added to outputs.loss in forward().
+            if is_groupwise_ortho:
+                # Groupwise losses are already added to outputs.loss in forward().
                 # Here we only read detached values for logging.
-                orca_loss_log = getattr(actual_model, "_orca_desta_loss_log", None)
-                orca_total = getattr(actual_model, "_orca_desta_loss_total", 0.0)
+                orca_loss_log = getattr(actual_model, "_groupwise_ortho_loss_log", None)
+                orca_total = getattr(actual_model, "_groupwise_ortho_loss_total", 0.0)
                 
                 if orca_loss_log is not None:
                     for name, value in orca_loss_log.items():
                         log_dict[f"train/{name}"] = value
                     
                     if orca_total > 0:
-                        log_dict["train/orca_desta_total"] = orca_total
+                        log_dict["train/groupwise_ortho_total"] = orca_total
                     
                     # Clear after logging
-                    actual_model._orca_desta_loss_log = None
-                    actual_model._orca_desta_loss_total = 0.0
+                    actual_model._groupwise_ortho_loss_log = None
+                    actual_model._groupwise_ortho_loss_total = 0.0
         
         # Log total loss and loss breakdown
         log_dict["train/loss"] = total_loss.item()
@@ -99,7 +96,7 @@ class DeSTA25Trainer(Trainer):
             total_loss_value = total_loss.detach().float().item()
             if torch.isfinite(total_loss.detach()).all() and total_loss_value != 0:
                 log_dict["train/lm_ratio"] = lm_loss.detach().float().item() / total_loss_value
-                log_dict["train/orca_ratio"] = orca_total / total_loss_value
+                log_dict["train/groupwise_ortho_ratio"] = orca_total / total_loss_value
         
         # Log learning rate
         if self.lr_scheduler is not None:

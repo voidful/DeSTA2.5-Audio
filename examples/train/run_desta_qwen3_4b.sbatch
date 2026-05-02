@@ -37,11 +37,11 @@ export PYTHONNOUSERSITE=1
 
 # ===== 實驗設定 =====
 ROOT_DIR="/work/voidful2nlp/DeSTA2.5-Audio"
-config=desta25_qwen3-4B_Qformer6L
+config=desta25_qwen3-4B_groupwise_ortho
 dataset_config=DestaAQA-5M_local
 
-project=desta25_qwen3_4b
-name="qwen3-4b-instruct"
+project=desta25_qwen3_4b_groupwise_ortho
+name="qwen3-4b-groupwise-ortho"
 exp_name=$(date +%y%m%d-%H%M)_${name}
 exp_dir="/work/voidful2nlp/desta/outputs/${project}/${exp_name}"
 
@@ -79,4 +79,3 @@ torchrun --nproc_per_node=${NUM_GPUS} \
     ++init_from_pretrained_weights=null
 
 echo "Training finished at $(date)" >> ${exp_dir}/run_info.txt
-

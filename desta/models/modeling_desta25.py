@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 from dataclasses import dataclass
 from desta.utils.audio import AudioSegment
@@ -18,29 +18,29 @@ from safetensors.torch import load_file
 import torch.distributed as dist
 
 
-ORCA_DESTA_MODE = "orca_desta"
-ORCA_DESTA_ALIASES = {ORCA_DESTA_MODE, "orca_r1"}
-LEGACY_CONNECTOR_MODES = {"orca_hybrid"}
+GROUPWISE_ORTHO_MODE = "groupwise_ortho"
+GROUPWISE_ORTHO_ALIASES = {GROUPWISE_ORTHO_MODE, "orca_desta", "orca_r1"}
+LEGACY_CONNECTOR_MODES = {"qformer_1", "orca_hybrid"}
 
 
 def _canonical_connector_mode(mode: str) -> str:
-    if mode == "orca_r1":
-        return ORCA_DESTA_MODE
+    if mode in GROUPWISE_ORTHO_ALIASES:
+        return GROUPWISE_ORTHO_MODE
     return mode
 
 
-def _is_orca_desta_mode(mode: str) -> bool:
-    return _canonical_connector_mode(mode) == ORCA_DESTA_MODE
+def _is_groupwise_ortho_mode(mode: str) -> bool:
+    return _canonical_connector_mode(mode) == GROUPWISE_ORTHO_MODE
 
 
-def _get_orca_desta_audio_token_size(config: "DeSTA25Config") -> int:
+def _get_groupwise_ortho_audio_token_size(config: "DeSTA25Config") -> int:
     return config.orca_r1_num_groups * config.orca_r1_queries_per_group
 
 
 def _get_audio_token_size(config: "DeSTA25Config") -> int:
-    if _is_orca_desta_mode(config.connector_mode):
-        return _get_orca_desta_audio_token_size(config)
-    return config.prompt_size
+    if _is_groupwise_ortho_mode(config.connector_mode):
+        return _get_groupwise_ortho_audio_token_size(config)
+    raise ValueError(f"connector_mode='{config.connector_mode}' is not supported in the main model path.")
 
 
 
@@ -75,96 +75,12 @@ def _prepare_audio_context_and_start_positions(
         return result, start_positions
 
 
-class QformerConnector(nn.Module):
-    """
-    Connector module using Q-Former to bridge audio encoder and LLM.
-    """
-    def __init__(self, config: 'DeSTA25Config'):
-        super().__init__()
-        self.config = config
-
-        if self.config.encoder_model_id == "openai/whisper-medium":
-            self.config.target_layer_ids = [5, 11, 17, 23]
-        elif self.config.encoder_model_id == "openai/whisper-small":
-            self.config.target_layer_ids = [2, 5, 8, 11]
-        elif self.config.encoder_model_id == "openai/whisper-tiny":
-            self.config.target_layer_ids = [0, 1, 2, 3]
-        elif self.config.encoder_model_id == "openai/whisper-large-v3":
-            self.config.target_layer_ids = [7, 15, 23, 31]
-        elif self.config.encoder_model_id == "openai/whisper-large-v3-turbo":
-            self.config.target_layer_ids = [7, 15, 23, 31]
-        else:
-            raise NotImplementedError(f"model_id {self.config.encoder_model_id} not implemented")
-
-
-        self.layer_prompts = nn.ParameterList([
-            nn.Parameter(torch.randn(1, self.config.prompt_size, self.config.encoder_config.d_model)) for _ in range(len(self.config.target_layer_ids))]
-        )
-
-        self.layer_weights = nn.Parameter(torch.zeros(self.config.prompt_size, len(self.config.target_layer_ids), dtype=torch.float))
-
-        if self.config.connector_mode == "qformer_1":
-            # init Qformerblock
-            qformer_config = BertConfig()
-            qformer_config.num_hidden_layers = self.config.qformer_num_hidden_layers
-            qformer_config.num_attention_heads = self.config.encoder_config.encoder_attention_heads
-            qformer_config.hidden_size = self.config.encoder_config.d_model
-            qformer_config.add_cross_attention = True
-            qformer_config.is_decoder = True
-            qformer_config._attn_implementation = "sdpa" if getattr(self.config, 'use_flash_attention', False) else "eager"
-
-            self.qformer = BertEncoder(qformer_config)
-            self.proj = nn.Sequential(
-                    nn.LayerNorm(self.config.encoder_config.d_model),
-                    nn.Linear(self.config.encoder_config.d_model, self.config.llm_config.hidden_size) # project to llm hidden size
-                )
-        else:
-            raise NotImplementedError(
-                f"connector_mode '{self.config.connector_mode}' not implemented in QformerConnector. "
-                "Supported mode: 'qformer_1'."
-            )
-        
-
-    def forward(self, encoder_hidden_states: List[torch.Tensor]) -> torch.Tensor:
-        """
-        Forward pass of the QformerConnector.
-
-        Args:
-            encoder_hidden_states (List[torch.Tensor]): Layerwise hidden states from the encoder.
-
-        Returns:
-            torch.Tensor: Projected output features.
-        """
-        layer_prompt_outputs = []
-        for idx, encoder_hidden_state in enumerate(encoder_hidden_states):
-            if idx in self.config.target_layer_ids:
-                layer_prompt = self.layer_prompts[self.config.target_layer_ids.index(idx)].expand(encoder_hidden_state.size(0), -1, -1)
-                qformer_output = self.qformer(
-                    hidden_states=layer_prompt,
-                    encoder_hidden_states=encoder_hidden_state,
-                )
-                layer_prompt_output = qformer_output.last_hidden_state
-                layer_prompt_outputs.append(layer_prompt_output)
-        
-        layer_prompt_outputs = torch.stack(layer_prompt_outputs, dim=0)
-        layer_prompt_outputs = layer_prompt_outputs.permute(1, 2, 0, 3)
-        self.norm_weights = torch.nn.functional.softmax(self.layer_weights, dim=-1).unsqueeze(-1)
-        output = (layer_prompt_outputs * self.norm_weights).sum(dim=2) # (b, prompt_size, d_llm)
-        output = self.proj(output)
-        
-        return output
-
-
-
-
-
 class GroupwiseOrthogonalConnector(nn.Module):
     """
-    ORCA-DeSTA connector.
+    Groupwise-orthogonal Q-Former connector.
 
-    This is the paper method: grouped Q-Former tokens with inter-group
-    orthogonality, optional stochastic perturbation encoding, and losses
-    consumed by DeSTA25AudioModel.forward.
+    This is the active connector in the main package path: grouped Q-Former
+    tokens with inter-group and intra-group orthogonality losses.
     """
     def __init__(self, config: 'DeSTA25Config'):
         super().__init__()
@@ -233,23 +149,6 @@ class GroupwiseOrthogonalConnector(nn.Module):
         self.inter_group_weight = getattr(config, 'orca_r1_inter_group_weight', 0.1)
         self.intra_group_weight = getattr(config, 'orca_r1_intra_group_weight', 0.01)
         
-        # H1: Variational Grouping
-        self.variational_enabled = getattr(config, 'variational_grouping_enabled', False)
-        self.variational_kl_weight = getattr(config, 'variational_kl_weight', 0.01)
-        
-        # S1: Enhanced Variational Learning
-        self.s1_kl_annealing_enabled = getattr(config, 's1_kl_annealing_enabled', False)
-        self.s1_kl_annealing_warmup_steps = getattr(config, 's1_kl_annealing_warmup_steps', 2000)
-        self.s1_kl_annealing_cycle_steps = getattr(config, 's1_kl_annealing_cycle_steps', 0)
-        self.s1_free_bits = getattr(config, 's1_free_bits', 0.0)
-        # Default to 0.0 for deterministic inference (use mu)
-        self.s1_inference_alpha = getattr(config, 's1_inference_alpha', 0.0)  
-        
-        if self.variational_enabled:
-            # Project from d_llm to mu and logvar
-            self.mu_proj = nn.Linear(d_llm, d_llm)
-            self.logvar_proj = nn.Linear(d_llm, d_llm)
-
     @staticmethod
     def _sanitize_token_tensor(tensor: torch.Tensor, clip_value: float = 5.0) -> torch.Tensor:
         tensor = torch.nan_to_num(tensor, nan=0.0, posinf=clip_value, neginf=-clip_value)
@@ -260,7 +159,6 @@ class GroupwiseOrthogonalConnector(nn.Module):
         self, 
         encoder_hidden_states: List[torch.Tensor],
         audio_attention_mask: Optional[torch.Tensor] = None,
-        global_step: Optional[int] = None
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass of GroupwiseOrthogonalConnector.
@@ -288,8 +186,6 @@ class GroupwiseOrthogonalConnector(nn.Module):
             if idx in self.target_layer_ids:
                 hidden_state = hidden_state.to(dtype=target_dtype, device=target_device)
                 target_layer_outputs.append(self._sanitize_token_tensor(hidden_state))
-        
-        num_layers = len(target_layer_outputs)
         
         # === OPTIMIZATION: Batch all group queries together ===
         # Instead of: for group in groups: for layer in layers: qformer(...)
@@ -350,76 +246,7 @@ class GroupwiseOrthogonalConnector(nn.Module):
         # Compute group losses
         group_losses = self._compute_group_losses(all_group_tokens, group_centroids)
         
-        # H1/S1: Variational Grouping - Reparameterization and KL Loss with Enhanced Training
-        if self.variational_enabled:
-            # Predict mu and logvar from global_tokens
-            mu = self.mu_proj(global_tokens)  # [B, total_queries, d_llm]
-            logvar = self.logvar_proj(global_tokens)  # [B, total_queries, d_llm]
-            logvar_fp32 = logvar.float().clamp(min=-10.0, max=2.0)
-            
-            # Reparameterization trick
-            std = torch.exp(0.5 * logvar_fp32).to(dtype=mu.dtype)
-            eps = torch.randn_like(std)
-            if self.training:
-                z = mu + eps * std
-            else:
-                # Inference: use z = μ + α σ ⊙ ε for stochastic sampling
-                # α controls variance injection (α=0 → deterministic, α=1 → full sampling)
-                z = mu + self.s1_inference_alpha * std * eps
-            
-            # KL Divergence per dimension: D_KL(q(z|x) || N(0,I))
-            # = -0.5 * (1 + log(sigma^2) - mu^2 - sigma^2) per dimension
-            mu_fp32 = mu.float()
-            kl_per_dim = -0.5 * (1 + logvar_fp32 - mu_fp32.pow(2) - logvar_fp32.exp())
-            
-            # S1: Free Bits - clamp minimum KL per dimension to prevent σ collapse
-            if self.s1_free_bits > 0:
-                kl_per_dim = torch.clamp(kl_per_dim, min=self.s1_free_bits)
-            
-            # Aggregate KL loss (normalized by batch and tokens)
-            kl_loss = kl_per_dim.sum() / (z.shape[0] * z.shape[1] * z.shape[2])
-            
-            # S1: KL Annealing - compute weight based on global_step
-            kl_weight = self._get_annealed_kl_weight(global_step)
-            group_losses['L_kl'] = kl_loss * kl_weight
-            
-            # Log effective KL weight for debugging
-            if self.training:
-                group_losses['kl_weight_effective'] = torch.tensor(kl_weight, device=z.device)
-            
-            z = self._sanitize_token_tensor(z)
-            return z, group_losses
-        
         return global_tokens, group_losses
-    
-    def _get_annealed_kl_weight(self, global_step: Optional[int] = None) -> float:
-        """
-        Compute KL weight with optional linear warmup and cyclical annealing.
-        
-        S1 Enhancement:
-        - Linear warmup: Gradually increase KL weight from 0 to target over warmup_steps
-        - Cyclical annealing: Repeat warmup pattern every cycle_steps (if > 0)
-        
-        This prevents early posterior collapse by letting the model learn reconstruction first.
-        """
-        base_weight = self.variational_kl_weight
-        
-        if not self.s1_kl_annealing_enabled:
-            return base_weight
-        
-        if global_step is None:
-            return base_weight
-        
-        warmup = self.s1_kl_annealing_warmup_steps
-        cycle = self.s1_kl_annealing_cycle_steps
-        
-        if cycle > 0:
-            # Cyclical annealing: repeating warmup pattern
-            step_in_cycle = global_step % cycle
-            return base_weight * min(1.0, step_in_cycle / max(warmup, 1))
-        else:
-            # Linear warmup only
-            return base_weight * min(1.0, global_step / max(warmup, 1))
     
     def _compute_group_losses(
         self, 
@@ -484,26 +311,25 @@ class WhisperPerception(nn.Module):
         self.whisper = WhisperForConditionalGeneration.from_pretrained(
             self.config.encoder_model_id, cache_dir=os.getenv("HF_HOME"))
 
-        # Create connector based on mode. The main package intentionally keeps
-        # only the DeSTA Q-Former baseline plus the ORCA-DeSTA paper method.
-        if _is_orca_desta_mode(config.connector_mode):
+        # The main package intentionally keeps only the groupwise-orthogonal
+        # Q-Former connector. Baseline Q-Former and experimental variants live
+        # in desta.models.legacy.modeling_desta25_experiments.
+        if _is_groupwise_ortho_mode(config.connector_mode):
             self.connector = GroupwiseOrthogonalConnector(config)
-        elif config.connector_mode == "qformer_1":
-            self.connector = QformerConnector(config)
         elif config.connector_mode in LEGACY_CONNECTOR_MODES:
             raise ValueError(
                 f"connector_mode='{config.connector_mode}' is a legacy experiment. "
                 "Use desta.models.legacy.modeling_desta25_experiments for old checkpoints, "
-                "or retrain with connector.mode=orca_desta."
+                "or retrain with connector.mode=groupwise_ortho."
             )
         else:
             raise NotImplementedError(
                 f"connector_mode '{config.connector_mode}' is not supported. "
-                "Use 'qformer_1' or 'orca_desta'."
+                "Use 'groupwise_ortho'."
             )
         
-        # Store ORCA-DeSTA connector losses (populated during forward)
-        self._orca_r1_losses = None
+        # Store groupwise-orthogonal connector losses (populated during forward)
+        self._groupwise_ortho_losses = None
         self._use_safe_whisper_encoder_layer = False
         self._warned_safe_whisper_encoder_layer = False
         
@@ -613,7 +439,7 @@ class WhisperPerception(nn.Module):
 
 
 
-    def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, global_step: Optional[int] = None, **kwargs) -> Union[Tuple[torch.Tensor, List[int]], Tuple[torch.Tensor, torch.Tensor, List[int]]]:
+    def forward(self, input_features: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, transcription_embeddings_list: Optional[List[torch.Tensor]] = None, **kwargs) -> Tuple[torch.Tensor, List[int]]:
         """
         Forward pass of the WhisperPerception.
 
@@ -623,31 +449,23 @@ class WhisperPerception(nn.Module):
             transcription_embeddings_list (Optional[List[torch.Tensor]], optional): List of transcription embeddings. Defaults to None.
 
         Returns:
-            For qformer_1: tuple[torch.Tensor, list[int]]: (audio_features, speech_feature_lengths)
-            For orca_desta: tuple[torch.Tensor, list[int]]: (global_tokens, global_lengths)
+            tuple[torch.Tensor, list[int]]: (global_tokens, global_lengths)
         """
         bs = input_features.size(0)
 
-        result = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list, global_step=global_step)
+        result = self.forward_whisper(input_features=input_features, transcription_embeddings_list=transcription_embeddings_list)
         
-        if _is_orca_desta_mode(self.config.connector_mode):
+        if _is_groupwise_ortho_mode(self.config.connector_mode):
             global_tokens, group_losses = result
-            self._orca_r1_losses = group_losses
-            return global_tokens, [_get_orca_desta_audio_token_size(self.config)] * bs
-        elif self.config.connector_mode == "qformer_1":
-            # result is audio_features tensor
-            audio_features = result
-            speech_feature_lengths = [self.config.prompt_size] * bs
-            return audio_features, speech_feature_lengths
+            self._groupwise_ortho_losses = group_losses
+            return global_tokens, [_get_groupwise_ortho_audio_token_size(self.config)] * bs
         raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
 
 
-    def forward_whisper(self, input_features, attention_mask=None, transcription_embeddings_list=None, global_step=None, **kwargs):
+    def forward_whisper(self, input_features, attention_mask=None, transcription_embeddings_list=None, **kwargs):
         """
         Forward through Whisper encoder layers.
         """
-        bs = input_features.size(0)
-        
         # Ensure input_features match Whisper's dtype
         target_dtype = self.whisper.model.encoder.conv1.weight.dtype
         target_device = self.whisper.model.encoder.conv1.weight.device
@@ -672,41 +490,10 @@ class WhisperPerception(nn.Module):
         hidden_states = inputs_embeds + embed_pos
         hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
         
-        # Collect all layer outputs for ORCA
+        # Collect all layer outputs for the groupwise connector.
         all_layer_outputs = []
 
-        if self.config.connector_mode == "qformer_1":
-            layer_prompt_outputs = []
-            for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
-                
-                layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
-                hidden_states = layer_outputs[0]
-                hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
-
-                if idx in self.connector.config.target_layer_ids:
-                    # use different prompt for different layers
-                    layer_prompt = self.connector.layer_prompts[self.connector.config.target_layer_ids.index(idx)].expand(bs, -1, -1)
-                    
-                    # Qformer is a BERTEncoder(but set to decoder) from huggingface Transformers
-                    qformer_output = self.connector.qformer(
-                        layer_prompt,
-                        encoder_hidden_states=hidden_states.to(dtype=layer_prompt.dtype),
-                    )
-                    
-                    layer_prompt_output = qformer_output.last_hidden_state[:, :self.config.prompt_size, :] # (b, prompt_size, d_model)
-                    layer_prompt_outputs.append(layer_prompt_output) # list of (b, prompt_size, d_model)
-
-            layer_prompt_outputs = torch.stack(layer_prompt_outputs, dim=0) # (layer, b, prompt_size, d_model)
-            layer_prompt_outputs = layer_prompt_outputs.permute(1, 2, 0, 3) # (b, prompt_size, layer, d_model)
-            
-            self.norm_weights = torch.nn.functional.softmax(self.connector.layer_weights, dim=-1).unsqueeze(-1) # (prompt_size, layer, 1)
-            prompt_output = (layer_prompt_outputs * self.norm_weights).sum(dim=2) # (b, prompt_size, d_model)
-            assert prompt_output.size(1) == self.config.prompt_size, prompt_output.size()
-            prompt_output = self.connector.proj(prompt_output)
-            
-            return prompt_output
-        
-        elif _is_orca_desta_mode(self.config.connector_mode):
+        if _is_groupwise_ortho_mode(self.config.connector_mode):
             # Collect all layer hidden states
             for idx, encoder_layer in enumerate(self.whisper.model.encoder.layers):
                 layer_outputs = self._forward_encoder_layer(encoder_layer, hidden_states, attention_mask=None)
@@ -714,10 +501,9 @@ class WhisperPerception(nn.Module):
                 hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=5.0, neginf=-5.0).clamp(min=-5.0, max=5.0)
                 all_layer_outputs.append(hidden_states)
             
-            return self.connector(all_layer_outputs, global_step=global_step)
+            return self.connector(all_layer_outputs)
 
-        else:
-            raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
+        raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
     
     
 
@@ -727,41 +513,36 @@ class DeSTA25Config(PretrainedConfig):
     def __init__(self, 
                  llm_model_id="DeSTA-ntu/Llama-3.1-8B-Instruct",
                  encoder_model_id="openai/whisper-large-v3",
-                 connector_mode="qformer_1", 
+                 connector_mode=GROUPWISE_ORTHO_MODE,
                  qformer_num_hidden_layers=2, 
                  prompt_size=64, 
                  use_lora=False,
                  audio_locator="<|AUDIO|>",
                  placeholder_token="<|reserved_special_token_87|>",
                  
-                 # ORCA-DeSTA configuration
+                 # Groupwise-orthogonal connector configuration
                  orca_r1_num_groups=8,
                  orca_r1_queries_per_group=8,
                  orca_r1_inter_group_weight=0.1,
                  orca_r1_intra_group_weight=0.01,
                  
-                 # H1: Variational Grouping configuration
-                 variational_grouping_enabled=False,
-                 variational_kl_weight=0.01,
-                 
-                 # G1: Modality-DPO configuration
-                 modality_dpo_enabled=False,
-                 modality_dpo_beta=0.1,
-                 
-                 # P1: ASR Robustness configuration
-                 asr_dropout_prob=0.0,
-                 
-                 # Stochastic perturbation encoding details
-                 s1_kl_annealing_enabled=False,
-                 s1_kl_annealing_warmup_steps=2000,
-                 s1_kl_annealing_cycle_steps=0,  # 0 = no cycling, just linear warmup
-                 s1_free_bits=0.0,  # Minimum KL per dimension to prevent σ collapse
-                 s1_inference_alpha=0.0,          # σ scaling for inference (0=deterministic, 1=full sampling)
-                 
                  # Optimization flags
                  use_flash_attention=True,
                  
                  **kwargs):
+        for legacy_key in (
+            "variational_grouping_enabled",
+            "variational_kl_weight",
+            "modality_dpo_enabled",
+            "modality_dpo_beta",
+            "asr_dropout_prob",
+            "s1_kl_annealing_enabled",
+            "s1_kl_annealing_warmup_steps",
+            "s1_kl_annealing_cycle_steps",
+            "s1_free_bits",
+            "s1_inference_alpha",
+        ):
+            kwargs.pop(legacy_key, None)
         
         super().__init__(**kwargs)
 
@@ -780,32 +561,14 @@ class DeSTA25Config(PretrainedConfig):
         self.use_lora = use_lora
         self.use_flash_attention = use_flash_attention
 
-        # ORCA-DeSTA configuration. Attribute names keep orca_r1_* for
-        # checkpoint compatibility with earlier experiment runs.
+        # Groupwise-orthogonal configuration. Attribute names keep orca_r1_*
+        # for checkpoint compatibility with earlier experiment runs.
         self.orca_r1_num_groups = orca_r1_num_groups
         self.orca_r1_queries_per_group = orca_r1_queries_per_group
         self.orca_r1_inter_group_weight = orca_r1_inter_group_weight
         self.orca_r1_intra_group_weight = orca_r1_intra_group_weight
 
-        # H1: Variational Grouping configuration
-        self.variational_grouping_enabled = variational_grouping_enabled
-        self.variational_kl_weight = variational_kl_weight
-        
-        # G1: Modality-DPO configuration
-        self.modality_dpo_enabled = modality_dpo_enabled
-        self.modality_dpo_beta = modality_dpo_beta
-        
-        # P1: ASR Dropout
-        self.asr_dropout_prob = asr_dropout_prob
-        
-        # Stochastic perturbation encoding
-        self.s1_kl_annealing_enabled = s1_kl_annealing_enabled
-        self.s1_kl_annealing_warmup_steps = s1_kl_annealing_warmup_steps
-        self.s1_kl_annealing_cycle_steps = s1_kl_annealing_cycle_steps
-        self.s1_free_bits = s1_free_bits
-        self.s1_inference_alpha = s1_inference_alpha
-
-        self.info = "DeSTA2.5 with ORCA-DeSTA connector"
+        self.info = "DeSTA2.5 with groupwise-orthogonal Q-Former connector"
 
 
 
@@ -845,8 +608,8 @@ class DeSTA25AudioModel(PreTrainedModel):
         logging.info(f"Loading Audio model from {self.config.encoder_model_id}")
         self.perception = WhisperPerception(self.config)
 
-        if _is_orca_desta_mode(self.config.connector_mode):
-            logging.info("Enabling ORCA-DeSTA components")
+        if _is_groupwise_ortho_mode(self.config.connector_mode):
+            logging.info("Enabling groupwise-orthogonal Q-Former connector")
 
         self.configure_trainable_parameters()
         
@@ -861,22 +624,20 @@ class DeSTA25AudioModel(PreTrainedModel):
                 batch_transcription_ids,
                 batch_start_positions,
                 labels=None,
-                global_step=None,  # S1: For KL annealing
                 **kwargs):
         
-        # Prepare inputs, which handles both ORCA and non-ORCA paths
+        # Prepare inputs for the groupwise connector path.
         prepare_result = self._prepare_inputs_for_llm(
             input_ids=input_ids, 
             attention_mask=attention_mask, 
             batch_features=batch_features,
             batch_transcription_ids=batch_transcription_ids, 
             batch_start_positions=batch_start_positions,
-            global_step=global_step  # S1: Pass global_step
         )
         
-        is_orca_desta_mode = _is_orca_desta_mode(self.config.connector_mode)
+        is_groupwise_ortho_mode = _is_groupwise_ortho_mode(self.config.connector_mode)
         
-        if is_orca_desta_mode:
+        if is_groupwise_ortho_mode:
             inputs_embeds = prepare_result
             
             # Call LLM 
@@ -890,64 +651,25 @@ class DeSTA25AudioModel(PreTrainedModel):
             total_loss = lm_loss
             outputs.lm_loss = lm_loss
             
-            # Collect ORCA-DeSTA connector losses.
-            orca_losses = getattr(self.perception, "_orca_r1_losses", None)
+            # Collect groupwise-orthogonal connector losses.
+            groupwise_losses = getattr(self.perception, "_groupwise_ortho_losses", None)
             
             # Initialize loss log dict (detached values for trainer logging)
-            orca_loss_log = {}
-            orca_total = 0.0
+            groupwise_loss_log = {}
+            groupwise_total = 0.0
             
-            # Add only actual loss terms. Metrics like kl_weight_effective are logged
-            # but not optimized.
-            if outputs.loss is not None and orca_losses is not None:
-                for name, loss in orca_losses.items():
+            # Add only actual loss terms.
+            if outputs.loss is not None and groupwise_losses is not None:
+                for name, loss in groupwise_losses.items():
                     if loss is not None and isinstance(loss, torch.Tensor):
                         loss_value = loss.detach().float().item()
-                        orca_loss_log[name] = loss_value
+                        groupwise_loss_log[name] = loss_value
                         if name.startswith("L_"):
                             if torch.isfinite(loss.detach()).all():
                                 total_loss = total_loss + loss
-                                orca_total += loss_value
+                                groupwise_total += loss_value
                             else:
-                                logging.warning("Skipping non-finite ORCA loss %s=%s", name, loss_value)
-            
-            # === G1: Modality-DPO Loss ===
-            # Make the model prefer predictions WITH audio over predictions WITHOUT audio
-            if getattr(self.config, 'modality_dpo_enabled', False) and labels is not None:
-                beta = getattr(self.config, 'modality_dpo_beta', 0.1)
-                
-                # Get log probs from full model (with audio) - already computed above
-                logits_full = outputs.logits
-                log_probs_full = self._get_target_log_probs(logits_full, labels)
-                
-                # Forward pass WITHOUT audio: keep text/transcript embeddings,
-                # zero only the audio-token spans created by the connector.
-                blind_embeds = self._make_blind_inputs_embeds(inputs_embeds.detach())
-                
-                with torch.no_grad():
-                    outputs_blind = self.llm_model(
-                        inputs_embeds=blind_embeds,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                    )
-                    log_probs_blind = self._get_target_log_probs(outputs_blind.logits, labels)
-                
-                # DPO Loss: -log_sigmoid(beta * (log_probs_full - log_probs_blind))
-                logits_diff = torch.nan_to_num(
-                    log_probs_full - log_probs_blind,
-                    nan=0.0,
-                    posinf=50.0,
-                    neginf=-50.0,
-                ).clamp(min=-50.0, max=50.0)
-                loss_dpo = -F.logsigmoid(beta * logits_diff).mean()
-                
-                loss_dpo_value = loss_dpo.detach().float().item()
-                orca_loss_log["L_dpo"] = loss_dpo_value
-                if torch.isfinite(loss_dpo.detach()).all():
-                    total_loss = total_loss + loss_dpo
-                    orca_total += loss_dpo_value
-                else:
-                    logging.warning("Skipping non-finite Modality-DPO loss: %s", loss_dpo_value)
+                                logging.warning("Skipping non-finite groupwise loss %s=%s", name, loss_value)
             
             outputs.loss = total_loss
             try:
@@ -955,27 +677,19 @@ class DeSTA25AudioModel(PreTrainedModel):
             except TypeError:
                 pass
             # Attach losses to outputs
-            outputs.orca_losses = orca_loss_log
-            outputs.orca_total_loss = orca_total
-            self._orca_desta_loss_log = orca_loss_log
-            self._orca_desta_loss_total = orca_total
+            outputs.groupwise_ortho_losses = groupwise_loss_log
+            outputs.groupwise_ortho_total_loss = groupwise_total
+            self._groupwise_ortho_loss_log = groupwise_loss_log
+            self._groupwise_ortho_loss_total = groupwise_total
             # Backward-compatible names for older trainer utilities.
-            self._orca_r1_loss_log = orca_loss_log
-            self._orca_r1_loss_total = orca_total
+            self._orca_desta_loss_log = groupwise_loss_log
+            self._orca_desta_loss_total = groupwise_total
+            self._orca_r1_loss_log = groupwise_loss_log
+            self._orca_r1_loss_total = groupwise_total
             
             return outputs
-            
-        else:
-            # Baseline (Q-Former) or other modes
-            is_tuple = isinstance(prepare_result, tuple)
-            inputs_embeds = prepare_result[0] if is_tuple else prepare_result
-            
-            outputs = self.llm_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-            return outputs
+
+        raise NotImplementedError(f"mode {self.config.connector_mode} not implemented")
  
 
     def _prepare_inputs_for_llm(self, 
@@ -984,7 +698,6 @@ class DeSTA25AudioModel(PreTrainedModel):
                                batch_features,
                                batch_transcription_ids,
                                batch_start_positions,
-                               global_step=None  # S1: For KL annealing
         ):
         """
         Prepare the embeddings input for the LLM.
@@ -993,8 +706,7 @@ class DeSTA25AudioModel(PreTrainedModel):
         Batch_start_positions: list of start positions
         
         Returns:
-            For non-ORCA: inputs_embeds tensor
-            For ORCA: (inputs_embeds, global_audio_tokens, transcription_positions)
+            inputs_embeds tensor
         """
 
         N_audio = len(batch_start_positions)
@@ -1021,15 +733,14 @@ class DeSTA25AudioModel(PreTrainedModel):
                 transcription_embeddings = self.llm_model.model.embed_tokens(trans_ids) # (length, dim)
                 transcription_embeddings_list.append(transcription_embeddings)
 
-        # Forward speech encoder and connector
-        # S1: Pass global_step for KL annealing
+        # Forward speech encoder and connector.
         perception_output = self.perception(
             input_features=batch_features, transcription_embeddings_list=transcription_embeddings_list,
-            global_step=global_step
         )
         
         batch_audio_features, batch_audio_feature_lengths = perception_output
-        if _is_orca_desta_mode(self.config.connector_mode):
+        if _is_groupwise_ortho_mode(self.config.connector_mode):
+            self._groupwise_ortho_audio_tokens = batch_audio_features
             self._orca_desta_audio_tokens = batch_audio_features
 
         assert len(batch_start_positions) == len(batch_transcription_ids) == batch_audio_features.size(0) == len(batch_audio_feature_lengths), "batch_start_positions, batch_transcription_ids, audio_features, speech_feature_lengths must have the same length."
@@ -1054,14 +765,6 @@ class DeSTA25AudioModel(PreTrainedModel):
             # get transcription embeddings
             transcription_embeddings = transcription_embeddings_list[audio_batch_idx] # (length, dim)
 
-            if (
-                self.training
-                and getattr(self.config, "asr_dropout_prob", 0.0) > 0
-                and transcription_embeddings.numel() > 0
-            ):
-                drop = torch.rand((), device=transcription_embeddings.device) < self.config.asr_dropout_prob
-                if bool(drop.item()):
-                    transcription_embeddings = torch.zeros_like(transcription_embeddings)
             trans_len = transcription_embeddings.size(0)
             
             # Compute transcription position in final sequence
@@ -1091,41 +794,6 @@ class DeSTA25AudioModel(PreTrainedModel):
 
         return inputs_embeds
 
-    def _make_blind_inputs_embeds(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        blind_embeds = inputs_embeds.clone()
-        for batch_idx, start, end in getattr(self, "_audio_token_spans", []):
-            blind_embeds[batch_idx, start:end] = 0
-        return blind_embeds
-    
-    def _get_target_log_probs(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """
-        Get log probabilities of target tokens from logits.
-        
-        Args:
-            logits: [B, T, V] model output logits
-            labels: [B, T] target labels (-100 for ignored positions)
-            
-        Returns:
-            [B] mean log probability over target tokens per sample
-        """
-        # Match Hugging Face causal LM loss semantics: logits at position t
-        # predict the label at position t+1.
-        shift_logits = logits[:, :-1, :].float()
-        shift_labels = labels[:, 1:].clone()
-        loss_mask = shift_labels != -100
-        shift_labels[shift_labels == -100] = 0  # Replace -100 with 0 for gather
-        
-        # Get log probs for target tokens
-        log_probs = torch.gather(
-            F.log_softmax(shift_logits, dim=-1),
-            dim=2, 
-            index=shift_labels.unsqueeze(2)
-        ).squeeze(2)  # [B, T]
-        log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=-1e4)
-        
-        token_counts = loss_mask.sum(-1).clamp_min(1)
-        return (log_probs * loss_mask).sum(-1) / token_counts  # [B]
-    
     def state_dict(self):
         """
         Only return "trainable" parameters, since most of the parameters are frozen
@@ -1345,7 +1013,11 @@ class DeSTA25AudioModel(PreTrainedModel):
             # RUN ASR
             if asr_features:
                 asr_features = self.processor(asr_features, sampling_rate=16000, return_tensors="pt").input_features
-                asr_features = asr_features.to(self.device).half()
+                whisper_encoder = self.perception.whisper.model.encoder
+                asr_features = asr_features.to(
+                    device=whisper_encoder.conv1.weight.device,
+                    dtype=whisper_encoder.conv1.weight.dtype,
+                )
 
                 transcriptions = self.perception.whisper.generate(
                     input_features=asr_features,
@@ -1512,16 +1184,6 @@ class DeSTA25AudioModel(PreTrainedModel):
         load_result = model.load_state_dict(state_dict, strict=False)
         model._desta_load_missing_keys = list(load_result.missing_keys)
         model._desta_load_unexpected_keys = list(load_result.unexpected_keys)
-        model._desta_checkpoint_variational_keys = [
-            key for key in state_dict
-            if (
-                "mu_proj" in key
-                or "logvar_proj" in key
-                or "log_var_proj" in key
-                or "logsigma_proj" in key
-                or "log_sigma_proj" in key
-            )
-        ]
         del state_dict
 
         return model

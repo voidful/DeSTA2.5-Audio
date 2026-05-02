@@ -40,7 +40,11 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from transformers import TrainingArguments
 
-from desta.models.modeling_desta25 import DeSTA25AudioModel, DeSTA25Config
+from desta.models.modeling_desta25 import (
+    GROUPWISE_ORTHO_ALIASES,
+    DeSTA25AudioModel,
+    DeSTA25Config,
+)
 from desta.trainer.desta_trainer import DeSTA25Trainer
 from desta.trainer.data.simple_dataset import BaseAudioTextDataset
 from desta.utils.utils import run
@@ -94,99 +98,9 @@ def log_git_info():
 
 def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
     """Create and configure the DeSTA25 model."""
-    # ORCA-DeSTA is the paper method. `orca_r1` remains accepted only as a
-    # backward-compatible config alias for older experiment YAMLs.
-    orca_desta_cfg = cfg.model.get("orca_desta", cfg.model.get("orca_r1", {}))
-
-    # Extract stochastic perturbation config. Older experiment YAMLs used a few
-    # names, so accept all of them and map to DeSTA25Config's flat fields.
-    variational_cfg = cfg.model.get("variational_grouping", cfg.model.get("variational", {}))
-    orca_variational_cfg = orca_desta_cfg.get("variational_grouping", orca_desta_cfg.get("variational", {}))
-    s1_cfg = cfg.model.get("s1", cfg.model.get("s1_variational", {}))
-    orca_s1_cfg = orca_desta_cfg.get("s1", orca_desta_cfg.get("s1_variational", {}))
-    variational_grouping_enabled = cfg.model.get(
-        "variational_grouping_enabled",
-        variational_cfg.get(
-            "enabled",
-            orca_variational_cfg.get(
-                "enabled",
-                orca_desta_cfg.get("variational_grouping_enabled", False),
-            ),
-        ),
-    )
-    variational_kl_weight = cfg.model.get(
-        "variational_kl_weight",
-        variational_cfg.get(
-            "kl_weight",
-            orca_variational_cfg.get(
-                "kl_weight",
-                orca_desta_cfg.get("variational_kl_weight", 0.01),
-            ),
-        ),
-    )
-    s1_kl_annealing_enabled = cfg.model.get(
-        "s1_kl_annealing_enabled",
-        s1_cfg.get(
-            "kl_annealing_enabled",
-            orca_s1_cfg.get(
-                "kl_annealing_enabled",
-                orca_desta_cfg.get("s1_kl_annealing_enabled", False),
-            ),
-        ),
-    )
-    s1_kl_annealing_warmup_steps = cfg.model.get(
-        "s1_kl_annealing_warmup_steps",
-        s1_cfg.get(
-            "kl_annealing_warmup_steps",
-            orca_s1_cfg.get(
-                "kl_annealing_warmup_steps",
-                orca_desta_cfg.get("s1_kl_annealing_warmup_steps", 2000),
-            ),
-        ),
-    )
-    s1_kl_annealing_cycle_steps = cfg.model.get(
-        "s1_kl_annealing_cycle_steps",
-        s1_cfg.get(
-            "kl_annealing_cycle_steps",
-            orca_s1_cfg.get(
-                "kl_annealing_cycle_steps",
-                orca_desta_cfg.get("s1_kl_annealing_cycle_steps", 0),
-            ),
-        ),
-    )
-    s1_free_bits = cfg.model.get(
-        "s1_free_bits",
-        s1_cfg.get(
-            "free_bits",
-            orca_s1_cfg.get(
-                "free_bits",
-                orca_desta_cfg.get("s1_free_bits", 0.0),
-            ),
-        ),
-    )
-    s1_inference_alpha = cfg.model.get(
-        "s1_inference_alpha",
-        s1_cfg.get(
-            "inference_alpha",
-            orca_s1_cfg.get(
-                "inference_alpha",
-                orca_desta_cfg.get("s1_inference_alpha", 0.0),
-            ),
-        ),
-    )
-    modality_dpo_cfg = cfg.model.get("modality_dpo", {})
-    modality_dpo_enabled = cfg.model.get(
-        "modality_dpo_enabled",
-        modality_dpo_cfg.get("enabled", orca_desta_cfg.get("modality_dpo_enabled", False)),
-    )
-    modality_dpo_beta = cfg.model.get(
-        "modality_dpo_beta",
-        modality_dpo_cfg.get("beta", orca_desta_cfg.get("modality_dpo_beta", 0.1)),
-    )
-    asr_dropout_cfg = cfg.model.get("asr_dropout", {})
-    asr_dropout_prob = cfg.model.get(
-        "asr_dropout_prob",
-        asr_dropout_cfg.get("prob", orca_desta_cfg.get("asr_dropout_prob", 0.0)),
+    groupwise_cfg = cfg.model.get(
+        "groupwise_ortho",
+        cfg.model.get("orca_desta", cfg.model.get("orca_r1", {})),
     )
     
     model_config = DeSTA25Config(
@@ -199,32 +113,20 @@ def create_model(cfg: DictConfig) -> DeSTA25AudioModel:
         use_flash_attention=cfg.model.connector.get("use_flash_attention", True),
         audio_locator=cfg.model.audio_locator,
         placeholder_token=cfg.model.placeholder_token,
-        # ORCA-DeSTA connector configuration. DeSTA25Config keeps the old
-        # orca_r1_* attribute names for checkpoint compatibility.
-        orca_r1_num_groups=orca_desta_cfg.get("num_groups", 8),
-        orca_r1_queries_per_group=orca_desta_cfg.get("queries_per_group", 8),
-        orca_r1_inter_group_weight=orca_desta_cfg.get("inter_group_weight", 0.1),
-        orca_r1_intra_group_weight=orca_desta_cfg.get("intra_group_weight", 0.01),
-        # Variational grouping / S1 configuration
-        variational_grouping_enabled=variational_grouping_enabled,
-        variational_kl_weight=variational_kl_weight,
-        s1_kl_annealing_enabled=s1_kl_annealing_enabled,
-        s1_kl_annealing_warmup_steps=s1_kl_annealing_warmup_steps,
-        s1_kl_annealing_cycle_steps=s1_kl_annealing_cycle_steps,
-        s1_free_bits=s1_free_bits,
-        s1_inference_alpha=s1_inference_alpha,
-        modality_dpo_enabled=modality_dpo_enabled,
-        modality_dpo_beta=modality_dpo_beta,
-        asr_dropout_prob=asr_dropout_prob,
+        # DeSTA25Config keeps the old orca_r1_* attribute names for checkpoint
+        # compatibility, but the active method is groupwise_ortho only.
+        orca_r1_num_groups=groupwise_cfg.get("num_groups", 8),
+        orca_r1_queries_per_group=groupwise_cfg.get("queries_per_group", 8),
+        orca_r1_inter_group_weight=groupwise_cfg.get("inter_group_weight", 0.1),
+        orca_r1_intra_group_weight=groupwise_cfg.get("intra_group_weight", 0.01),
     )
     logging.info(
-        "Variational grouping config: enabled=%s, kl_weight=%s, "
-        "s1_kl_annealing=%s, modality_dpo=%s, asr_dropout=%s",
-        model_config.variational_grouping_enabled,
-        model_config.variational_kl_weight,
-        model_config.s1_kl_annealing_enabled,
-        model_config.modality_dpo_enabled,
-        model_config.asr_dropout_prob,
+        "Groupwise-orthogonal connector config: groups=%s, queries_per_group=%s, "
+        "inter_group_weight=%s, intra_group_weight=%s",
+        model_config.orca_r1_num_groups,
+        model_config.orca_r1_queries_per_group,
+        model_config.orca_r1_inter_group_weight,
+        model_config.orca_r1_intra_group_weight,
     )
     
     model = DeSTA25AudioModel(model_config)
@@ -257,7 +159,7 @@ def create_training_args(cfg: DictConfig) -> TrainingArguments:
         run_name=cfg.name,
         remove_unused_columns=False,
         label_names=["labels"],
-        ddp_find_unused_parameters=cfg.model.connector.mode in ["orca_desta", "orca_r1"],
+        ddp_find_unused_parameters=cfg.model.connector.mode in GROUPWISE_ORTHO_ALIASES,
         gradient_checkpointing=getattr(cfg.trainer, "gradient_checkpointing", False),
         dataloader_num_workers=getattr(cfg.dataset.train_ds, "num_workers", 4),
         dataloader_pin_memory=getattr(cfg.dataset.train_ds, "pin_memory", True),

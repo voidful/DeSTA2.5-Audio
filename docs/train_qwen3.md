@@ -7,7 +7,7 @@
 ```
 examples/train/
 ├── config/
-│   ├── desta25_qwen3-4B_Qformer6L.yaml    # Qwen3-4B 模型配置
+│   ├── desta25_qwen3-4B_groupwise_ortho.yaml         # Qwen3-4B groupwise_ortho 配置
 │   └── dataset/
 │       └── DestaAQA-5M_local.yaml          # 本地數據集配置
 ├── run_desta_qwen3_4b.sbatch               # SLURM 批次腳本
@@ -16,14 +16,17 @@ examples/train/
 
 ## 🔧 配置說明
 
-### 模型配置 (`desta25_qwen3-4B_Qformer6L.yaml`)
+### 模型配置 (`desta25_qwen3-4B_groupwise_ortho.yaml`)
 
 | 參數 | 值 | 說明 |
 |------|-----|------|
 | `model.llm.model_id` | `Qwen/Qwen3-4B-Instruct-2507` | Qwen3 4B 指令微調模型 |
 | `model.encoder.model_id` | `openai/whisper-large-v3` | Whisper Large V3 音訊編碼器 |
+| `model.connector.mode` | `groupwise_ortho` | Groupwise-orthogonal Q-Former |
 | `model.connector.num_hidden_layers` | 6 | Q-Former 層數 |
 | `model.connector.prompt_size` | 64 | 音訊 prompt 長度 |
+| `model.groupwise_ortho.num_groups` | 8 | group 數 |
+| `model.groupwise_ortho.queries_per_group` | 8 | 每個 group 的 query 數 |
 | `model.placeholder_token` | `<\|video_pad\|>` | Qwen3 的 placeholder token |
 | `model.audio_locator` | `<\|AUDIO\|>` | 音訊位置標記 |
 
@@ -99,7 +102,7 @@ export PYTHONPATH="/work/voidful2nlp/DeSTA2.5-Audio:$PYTHONPATH"
 # 執行訓練
 python examples/train/train_desta.py \
     --config-path=config \
-    --config-name=desta25_qwen3-4B_Qformer6L \
+    --config-name=desta25_qwen3-4B_groupwise_ortho \
     trainer.devices=[0,1,2,3,4,5,6,7] \
     +dataset=DestaAQA-5M_local \
     +exp_dir=/work/voidful2nlp/desta/outputs/qwen3-4b
@@ -110,7 +113,7 @@ python examples/train/train_desta.py \
 ```bash
 python examples/train/train_desta.py \
     --config-path=config \
-    --config-name=desta25_qwen3-4B_Qformer6L \
+    --config-name=desta25_qwen3-4B_groupwise_ortho \
     trainer.devices=[0] \
     +dataset=DestaAQA-5M_local \
     +exp_dir=./test_output \
@@ -190,4 +193,3 @@ Qwen3 模型使用 `<|video_pad|>` 作為 placeholder token，不要使用 Llama
 - [DeSTA2.5-Audio Paper](https://arxiv.org/abs/2507.02768)
 - [Qwen3 Model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
 - [Whisper Large V3](https://huggingface.co/openai/whisper-large-v3)
-
